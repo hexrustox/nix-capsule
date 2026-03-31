@@ -40,18 +40,18 @@
             default = capsule-lib.mkShell {
               image = "ubuntu:latest";
               devShell = "container";
-              socketPath = "/tmp/test";
+              socketPath = "/tmp/ncap-socket";
               containerName = "ncap";
               opts = [
                 "-e HOME"
                 "-v \"$HOME/.cargo\":\"$HOME/.cargo\""
               ];
-              wrappers = {
-                codebook = "codebook";
-                rust-analyzer = "rust-analyzer";
-                nixfmt = "nixfmt";
-                taplo = "taplo";
-              };
+              wrappers = [
+                "codebook"
+                "rust-analyzer"
+                "nixfmt"
+                "taplo"
+              ];
             };
 
             container = pkgs.mkShellNoCC {

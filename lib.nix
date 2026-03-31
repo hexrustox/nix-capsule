@@ -9,7 +9,7 @@
       opts ? [ ],
       removeOpts ? [ ],
       autoStart ? true,
-      wrappers ? { },
+      wrappers ? [ ],
     }:
     let
       lib = pkgs.lib;
@@ -26,6 +26,7 @@
           "-v /etc:/etc"
           "-v \"$project_root\":\"$project_root\""
           "-w \"$project_root\""
+          "-e PATH=${lib.makeBinPath [ pkgs.nix ]}"
           "-e NCAP_SOCKET"
           "-v ${socketDir}:${socketDir}"
         ];
@@ -38,7 +39,7 @@
         podman run \
           ${lib.concatStringsSep " " finalOpts} -- \
           ${image} \
-          ${pkgs.nix}/bin/nix develop .#${devShell} \
+          nix develop .#${devShell} \
           --command ${nixCapsule}/bin/ncap-server
       '';
 
@@ -49,6 +50,14 @@
       restartContainer = pkgs.writeShellScriptBin "restart-container" ''
         stop-container && start-container
       '';
+
+      enterContainer = pkgs.writeShellScriptBin "enter-container" ''
+        podman exec -it ${containerName} /bin/sh
+      '';
+
+      containerLog = pkgs.writeShellScriptBin "container-log" ''
+        podman logs ${containerName}
+      '';
     in
     pkgs.mkShellNoCC {
       packages = [
@@ -56,9 +65,20 @@
         startContainer
         stopContainer
         restartContainer
+        enterContainer
+        containerLog
       ]
       ++ (map ({ name, value }: pkgs.writeShellScriptBin name ''ncap ${value} "$@"'') (
-        lib.attrsToList wrappers
+        map (
+          elem:
+          if builtins.isString elem then
+            {
+              name = elem;
+              value = elem;
+            }
+          else
+            elem
+        ) wrappers
       ));
 
       NCAP_SOCKET = socketPath;

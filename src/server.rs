@@ -28,6 +28,8 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&cli.socket)
         .with_context(|| format!("failed to bind socket: {}", cli.socket))?;
 
+    eprintln!("listening on {}", cli.socket);
+
     loop {
         let (stream, _) = listener
             .accept()
