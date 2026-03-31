@@ -67,6 +67,8 @@
               in
               pkgs.mkShellNoCC {
                 packages = with pkgs; [
+                  opencode
+                  
                   cargo-deny
                   cargo-edit
                   cargo-machete

@@ -6,10 +6,13 @@
       devShell,
       socketPath,
       containerName,
+      # TODO rename opts to options
       opts ? [ ],
       removeOpts ? [ ],
+      useDefaultOpts ? true,
       autoStart ? true,
       wrappers ? [ ],
+      shellHook ? "",
     }:
     let
       lib = pkgs.lib;
@@ -18,7 +21,7 @@
         let
           socketDir = builtins.dirOf socketPath;
         in
-        [
+        lib.optionals useDefaultOpts [
           "-d"
           "--replace"
           "--name ${containerName}"
@@ -33,15 +36,20 @@
 
       finalOpts = lib.subtractLists removeOpts (defaultOpts ++ opts);
 
-      startContainer = pkgs.writeShellScriptBin "start-container" ''
-        project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+      startContainer =
+        let
+          devShellPath =
+            if (lib.hasPrefix "." devShell) || (lib.hasPrefix "/" devShell) then devShell else ".#${devShell}";
+        in
+        pkgs.writeShellScriptBin "start-container" ''
+          project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
-        podman run \
-          ${lib.concatStringsSep " " finalOpts} -- \
-          ${image} \
-          nix develop .#${devShell} \
-          --command ${nixCapsule}/bin/ncap-server
-      '';
+          podman run \
+            ${lib.concatStringsSep " " finalOpts} -- \
+            ${image} \
+            nix develop ${devShellPath} \
+            --command ${nixCapsule}/bin/ncap-server
+        '';
 
       stopContainer = pkgs.writeShellScriptBin "stop-container" ''
         podman stop -t 0 ${containerName}
@@ -93,6 +101,8 @@
         in
         ''
           ${init}
+
+          ${shellHook}
         '';
     };
 }
