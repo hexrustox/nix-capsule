@@ -6,6 +6,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-parts.url = "github:hercules-ci/flake-parts";
+    nix-capsule.url = "gitlab:codnixus/nix-capsule?ref=v0.1.0";
   };
 
   outputs =
@@ -22,16 +23,21 @@
             inherit system;
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
-          capsule-lib = import ./lib.nix {
-            inherit pkgs;
-            nixCapsule = self'.packages.ncap;
-          };
         in
         {
           packages.ncap = pkgs.callPackage ./package.nix { };
 
+          lib =
+            args:
+            import ./lib.nix (
+              args
+              // {
+                nixCapsule = self'.packages.ncap;
+              }
+            );
+
           devShells = {
-            default = capsule-lib.mkShell {
+            default = (inputs.nix-capsule.lib.${system} { inherit pkgs; }).mkShell {
               image = "ubuntu:latest";
               devShell = "container";
               socketPath = "/tmp/test";
@@ -69,6 +75,11 @@
           };
         };
 
-      systems = [ "x86_64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
     };
 }
