@@ -2,20 +2,21 @@
   pkgs ? import <nixpkgs> { },
 }:
 let
-  src = pkgs.lib.cleanSourceWith {
-    src = ./.;
-    filter =
-      path: type:
-      let
-        base = builtins.baseNameOf path;
-      in
-      builtins.elem base [
-        "src"
-        "Cargo.toml"
-        "Cargo.lock"
-        ".cargo"
-      ];
-  };
+  lib = pkgs.lib;
+  src =
+    let
+      src = ./.;
+    in
+    lib.cleanSourceWith {
+      inherit src;
+      filter =
+        path: type:
+        let
+          path' = lib.removePrefix (builtins.toString src) path;
+          f = lib.hasPrefix "/src" path' || lib.hasPrefix "/.cargo" path' || lib.hasPrefix "/Cargo." path';
+        in
+        f;
+    };
 in
 pkgs.rustPlatform.buildRustPackage {
   inherit src;
