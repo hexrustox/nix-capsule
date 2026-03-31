@@ -22,7 +22,6 @@
 
       perSystem =
         {
-          self',
           system,
           ...
         }:
@@ -44,34 +43,42 @@
               containerName = "ncap";
               opts = [
                 "-e HOME"
+                "-e NIX_PATH"
                 "-v \"$HOME/.cargo\":\"$HOME/.cargo\""
               ];
               wrappers = [
                 "codebook"
                 "rust-analyzer"
-                "nixfmt"
+                "nixd"
                 "taplo"
               ];
             };
 
-            container = pkgs.mkShellNoCC {
-              packages = with pkgs; [
-                cargo-deny
-                cargo-edit
-                cargo-machete
-                clang
-                codebook
-                mold
-                nixfmt
-                taplo
-                (rust-bin.stable."1.93.1".default.override {
-                  extensions = [
-                    "rust-src" # for rust-analyzer
-                    "rust-analyzer"
-                  ];
-                })
-              ];
-            };
+            container =
+              let
+                rust = (
+                  pkgs.rust-bin.stable."1.93.1".default.override {
+                    extensions = [
+                      "rust-src" # for rust-analyzer
+                      "rust-analyzer"
+                    ];
+                  }
+                );
+              in
+              pkgs.mkShellNoCC {
+                packages = with pkgs; [
+                  cargo-deny
+                  cargo-edit
+                  cargo-machete
+                  clang
+                  codebook
+                  mold
+                  nixd
+                  nixfmt
+                  rust
+                  taplo
+                ];
+              };
           };
         };
 
