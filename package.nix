@@ -3,20 +3,12 @@
 }:
 let
   lib = pkgs.lib;
-  src =
-    let
-      src = ./.;
-    in
-    lib.cleanSourceWith {
-      inherit src;
-      filter =
-        path: type:
-        let
-          path' = lib.removePrefix (builtins.toString src) path;
-          f = lib.hasPrefix "/src" path' || lib.hasPrefix "/.cargo" path' || lib.hasPrefix "/Cargo." path';
-        in
-        f;
-    };
+  src = lib.sourceByRegex ./. [
+    "Cargo\.lock"
+    "Cargo\.toml"
+    "src"
+    ".*\.rs$"
+  ];
 in
 pkgs.rustPlatform.buildRustPackage {
   inherit src;
