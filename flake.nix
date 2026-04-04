@@ -41,7 +41,7 @@
               devShell = "container";
               socketPath = "/tmp/ncap-socket";
               containerName = "ncap";
-              opts = [
+              options = [
                 "-e HOME"
                 "-e NIX_PATH"
                 "-v \"$HOME/.cargo\":\"$HOME/.cargo\""
@@ -68,7 +68,7 @@
               pkgs.mkShellNoCC {
                 packages = with pkgs; [
                   opencode
-                  
+
                   cargo-deny
                   cargo-edit
                   cargo-machete

@@ -6,11 +6,11 @@
       devShell,
       socketPath,
       containerName,
-      # TODO rename opts to options
-      opts ? [ ],
-      removeOpts ? [ ],
-      useDefaultOpts ? true,
+      options ? [ ],
+      removeOptions ? [ ],
+      useDefaultOptions ? true,
       autoStart ? true,
+      wait ? true,
       wrappers ? [ ],
       shellHook ? "",
     }:
@@ -21,34 +21,36 @@
         let
           socketDir = builtins.dirOf socketPath;
         in
-        lib.optionals useDefaultOpts [
-          "-d"
+        lib.optionals useDefaultOptions [
           "--replace"
           "--name ${containerName}"
           "-v /nix:/nix"
           "-v /etc:/etc"
           "-v \"$project_root\":\"$project_root\""
           "-w \"$project_root\""
-          "-e PATH=${lib.makeBinPath [ pkgs.nix ]}"
           "-e NCAP_SOCKET"
           "-v ${socketDir}:${socketDir}"
         ];
 
-      finalOpts = lib.subtractLists removeOpts (defaultOpts ++ opts);
+      finalOpts = lib.subtractLists removeOptions (defaultOpts ++ options);
+      devShellPath =
+        if (lib.hasPrefix "." devShell) || (lib.hasPrefix "/" devShell) then devShell else ".#${devShell}";
 
       startContainer =
         let
-          devShellPath =
-            if (lib.hasPrefix "." devShell) || (lib.hasPrefix "/" devShell) then devShell else ".#${devShell}";
+          blocking = "podman exec ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command true";
         in
         pkgs.writeShellScriptBin "start-container" ''
           project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
-          podman run \
+          podman run -d \
             ${lib.concatStringsSep " " finalOpts} -- \
             ${image} \
-            nix develop ${devShellPath} \
-            --command ${nixCapsule}/bin/ncap-server
+            sleep infinity
+
+          ${lib.optionalString wait blocking}
+
+          podman exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${nixCapsule}/bin/ncap-server
         '';
 
       stopContainer = pkgs.writeShellScriptBin "stop-container" ''
@@ -60,11 +62,7 @@
       '';
 
       enterContainer = pkgs.writeShellScriptBin "enter-container" ''
-        podman exec -it ${containerName} /bin/sh
-      '';
-
-      containerLog = pkgs.writeShellScriptBin "container-log" ''
-        podman logs ${containerName}
+        podman exec -it ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath}
       '';
     in
     pkgs.mkShellNoCC {
@@ -74,7 +72,6 @@
         stopContainer
         restartContainer
         enterContainer
-        containerLog
       ]
       ++ (map ({ name, value }: pkgs.writeShellScriptBin name ''ncap ${value} "$@"'') (
         map (
