@@ -39,7 +39,7 @@
             default = capsule-lib.mkShell {
               image = "ubuntu:latest";
               devShell = "container";
-              socketPath = "/tmp/ncap-socket";
+              socketPath = "/tmp/nix-capsule/ncap-socket";
               containerName = "ncap";
               options = [
                 "-e HOME"

@@ -9,8 +9,10 @@
       options ? [ ],
       removeOptions ? [ ],
       useDefaultOptions ? true,
+      hardenContainer ? false,
       autoStart ? true,
       wait ? true,
+      nixShellName ? "nix-capsule",
       wrappers ? [ ],
       shellHook ? "",
     }:
@@ -31,8 +33,12 @@
           "-e NCAP_SOCKET"
           "-v ${socketDir}:${socketDir}"
         ];
+      hardenOpts = lib.optionals hardenContainer [
+        "--cap-drop=all"
+        "--security-opt=no-new-privileges"
+      ];
+      finalOpts = lib.subtractLists removeOptions (defaultOpts ++ hardenOpts ++ options);
 
-      finalOpts = lib.subtractLists removeOptions (defaultOpts ++ options);
       devShellPath =
         if (lib.hasPrefix "." devShell) || (lib.hasPrefix "/" devShell) then devShell else ".#${devShell}";
 
@@ -66,6 +72,8 @@
       '';
     in
     pkgs.mkShellNoCC {
+      name = nixShellName;
+
       packages = [
         nixCapsule
         startContainer
