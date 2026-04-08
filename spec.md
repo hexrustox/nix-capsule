@@ -185,12 +185,6 @@ The socket must be reachable by both:
 
 It should be isolated per project or session as appropriate.
 
-## Security model
-
-`nix-capsule` is a convenience and isolation layer, not a full sandbox.
-
-Default behavior should prioritize functionality. Stronger isolation is configured by the user through Podman options.
-
 ## Performance goals
 
 The implementation should avoid per-command `nix develop` by reusing:
@@ -198,14 +192,3 @@ The implementation should avoid per-command `nix develop` by reusing:
 - one long-lived container
 - one long-lived `ncap-server`
 - mounted `/nix`
-
-## Non-goals
-
-Not required:
-
-- direct execution as `cargo` instead of `ncap cargo`
-- per-tool wrapper script generation
-- shell alias/function/prompt replication
-- perfect emulation of arbitrary interactive shell behavior
-- host GUI/socket/agent integration unless explicitly configured
-- formal sandbox guarantees
