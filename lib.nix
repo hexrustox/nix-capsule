@@ -19,20 +19,17 @@
     let
       lib = pkgs.lib;
 
-      defaultOpts =
-        let
-          socketDir = builtins.dirOf socketPath;
-        in
-        lib.optionals useDefaultOptions [
-          "--replace"
-          "--name ${containerName}"
-          "-v /nix:/nix"
-          "-v /etc:/etc"
-          "-v \"$project_root\":\"$project_root\""
-          "-w \"$project_root\""
-          "-e NCAP_SOCKET"
-          "-v ${socketDir}:${socketDir}"
-        ];
+      socketDir = builtins.dirOf socketPath;
+      defaultOpts = lib.optionals useDefaultOptions [
+        "--replace"
+        "--name ${containerName}"
+        "-v /nix:/nix"
+        "-v /etc:/etc"
+        "-v \"$project_root\":\"$project_root\""
+        "-w \"$project_root\""
+        "-e NCAP_SOCKET"
+        "-v ${socketDir}:${socketDir}"
+      ];
       hardenOpts = lib.optionals hardenContainer [
         "--cap-drop=all"
         "--security-opt=no-new-privileges"
@@ -48,6 +45,8 @@
         in
         pkgs.writeShellScriptBin "start-container" ''
           project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+          mkdir -p ${socketDir}
 
           podman run -d \
             ${lib.concatStringsSep " " finalOpts} -- \
