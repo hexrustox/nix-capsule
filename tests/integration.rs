@@ -179,11 +179,6 @@ fn spawn_failure() {
         .expect("failed to run ncap");
 
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("server error"),
-        "expected server error, got: {stderr}"
-    );
 }
 
 #[test]

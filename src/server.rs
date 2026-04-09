@@ -1,3 +1,5 @@
+use chrono::Local;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -8,6 +10,8 @@ use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use nix_capsule::protocol::{ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request};
 
@@ -17,28 +21,67 @@ struct Cli {
     /// Unix socket path to listen on
     #[arg(short, long, env = "NCAP_SOCKET")]
     socket: String,
+
+    /// Directory for log files (default: same directory as socket)
+    #[arg(short, long, env = "NCAP_LOG_DIR")]
+    log_dir: Option<String>,
+}
+
+fn init_logging(log_dir: &PathBuf) -> WorkerGuard {
+    let timestamp = Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+    let log_filename = format!("ncap-server-{}.log", timestamp);
+
+    let file_appender = tracing_appender::rolling::never(log_dir, log_filename);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
+        .init();
+
+    guard
+}
+
+fn get_log_dir(socket: &str, cli_log_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = cli_log_dir {
+        PathBuf::from(dir)
+    } else {
+        PathBuf::from(socket)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let log_dir = get_log_dir(&cli.socket, cli.log_dir.as_deref());
+    let _guard = init_logging(&log_dir);
+
     let _ = std::fs::remove_file(&cli.socket);
 
-    let listener = UnixListener::bind(&cli.socket)
-        .with_context(|| format!("failed to bind socket: {}", cli.socket))?;
+    let listener = UnixListener::bind(&cli.socket).inspect_err(|e| {
+        tracing::error!("Failed to bind socket {}: {}", cli.socket, e);
+    })?;
 
-    eprintln!("listening on {}", cli.socket);
+    tracing::info!("Listening on {}", cli.socket);
 
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .context("failed to accept connection")?;
+        let (stream, _) = match listener.accept().await {
+            Ok((stream, addr)) => (stream, addr),
+            Err(e) => {
+                tracing::error!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream).await {
-                eprintln!("connection error: {e:?}");
+                tracing::error!("{e}");
             }
         });
     }
@@ -53,14 +96,17 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         .next()
         .await
         .transpose()
-        .unwrap()
-        .context("connection closed before request")?;
+        .map_err(|e| anyhow::anyhow!("Failed to read first frame: {}", e))?
+        .context("Connection closed before request")?;
 
     if first_frame.frame_type != FrameType::Request {
         return Ok(());
     }
 
-    let request: Request = serde_json::from_slice(&first_frame.payload).unwrap();
+    let request: Request = serde_json::from_slice(&first_frame.payload)
+        .map_err(|e| anyhow::anyhow!("Failed to parse request: {}", e))?;
+
+    tracing::debug!("Received request: {:?} {:?}", request.command, request.args);
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);
@@ -82,16 +128,37 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
             send_error(
                 &mut framed_write,
                 e.to_string(),
-                Some(&format!("Failed to run command \"{}\"", &request.command)),
+                Some(&format!(
+                    "Failed to run command \"{}\"{}",
+                    &request.command,
+                    {
+                        if request.args.is_empty() {
+                            "".to_string()
+                        } else {
+                            format!(
+                                " with arg{} {}",
+                                if request.args.len() > 1 { "s" } else { "" },
+                                request
+                                    .args
+                                    .iter()
+                                    .map(|a| format!("\"{a}\""))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    }
+                )),
             )
             .await;
             return Ok(());
         }
     };
 
-    let mut child_stdin = child.stdin.take().context("missing child stdin")?;
-    let mut child_stdout = child.stdout.take().context("missing child stdout")?;
-    let mut child_stderr = child.stderr.take().context("missing child stderr")?;
+    tracing::info!("Executing: {} {:?}", request.command, request.args);
+
+    let mut child_stdin = child.stdin.take().context("Missing child stdin")?;
+    let mut child_stdout = child.stdout.take().context("Missing child stdout")?;
+    let mut child_stderr = child.stderr.take().context("Missing child stderr")?;
 
     let (tx, mut rx) = mpsc::channel::<Frame>(64);
     let tx_stdout = tx.clone();
@@ -152,36 +219,42 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         framed_write
     });
 
-    stdin_task.abort();
+    match child.wait().await {
+        Ok(status) => {
+            stdin_task.abort();
 
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
 
-    let mut framed_write = writer_task.await.unwrap();
+            let mut framed_write = writer_task.await.unwrap();
 
-    let status = match child.wait().await {
-        Ok(s) => s,
+            let exit_code = status.code().unwrap_or(1);
+            tracing::info!("Command finished with exit_code: {:?}", exit_code);
+
+            let exit = Exit { exit_code };
+            let exit_payload = serde_json::to_vec(&exit).context("Failed to serialize exit")?;
+            let _ = framed_write
+                .send(Frame {
+                    frame_type: FrameType::Exit,
+                    payload: exit_payload,
+                })
+                .await;
+        }
         Err(e) => {
+            stdin_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+
+            let mut framed_write = writer_task.await.unwrap();
+
             send_error(
                 &mut framed_write,
                 e.to_string(),
-                Some("Failed to wait for child process"),
+                Some("Command was not running"),
             )
             .await;
-            return Ok(());
         }
     };
-
-    let exit = Exit {
-        exit_code: status.code().unwrap_or(1),
-    };
-    let exit_payload = serde_json::to_vec(&exit).context("failed to serialize exit")?;
-    let _ = framed_write
-        .send(Frame {
-            frame_type: FrameType::Exit,
-            payload: exit_payload,
-        })
-        .await;
 
     Ok(())
 }

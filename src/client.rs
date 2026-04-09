@@ -79,7 +79,7 @@ async fn run() -> Result<ExitCode> {
             payload: request_payload,
         })
         .await
-        .unwrap();
+        .wrap_err("Failed to send request")?;
 
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
