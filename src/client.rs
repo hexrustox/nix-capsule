@@ -1,11 +1,12 @@
-use std::io::IsTerminal;
+use std::io::Read;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use nix_capsule::protocol::{ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request};
@@ -82,36 +83,38 @@ async fn run() -> Result<ExitCode> {
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
 
-    // Forward stdin — owns the write half. Dropping it sends EOF to server.
-    // Skip if stdin is a TTY: the blocking read() syscall can't be interrupted
-    // by abort(), which would hang the client until the user presses Enter.
-    let stdin_is_tty = std::io::stdin().is_terminal();
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(32);
 
-    let stdin_task = if !stdin_is_tty {
-        Some(tokio::spawn(async move {
-            let mut framed_write = framed_write;
-            let mut stdin = tokio::io::stdin();
-            let mut buf = [0u8; 8192];
-            loop {
-                let n = stdin.read(&mut buf).await.context("failed to read stdin")?;
-                if n == 0 {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                framed_write
-                    .send(Frame {
-                        frame_type: FrameType::Stdin,
-                        payload: buf[..n].to_vec(),
-                    })
-                    .await
-                    .context("failed to send stdin frame")?;
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                break;
             }
-            // framed_write dropped here — OwnedWriteHalf shuts down, server sees EOF
-        }))
-    } else {
-        // TTY stdin: drop write half immediately so server sees EOF.
-        drop(framed_write);
-        None
-    };
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut framed_write = framed_write;
+        while let Some(data) = stdin_rx.recv().await {
+            if framed_write
+                .send(Frame {
+                    frame_type: FrameType::Stdin,
+                    payload: data,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     // Read responses — owns the read half
     let response_task = tokio::spawn(async move {
@@ -171,9 +174,6 @@ async fn run() -> Result<ExitCode> {
     });
 
     let exit_code = response_task.await.context("response task panicked")??;
-    if let Some(task) = stdin_task {
-        task.abort();
-    }
 
     Ok(ExitCode::from(exit_code as u8))
 }

@@ -139,7 +139,6 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
                 break;
             }
         }
-        drop(child_stdin);
     });
 
     // Writer task: drains the channel and sends frames to the client immediately
