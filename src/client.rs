@@ -4,9 +4,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use color_eyre::{
     Result, Section,
-    eyre::{self, Context},
+    eyre::{Context, Report},
 };
 use futures::{SinkExt, StreamExt};
+use serde_json::from_slice;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -78,7 +79,7 @@ async fn run() -> Result<ExitCode> {
             payload: request_payload,
         })
         .await
-        .wrap_err("Failed to send request to server")?;
+        .unwrap();
 
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
@@ -145,8 +146,8 @@ async fn run() -> Result<ExitCode> {
                     frame_type: FrameType::Exit,
                     payload,
                 })) => {
-                    let exit: Exit = serde_json::from_slice(&payload)
-                        .wrap_err("Failed to parse exit response from server")?;
+                    let exit: Exit =
+                        serde_json::from_slice(&payload).wrap_err("Failed to parse payload")?;
                     exit_code = exit.exit_code;
                     break;
                 }
@@ -154,15 +155,23 @@ async fn run() -> Result<ExitCode> {
                     frame_type: FrameType::Error,
                     payload,
                 })) => {
-                    let msg: ErrorMessage = serde_json::from_slice(&payload)
-                        .wrap_err("Failed to parse error response from server")?;
-                    return Err(eyre::Report::msg(msg.error)).wrap_err("Server error");
+                    let msg: ErrorMessage =
+                        from_slice(&payload).wrap_err("Failed to parse payload")?;
+                    return Err({
+                        let report = Report::msg(msg.error);
+                        if let Some(cause) = msg.cause {
+                            report.wrap_err(cause)
+                        } else {
+                            report
+                        }
+                    })
+                    .wrap_err("Server error");
                 }
                 Some(Ok(frame)) => {
-                    panic!("Unexpected frame: {:?}", frame);
+                    panic!("Unexpected `Frame`: {:?}", frame);
                 }
                 Some(Err(e)) => {
-                    return Err(eyre::Report::from(e))
+                    return Err(Report::from(e))
                         .wrap_err("Socket read error")
                         .note("The server may have crashed or been killed unexpectedly");
                 }

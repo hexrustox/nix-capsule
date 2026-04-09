@@ -48,6 +48,7 @@ pub struct Exit {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorMessage {
     pub error: String,
+    pub cause: Option<String>,
 }
 
 pub struct FrameCodec;
@@ -71,7 +72,7 @@ impl Decoder for FrameCodec {
         let frame_type = FrameType::from_u8(frame_type_byte).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("unknown frame type: {frame_type_byte:#x}"),
+                format!("Unknown frame type: {frame_type_byte:#x}"),
             )
         })?;
 

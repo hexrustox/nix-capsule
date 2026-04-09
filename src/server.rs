@@ -53,11 +53,10 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         .next()
         .await
         .transpose()
-        .context("failed to read frame")?
+        .unwrap()
         .context("connection closed before request")?;
 
     if first_frame.frame_type != FrameType::Request {
-        send_error(&mut framed_write, "expected Request frame").await;
         return Ok(());
     }
 
@@ -80,7 +79,12 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            send_error(&mut framed_write, &format!("failed to spawn: {e}")).await;
+            send_error(
+                &mut framed_write,
+                e.to_string(),
+                Some(&format!("Failed to run command \"{}\"", &request.command)),
+            )
+            .await;
             return Ok(());
         }
     };
@@ -148,14 +152,25 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         framed_write
     });
 
-    let status = child.wait().await.context("failed to wait for child")?;
-
     stdin_task.abort();
 
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 
-    let mut framed_write = writer_task.await.context("writer task panicked")?;
+    let mut framed_write = writer_task.await.unwrap();
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            send_error(
+                &mut framed_write,
+                e.to_string(),
+                Some("Failed to wait for child process"),
+            )
+            .await;
+            return Ok(());
+        }
+    };
 
     let exit = Exit {
         exit_code: status.code().unwrap_or(1),
@@ -171,12 +186,13 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
     Ok(())
 }
 
-async fn send_error<S>(sink: &mut S, msg: &str)
+async fn send_error<S>(sink: &mut S, error: String, context: Option<&str>)
 where
     S: SinkExt<Frame> + Unpin,
 {
     let error = ErrorMessage {
-        error: msg.to_string(),
+        error,
+        cause: context.map(|s| s.to_string()),
     };
     if let Ok(payload) = serde_json::to_vec(&error) {
         let _ = sink
