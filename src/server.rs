@@ -90,7 +90,6 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
     let mut child_stdout = child.stdout.take().context("missing child stdout")?;
     let mut child_stderr = child.stderr.take().context("missing child stderr")?;
 
-    // Channel for streaming output frames to the writer task
     let (tx, mut rx) = mpsc::channel::<Frame>(64);
     let tx_stdout = tx.clone();
     let tx_stderr = tx;
@@ -141,7 +140,6 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         }
     });
 
-    // Writer task: drains the channel and sends frames to the client immediately
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
             if framed_write.send(frame).await.is_err() {
@@ -153,15 +151,11 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
 
     let status = child.wait().await.context("failed to wait for child")?;
 
-    // Child no longer needs input
     stdin_task.abort();
 
-    // Wait for output tasks to finish (they see pipe EOF)
     let _ = stdout_task.await;
     let _ = stderr_task.await;
-    // tx_stdout and tx_stderr dropped here → channel closes
 
-    // Writer drains any remaining frames, then returns the framed_write
     let mut framed_write = writer_task.await.context("writer task panicked")?;
 
     let exit = Exit {

@@ -43,7 +43,7 @@ impl TestServer {
     fn kill(mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        std::mem::forget(self); // prevent Drop from running again
+        std::mem::forget(self);
     }
 }
 
@@ -53,8 +53,6 @@ impl Drop for TestServer {
         let _ = self.child.wait();
     }
 }
-
-// ---- tests ----
 
 #[test]
 fn stdout_bridging() {
@@ -97,7 +95,7 @@ fn interleaved_stdout_stderr() {
         .expect("failed to run ncap");
 
     assert!(output.status.success());
-    // stdout and stderr are separate — order within each is preserved
+
     assert_eq!(String::from_utf8_lossy(&output.stdout), "out1\nout2\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "err1\nerr2\n");
 }
@@ -260,9 +258,6 @@ fn large_stdout() {
 fn streaming_stdout() {
     let server = TestServer::start();
 
-    // Child outputs 3 lines with delays, then sleeps a long time before exiting.
-    // If output is streamed, all 3 lines arrive before the child exits.
-    // If output is batched, all 3 lines would only arrive after the child exits (10s+).
     let mut child = server
         .ncap_cmd()
         .args([
@@ -278,8 +273,6 @@ fn streaming_stdout() {
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
-    // All 3 lines must arrive while the child is still running (before its 10s sleep ends).
-    // A 3s timeout catches the old batched-then-send behavior.
     let mut line = String::new();
 
     reader.read_line(&mut line).unwrap();
@@ -293,7 +286,6 @@ fn streaming_stdout() {
     reader.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "line3");
 
-    // Lines arrived — kill the child (it's still sleeping for 10s)
     child.kill().unwrap();
     let _ = child.wait();
 }
@@ -356,7 +348,6 @@ fn rapid_sequential_commands() {
 fn server_crash_during_execution() {
     let server = TestServer::start();
 
-    // Start a long-running command
     let child = server
         .ncap_cmd()
         .args(["--", "sleep", "30"])
@@ -365,13 +356,10 @@ fn server_crash_during_execution() {
         .spawn()
         .expect("failed to run ncap");
 
-    // Give the server time to spawn the child
     sleep(Duration::from_millis(200));
 
-    // Kill the server (and all its children)
     server.kill();
 
-    // Client should exit (not hang) — socket is closed
     let output = child.wait_with_output().expect("failed to wait for ncap");
     assert!(!output.status.success());
 }
@@ -380,7 +368,6 @@ fn server_crash_during_execution() {
 fn bidirectional_interleaved() {
     let server = TestServer::start();
 
-    // Child writes "tick-N" on its own schedule while also reading stdin and echoing "ack-$line"
     let mut child = server
         .ncap_cmd()
         .args([
@@ -399,23 +386,19 @@ fn bidirectional_interleaved() {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
 
-    // Read child-initiated output (tick-1 arrives before any stdin is sent)
     reader.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "tick-1");
 
-    // Send input, read response
     writeln!(child_stdin, "a").unwrap();
     child_stdin.flush().unwrap();
     line.clear();
     reader.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "ack-a");
 
-    // Read another child-initiated tick
     line.clear();
     reader.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "tick-2");
 
-    // Send more input, read responses
     writeln!(child_stdin, "b").unwrap();
     child_stdin.flush().unwrap();
     line.clear();
@@ -441,7 +424,6 @@ fn bidirectional_interleaved() {
 fn idle_connection() {
     let server = TestServer::start();
 
-    // Child echoes input back with a small delay
     let mut child = server
         .ncap_cmd()
         .args([
@@ -465,7 +447,6 @@ fn idle_connection() {
     reader.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "first");
 
-    // Idle 2s — connection must survive
     sleep(Duration::from_secs(2));
 
     line.clear();
@@ -474,7 +455,6 @@ fn idle_connection() {
     reader.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "second");
 
-    // Another idle period
     sleep(Duration::from_secs(2));
 
     line.clear();

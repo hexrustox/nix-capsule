@@ -116,7 +116,6 @@ async fn run() -> Result<ExitCode> {
         }
     });
 
-    // Read responses — owns the read half
     let response_task = tokio::spawn(async move {
         let mut exit_code: i32 = 1;
         loop {
