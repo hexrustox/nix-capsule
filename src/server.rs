@@ -61,8 +61,7 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         return Ok(());
     }
 
-    let request: Request =
-        serde_json::from_slice(&first_frame.payload).context("failed to parse request")?;
+    let request: Request = serde_json::from_slice(&first_frame.payload).unwrap();
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);

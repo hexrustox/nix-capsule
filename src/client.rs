@@ -1,8 +1,11 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
 use clap::Parser;
+use color_eyre::{
+    Result, Section,
+    eyre::{self, Context},
+};
 use futures::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -32,14 +35,10 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
-        }
-    }
+async fn main() -> Result<ExitCode> {
+    color_eyre::install()?;
+
+    run().await
 }
 
 async fn run() -> Result<ExitCode> {
@@ -48,12 +47,12 @@ async fn run() -> Result<ExitCode> {
     let cwd = match cli.cwd {
         Some(c) => c,
         None => std::env::current_dir()
-            .context("failed to get current directory")?
+            .wrap_err("Failed to get current working directory")?
             .to_string_lossy()
             .into_owned(),
     };
 
-    let (command, args) = cli.command.split_first().context("command is required")?;
+    let (command, args) = cli.command.split_first().unwrap();
 
     let request = Request {
         command: command.clone(),
@@ -64,13 +63,14 @@ async fn run() -> Result<ExitCode> {
 
     let stream = UnixStream::connect(&cli.socket)
         .await
-        .with_context(|| format!("failed to connect to socket: {}", cli.socket))?;
+        .wrap_err(format!("Failed to connect to socket: {}", cli.socket))
+        .suggestion("Make sure ncap-server is running")?;
 
     let (read_half, write_half) = stream.into_split();
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
     let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
-    let request_payload = serde_json::to_vec(&request).context("failed to serialize request")?;
+    let request_payload = serde_json::to_vec(&request).wrap_err("Failed to serialize request")?;
 
     framed_write
         .send(Frame {
@@ -78,7 +78,7 @@ async fn run() -> Result<ExitCode> {
             payload: request_payload,
         })
         .await
-        .context("failed to send request")?;
+        .wrap_err("Failed to send request to server")?;
 
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
@@ -128,8 +128,8 @@ async fn run() -> Result<ExitCode> {
                     stdout
                         .write_all(&payload)
                         .await
-                        .context("failed to write stdout")?;
-                    stdout.flush().await.context("failed to flush stdout")?;
+                        .wrap_err("Failed to write stdout")?;
+                    stdout.flush().await.wrap_err("Failed to flush stdout")?;
                 }
                 Some(Ok(Frame {
                     frame_type: FrameType::Stderr,
@@ -138,15 +138,15 @@ async fn run() -> Result<ExitCode> {
                     stderr
                         .write_all(&payload)
                         .await
-                        .context("failed to write stderr")?;
-                    stderr.flush().await.context("failed to flush stderr")?;
+                        .wrap_err("Failed to write stderr")?;
+                    stderr.flush().await.wrap_err("Failed to flush stderr")?;
                 }
                 Some(Ok(Frame {
                     frame_type: FrameType::Exit,
                     payload,
                 })) => {
-                    let exit: Exit =
-                        serde_json::from_slice(&payload).context("failed to parse exit")?;
+                    let exit: Exit = serde_json::from_slice(&payload)
+                        .wrap_err("Failed to parse exit response from server")?;
                     exit_code = exit.exit_code;
                     break;
                 }
@@ -154,25 +154,27 @@ async fn run() -> Result<ExitCode> {
                     frame_type: FrameType::Error,
                     payload,
                 })) => {
-                    let err: ErrorMessage =
-                        serde_json::from_slice(&payload).context("failed to parse error")?;
-                    bail!("server error: {}", err.error);
+                    let msg: ErrorMessage = serde_json::from_slice(&payload)
+                        .wrap_err("Failed to parse error response from server")?;
+                    return Err(eyre::Report::msg(msg.error)).wrap_err("Server error");
                 }
                 Some(Ok(frame)) => {
-                    bail!("unexpected frame type: {:?}", frame.frame_type);
+                    panic!("Unexpected frame: {:?}", frame);
                 }
                 Some(Err(e)) => {
-                    return Err(e).context("socket read error");
+                    return Err(eyre::Report::from(e))
+                        .wrap_err("Socket read error")
+                        .note("The server may have crashed or been killed unexpectedly");
                 }
                 None => {
                     break;
                 }
             }
         }
-        Ok::<i32, anyhow::Error>(exit_code)
+        Ok(exit_code)
     });
 
-    let exit_code = response_task.await.context("response task panicked")??;
+    let exit_code = response_task.await.unwrap()?;
 
     Ok(ExitCode::from(exit_code as u8))
 }
