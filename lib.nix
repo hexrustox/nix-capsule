@@ -41,7 +41,7 @@
 
       startContainer =
         let
-          blocking = "podman exec ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command true";
+          blocking = "podman exec -t ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command true";
         in
         pkgs.writeShellScriptBin "start-container" ''
           project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)

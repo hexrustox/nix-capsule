@@ -13,7 +13,7 @@ in
 pkgs.rustPlatform.buildRustPackage {
   inherit src;
   pname = "ncap";
-  version = "0.1.0";
+  version = "0.2.0";
   cargoLock = {
     lockFile = src + /Cargo.lock;
   };
