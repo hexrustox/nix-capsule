@@ -6,6 +6,7 @@
       devShell,
       socketPath,
       containerName,
+      runtime ? "podman",
       options ? [ ],
       removeOptions ? [ ],
       useDefaultOptions ? true,
@@ -41,25 +42,25 @@
 
       startContainer =
         let
-          blocking = "podman exec -t ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command true";
+          blocking = "${runtime} exec -t ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command true";
         in
         pkgs.writeShellScriptBin "start-container" ''
           project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
           mkdir -p ${socketDir}
 
-          podman run -d \
+          ${runtime} run -d \
             ${lib.concatStringsSep " " finalOpts} -- \
             ${image} \
             sleep infinity
 
           ${lib.optionalString wait blocking}
 
-          podman exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${nixCapsule}/bin/ncap-server
+          ${runtime} exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${nixCapsule}/bin/ncap-server
         '';
 
       stopContainer = pkgs.writeShellScriptBin "stop-container" ''
-        podman stop -t 0 ${containerName}
+        ${runtime} stop -t 0 ${containerName}
       '';
 
       restartContainer = pkgs.writeShellScriptBin "restart-container" ''
@@ -67,7 +68,7 @@
       '';
 
       enterContainer = pkgs.writeShellScriptBin "enter-container" ''
-        podman exec -it ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath}
+        ${runtime} exec -it ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath}
       '';
     in
     pkgs.mkShellNoCC {
@@ -98,7 +99,7 @@
       shellHook =
         let
           init = lib.optionalString autoStart ''
-            if [[ "$(podman inspect -f '{{.State.Running}}' ${containerName} 2>/dev/null)" != "true" ]]; then
+            if [[ "$(${runtime} inspect -f '{{.State.Running}}' ${containerName} 2>/dev/null)" != "true" ]]; then
               start-container
             fi
           '';
