@@ -1,8 +1,8 @@
 use chrono::Local;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,7 +27,7 @@ struct Cli {
     log_dir: Option<String>,
 }
 
-fn init_logging(log_dir: &PathBuf) -> WorkerGuard {
+fn init_logging(log_dir: &Path) -> WorkerGuard {
     let timestamp = Local::now().format("%Y-%m-%d-%H%M%S").to_string();
     let log_filename = format!("ncap-server-{}.log", timestamp);
 
@@ -96,15 +96,15 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
         .next()
         .await
         .transpose()
-        .map_err(|e| anyhow::anyhow!("Failed to read first frame: {}", e))?
-        .context("Connection closed before request")?;
+        .map_err(|e| anyhow!("Failed to read first frame: {}", e))?
+        .ok_or_else(|| anyhow!("Connection closed before request"))?;
 
     if first_frame.frame_type != FrameType::Request {
         return Ok(());
     }
 
     let request: Request = serde_json::from_slice(&first_frame.payload)
-        .map_err(|e| anyhow::anyhow!("Failed to parse request: {}", e))?;
+        .map_err(|e| anyhow!("Failed to parse request: {}", e))?;
 
     tracing::debug!("Received request: {:?} {:?}", request.command, request.args);
 
@@ -156,9 +156,18 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
 
     tracing::info!("Executing: {} {:?}", request.command, request.args);
 
-    let mut child_stdin = child.stdin.take().context("Missing child stdin")?;
-    let mut child_stdout = child.stdout.take().context("Missing child stdout")?;
-    let mut child_stderr = child.stderr.take().context("Missing child stderr")?;
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Missing child stdin"))?;
+    let mut child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Missing child stdout"))?;
+    let mut child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Missing child stderr"))?;
 
     let (tx, mut rx) = mpsc::channel::<Frame>(64);
     let tx_stdout = tx.clone();
@@ -167,16 +176,21 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
     let stdout_task = tokio::spawn(async move {
         let mut buf = [0u8; 8192];
         loop {
-            let n = child_stdout.read(&mut buf).await.unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            let frame = Frame {
-                frame_type: FrameType::Stdout,
-                payload: buf[..n].to_vec(),
-            };
-            if tx_stdout.send(frame).await.is_err() {
-                break;
+            match child_stdout.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let frame = Frame {
+                        frame_type: FrameType::Stdout,
+                        payload: buf[..n].to_vec(),
+                    };
+                    if tx_stdout.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error reading child stdout: {e}");
+                    break;
+                }
             }
         }
     });
@@ -184,16 +198,21 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
     let stderr_task = tokio::spawn(async move {
         let mut buf = [0u8; 8192];
         loop {
-            let n = child_stderr.read(&mut buf).await.unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            let frame = Frame {
-                frame_type: FrameType::Stderr,
-                payload: buf[..n].to_vec(),
-            };
-            if tx_stderr.send(frame).await.is_err() {
-                break;
+            match child_stderr.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let frame = Frame {
+                        frame_type: FrameType::Stderr,
+                        payload: buf[..n].to_vec(),
+                    };
+                    if tx_stderr.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error reading child stderr: {e}");
+                    break;
+                }
             }
         }
     });
@@ -226,26 +245,34 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
             let _ = stdout_task.await;
             let _ = stderr_task.await;
 
-            let mut framed_write = writer_task.await.unwrap();
+            let mut framed_write = writer_task
+                .await
+                .map_err(|e| anyhow!("Writer task panicked: {e}"))?;
 
             let exit_code = status.code().unwrap_or(1);
             tracing::info!("Command finished with exit_code: {:?}", exit_code);
 
             let exit = Exit { exit_code };
-            let exit_payload = serde_json::to_vec(&exit).context("Failed to serialize exit")?;
-            let _ = framed_write
+            let exit_payload =
+                serde_json::to_vec(&exit).map_err(|e| anyhow!("Failed to serialize exit: {e}"))?;
+            if let Err(e) = framed_write
                 .send(Frame {
                     frame_type: FrameType::Exit,
                     payload: exit_payload,
                 })
-                .await;
+                .await
+            {
+                tracing::error!("Failed to send exit frame: {e}");
+            }
         }
         Err(e) => {
             stdin_task.abort();
             stdout_task.abort();
             stderr_task.abort();
 
-            let mut framed_write = writer_task.await.unwrap();
+            let mut framed_write = writer_task
+                .await
+                .map_err(|e| anyhow!("Writer task panicked: {e}"))?;
 
             send_error(
                 &mut framed_write,

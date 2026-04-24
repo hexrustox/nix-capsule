@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use color_eyre::{
     Result, Section,
-    eyre::{Context, Report},
+    eyre::{Context, Report, eyre},
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::from_slice;
@@ -168,13 +168,10 @@ async fn run() -> Result<ExitCode> {
                     .wrap_err("Server error");
                 }
                 Some(Ok(frame)) => {
-                    panic!("Unexpected `Frame`: {:?}", frame);
+                    return Err(eyre!("Unexpected frame: {:?}", frame.frame_type)
+                        .wrap_err("Protocol error"));
                 }
-                Some(Err(e)) => {
-                    return Err(Report::from(e))
-                        .wrap_err("Socket read error")
-                        .note("The server may have crashed or been killed unexpectedly");
-                }
+                Some(Err(e)) => return Err(Report::from(e)).wrap_err("Socket read error"),
                 None => {
                     break;
                 }
@@ -183,7 +180,7 @@ async fn run() -> Result<ExitCode> {
         Ok(exit_code)
     });
 
-    let exit_code = response_task.await.unwrap()?;
+    let exit_code = response_task.await.wrap_err("Response task panicked")??;
 
     Ok(ExitCode::from(exit_code as u8))
 }
