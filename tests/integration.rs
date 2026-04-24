@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread::{sleep, spawn};
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("test.sock");
 
         let child = Command::new(NCAP_SERVER)
@@ -23,7 +23,7 @@ impl TestServer {
             .arg(&socket)
             .stderr(Stdio::piped())
             .spawn()
-            .expect("failed to spawn ncap-server");
+            .unwrap();
 
         sleep(Duration::from_millis(100));
 
@@ -40,6 +40,10 @@ impl TestServer {
         cmd
     }
 
+    fn run(&self, args: &[&str]) -> Output {
+        self.ncap_cmd().args(args).output().unwrap()
+    }
+
     fn kill(mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -54,14 +58,21 @@ impl Drop for TestServer {
     }
 }
 
+fn assert_line(reader: &mut BufReader<impl Read>, line: &mut String, expected: &str) {
+    line.clear();
+    reader.read_line(line).unwrap();
+    assert_eq!(line.trim(), expected);
+}
+
+fn write_line(stdin: &mut impl Write, input: &str) {
+    writeln!(stdin, "{input}").unwrap();
+    stdin.flush().unwrap();
+}
+
 #[test]
 fn stdout_bridging() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "echo", "hello world"])
-        .output()
-        .expect("failed to run ncap");
+    let output = server.run(&["--", "echo", "hello world"]);
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"hello world\n");
@@ -70,11 +81,7 @@ fn stdout_bridging() {
 #[test]
 fn stderr_bridging() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "sh", "-c", "echo error stream >&2"])
-        .output()
-        .expect("failed to run ncap");
+    let output = server.run(&["--", "sh", "-c", "echo error stream >&2"]);
 
     assert!(output.status.success());
     assert_eq!(output.stderr, b"error stream\n");
@@ -83,19 +90,14 @@ fn stderr_bridging() {
 #[test]
 fn interleaved_stdout_stderr() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args([
-            "--",
-            "sh",
-            "-c",
-            "echo out1; echo err1 >&2; echo out2; echo err2 >&2",
-        ])
-        .output()
-        .expect("failed to run ncap");
+    let output = server.run(&[
+        "--",
+        "sh",
+        "-c",
+        "echo out1; echo err1 >&2; echo out2; echo err2 >&2",
+    ]);
 
     assert!(output.status.success());
-
     assert_eq!(String::from_utf8_lossy(&output.stdout), "out1\nout2\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "err1\nerr2\n");
 }
@@ -103,54 +105,35 @@ fn interleaved_stdout_stderr() {
 #[test]
 fn exit_code_success() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "true"])
-        .output()
-        .expect("failed to run ncap");
-
+    let output = server.run(&["--", "true"]);
     assert_eq!(output.status.code(), Some(0));
 }
 
 #[test]
 fn exit_code_failure() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "false"])
-        .output()
-        .expect("failed to run ncap");
-
+    let output = server.run(&["--", "false"]);
     assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
 fn exit_code_custom() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "sh", "-c", "exit 42"])
-        .output()
-        .expect("failed to run ncap");
-
+    let output = server.run(&["--", "sh", "-c", "exit 42"]);
     assert_eq!(output.status.code(), Some(42));
 }
 
 #[test]
 fn env_override() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args([
-            "--env",
-            "CAPSULE_TEST=bar",
-            "--",
-            "sh",
-            "-c",
-            "echo $CAPSULE_TEST",
-        ])
-        .output()
-        .expect("failed to run ncap");
+    let output = server.run(&[
+        "--env",
+        "CAPSULE_TEST=bar",
+        "--",
+        "sh",
+        "-c",
+        "echo $CAPSULE_TEST",
+    ]);
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"bar\n");
@@ -159,11 +142,7 @@ fn env_override() {
 #[test]
 fn cwd_override() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--cwd", "/tmp", "--", "pwd"])
-        .output()
-        .expect("failed to run ncap");
+    let output = server.run(&["--cwd", "/tmp", "--", "pwd"]);
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "/tmp");
@@ -172,12 +151,7 @@ fn cwd_override() {
 #[test]
 fn spawn_failure() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "this-command-does-not-exist"])
-        .output()
-        .expect("failed to run ncap");
-
+    let output = server.run(&["--", "this-command-does-not-exist"]);
     assert!(!output.status.success());
 }
 
@@ -190,7 +164,7 @@ fn stdin_roundtrip() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to run ncap");
+        .unwrap();
 
     {
         let stdin = child.stdin.take().unwrap();
@@ -199,16 +173,17 @@ fn stdin_roundtrip() {
         writeln!(writer, "second line").unwrap();
     }
 
-    let output = child.wait_with_output().expect("failed to wait for ncap");
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout, "hello from stdin\nsecond line\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "hello from stdin\nsecond line\n"
+    );
 }
 
 #[test]
 fn large_stdin() {
     let server = TestServer::start();
-
     let data: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
 
     let mut child = server
@@ -218,15 +193,14 @@ fn large_stdin() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to run ncap");
+        .unwrap();
 
     {
-        let stdin = child.stdin.as_mut().expect("missing stdin");
-        stdin.write_all(&data).expect("failed to write stdin");
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(&data).unwrap();
     }
 
-    let output = child.wait_with_output().expect("failed to wait for ncap");
-
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(count, "1048576", "expected 1048576 bytes, got: {count}");
@@ -235,11 +209,7 @@ fn large_stdin() {
 #[test]
 fn large_stdout() {
     let server = TestServer::start();
-    let output = server
-        .ncap_cmd()
-        .args(["--", "seq", "1", "10000"])
-        .output()
-        .expect("failed to run ncap");
+    let output = server.run(&["--", "seq", "1", "10000"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -263,23 +233,14 @@ fn streaming_stdout() {
         ])
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to run ncap");
+        .unwrap();
 
-    let stdout = child.stdout.take().unwrap();
-    let mut reader = BufReader::new(stdout);
-
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
 
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "line1");
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "line2");
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "line3");
+    assert_line(&mut reader, &mut line, "line1");
+    assert_line(&mut reader, &mut line, "line2");
+    assert_line(&mut reader, &mut line, "line3");
 
     child.kill().unwrap();
     let _ = child.wait();
@@ -304,17 +265,14 @@ fn concurrent_connections() {
                         &format!("echo task-{i}"),
                     ])
                     .output()
-                    .expect("failed to run ncap");
+                    .unwrap();
                 assert!(output.status.success(), "task {i} failed");
                 String::from_utf8(output.stdout).unwrap()
             })
         })
         .collect();
 
-    let mut results: Vec<String> = handles
-        .into_iter()
-        .map(|h| h.join().expect("thread panicked"))
-        .collect();
+    let mut results: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
     results.sort();
     assert_eq!(results, vec!["task-0\n", "task-1\n", "task-2\n"]);
@@ -325,12 +283,7 @@ fn rapid_sequential_commands() {
     let server = TestServer::start();
 
     for i in 0..20 {
-        let output = server
-            .ncap_cmd()
-            .args(["--", "sh", "-c", &format!("echo cmd-{i}")])
-            .output()
-            .expect("failed to run ncap");
-
+        let output = server.run(&["--", "sh", "-c", &format!("echo cmd-{i}")]);
         assert!(output.status.success(), "command {i} failed");
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
@@ -349,13 +302,12 @@ fn server_crash_during_execution() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to run ncap");
+        .unwrap();
 
     sleep(Duration::from_millis(200));
-
     server.kill();
 
-    let output = child.wait_with_output().expect("failed to wait for ncap");
+    let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
 }
 
@@ -374,44 +326,24 @@ fn bidirectional_interleaved() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to run ncap");
+        .unwrap();
 
-    let mut child_stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let mut reader = BufReader::new(stdout);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
 
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "tick-1");
+    assert_line(&mut reader, &mut line, "tick-1");
+    write_line(&mut stdin, "a");
+    assert_line(&mut reader, &mut line, "ack-a");
+    assert_line(&mut reader, &mut line, "tick-2");
+    write_line(&mut stdin, "b");
+    assert_line(&mut reader, &mut line, "ack-b");
+    assert_line(&mut reader, &mut line, "tick-3");
+    write_line(&mut stdin, "c");
+    assert_line(&mut reader, &mut line, "ack-c");
 
-    writeln!(child_stdin, "a").unwrap();
-    child_stdin.flush().unwrap();
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "ack-a");
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "tick-2");
-
-    writeln!(child_stdin, "b").unwrap();
-    child_stdin.flush().unwrap();
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "ack-b");
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "tick-3");
-
-    writeln!(child_stdin, "c").unwrap();
-    child_stdin.flush().unwrap();
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "ack-c");
-
-    drop(child_stdin);
-    let output = child.wait_with_output().expect("failed to wait for ncap");
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
 }
 
@@ -430,35 +362,26 @@ fn idle_connection() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to run ncap");
+        .unwrap();
 
-    let mut child_stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let mut reader = BufReader::new(stdout);
-
-    writeln!(child_stdin, "first").unwrap();
-    child_stdin.flush().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "first");
+
+    write_line(&mut stdin, "first");
+    assert_line(&mut reader, &mut line, "first");
 
     sleep(Duration::from_secs(2));
 
-    line.clear();
-    writeln!(child_stdin, "second").unwrap();
-    child_stdin.flush().unwrap();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "second");
+    write_line(&mut stdin, "second");
+    assert_line(&mut reader, &mut line, "second");
 
     sleep(Duration::from_secs(2));
 
-    line.clear();
-    writeln!(child_stdin, "third").unwrap();
-    child_stdin.flush().unwrap();
-    reader.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "third");
+    write_line(&mut stdin, "third");
+    assert_line(&mut reader, &mut line, "third");
 
-    drop(child_stdin);
-    let output = child.wait_with_output().expect("failed to wait for ncap");
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
 }
