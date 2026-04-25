@@ -132,7 +132,7 @@ async fn run() -> Result<ExitCode> {
     });
 
     let response_task = tokio::spawn(async move {
-        let mut exit_code: i32 = 1;
+        let mut exit_code: i32 = 0;
         loop {
             let frame = framed_read.next().await;
             match frame {
@@ -171,15 +171,11 @@ async fn run() -> Result<ExitCode> {
                 })) => {
                     let msg: ErrorMessage =
                         from_slice(&payload).wrap_err("Failed to parse ErrorMessage")?;
-                    return Err({
-                        let report = Report::msg(msg.error);
-                        if let Some(cause) = msg.cause {
-                            report.wrap_err(cause)
-                        } else {
-                            report
-                        }
-                    })
-                    .wrap_err("Server error");
+                    return Err(if let Some(cause) = msg.cause {
+                        eyre!("{cause}: {}", msg.error)
+                    } else {
+                        eyre!("{}", msg.error)
+                    });
                 }
                 Some(Ok(Frame {
                     frame_type: FrameType::ServerStopping,
@@ -187,16 +183,18 @@ async fn run() -> Result<ExitCode> {
                 })) => {
                     let msg: ServerStopping =
                         from_slice(&payload).wrap_err("Failed to parse ServerStopping")?;
-                    let err = eyre!("Server stopping");
-                    return Err(if let Some(reason) = msg.reason {
-                        eyre!(reason).wrap_err(err)
+                    let err = if let Some(reason) = msg.reason {
+                        eyre!("Server is shutting down: {reason}")
                     } else {
-                        err
-                    });
+                        eyre!("Server is shutting down")
+                    };
+                    return Ok((78, Some(err)));
                 }
                 Some(Ok(frame)) => {
-                    return Err(eyre!("Unexpected frame: {:?}", frame.frame_type)
-                        .wrap_err("Protocol error"));
+                    return Err(eyre!(
+                        "Protocol error: unexpected frame {:?}",
+                        frame.frame_type
+                    ));
                 }
                 Some(Err(e)) => return Err(Report::from(e)).wrap_err("Failed to read from socket"),
                 None => {
@@ -204,9 +202,14 @@ async fn run() -> Result<ExitCode> {
                 }
             }
         }
-        Ok(exit_code)
+        Ok((exit_code, None))
     });
 
-    let exit_code = response_task.await.wrap_err("Response task panicked")??;
+    let (exit_code, stop_err) = response_task.await.wrap_err("Response task panicked")??;
+
+    if let Some(err) = stop_err {
+        eprintln!("{err}");
+    }
+
     Ok(ExitCode::from(exit_code as u8))
 }

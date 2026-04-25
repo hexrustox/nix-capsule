@@ -155,24 +155,9 @@ async fn handle_connection(
                 &mut framed_write,
                 e.to_string(),
                 Some(&format!(
-                    "Failed to run command \"{}\"{}",
-                    &request.command,
-                    {
-                        if request.args.is_empty() {
-                            "".to_string()
-                        } else {
-                            format!(
-                                " with arg{} {}",
-                                if request.args.len() > 1 { "s" } else { "" },
-                                request
-                                    .args
-                                    .iter()
-                                    .map(|a| format!("\"{a}\""))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        }
-                    }
+                    "Failed to run \"{}\" in {}",
+                    [vec![request.command], request.args].concat().join(" "),
+                    request.cwd
                 )),
             )
             .await;
@@ -181,18 +166,9 @@ async fn handle_connection(
 
     tracing::info!("Executing: {} {:?}", request.command, request.args);
 
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("Missing child stdin"))?;
-    let mut child_stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("Missing child stdout"))?;
-    let mut child_stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("Missing child stderr"))?;
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = child.stdout.take().unwrap();
+    let mut child_stderr = child.stderr.take().unwrap();
 
     let (tx, mut rx) = mpsc::channel::<Frame>(64);
     let tx_stdout = tx.clone();
@@ -315,7 +291,10 @@ async fn handle_connection(
             send_error(
                 &mut framed_write,
                 e.to_string(),
-                Some("Command was not running"),
+                Some(&format!(
+                    "Failed to wait on \"{}\"",
+                    [vec![request.command], request.args].concat().join(" ")
+                )),
             )
             .await?;
         }
