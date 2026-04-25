@@ -28,7 +28,6 @@
         "-v /etc:/etc"
         "-v \"$project_root\":\"$project_root\""
         "-w \"$project_root\""
-        "-e NCAP_SOCKET"
         "-v ${socketDir}:${socketDir}"
       ];
       hardenOpts = lib.optionals hardenContainer [
@@ -52,11 +51,11 @@
           ${runtime} run -d \
             ${lib.concatStringsSep " " finalOpts} -- \
             ${image} \
-            ${pkgs.ncap}/bin/ncap-init
+            ${pkgs.ncap}/bin/ncap-init --socket ${socketPath}
 
           ${lib.optionalString wait blocking}
 
-          ${runtime} exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${pkgs.ncap}/bin/ncap-server
+          ${runtime} exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${pkgs.ncap}/bin/ncap-server --socket ${socketPath}
         '';
 
       stopContainer = pkgs.writeShellScriptBin "stop-container" ''
