@@ -7,7 +7,7 @@ use tokio_util::codec::FramedWrite;
 use nix_capsule::protocol::{Frame, FrameCodec, FrameType};
 
 #[derive(Parser)]
-#[command(name = "ncap-init", about = "Container init process")]
+#[command(version, about = "Container init process")]
 struct Cli {
     /// Unix socket path
     #[arg(short, long, env = "NCAP_SOCKET")]

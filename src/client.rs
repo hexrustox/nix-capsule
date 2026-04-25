@@ -18,7 +18,7 @@ use nix_capsule::protocol::{
 };
 
 #[derive(Parser)]
-#[command(name = "ncap", about = "Execute commands inside a capsule container")]
+#[command(version, about = "Execute commands inside a capsule container")]
 struct Cli {
     /// Unix socket path
     #[arg(short, long, env = "NCAP_SOCKET")]
