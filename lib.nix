@@ -52,7 +52,7 @@
           ${runtime} run -d \
             ${lib.concatStringsSep " " finalOpts} -- \
             ${image} \
-            sleep infinity
+            ${nixCapsule}/bin/ncap-init
 
           ${lib.optionalString wait blocking}
 
@@ -60,7 +60,7 @@
         '';
 
       stopContainer = pkgs.writeShellScriptBin "stop-container" ''
-        ${runtime} stop -t 0 ${containerName}
+        ${runtime} stop ${containerName}
       '';
 
       restartContainer = pkgs.writeShellScriptBin "restart-container" ''

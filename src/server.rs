@@ -8,12 +8,14 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use nix_capsule::protocol::{ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request};
+use nix_capsule::protocol::{
+    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping,
+};
 
 #[derive(Parser)]
 #[command(name = "ncap-server", about = "Capsule container server")]
@@ -70,34 +72,63 @@ async fn main() -> Result<()> {
 
     tracing::info!("Listening on {}", cli.socket);
 
-    loop {
-        let (stream, _) = match listener.accept().await {
-            Ok((stream, addr)) => (stream, addr),
-            Err(e) => {
-                tracing::error!("Failed to accept connection: {}", e);
-                continue;
-            }
-        };
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let mut accept_shutdown = shutdown_tx.subscribe();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream).await {
-                tracing::error!("{e}");
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let tx = shutdown_tx.clone();
+                        let rx = shutdown_tx.subscribe();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, rx, tx).await {
+                                tracing::error!("{e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to accept connection: {}", e);
+                    }
+                }
             }
-        });
+            _ = accept_shutdown.recv() => {
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    shutdown_tx: broadcast::Sender<()>,
+) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
     let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
-    let first_frame = framed_read
-        .next()
-        .await
-        .transpose()
-        .map_err(|e| anyhow!("Failed to read first frame: {}", e))?
-        .ok_or_else(|| anyhow!("Connection closed before request"))?;
+    let first_frame = tokio::select! {
+        frame = framed_read.next() => {
+            frame
+                .transpose()
+                .map_err(|e| anyhow!("Failed to read first frame: {}", e))?
+                .ok_or_else(|| anyhow!("Connection closed before request"))?
+        }
+        _ = shutdown_rx.recv() => {
+            return Ok(());
+        }
+    };
+
+    if first_frame.frame_type == FrameType::RequestShutdown {
+        tracing::info!("Received shutdown request from init process");
+        tracing::info!("Shutting down");
+        let _ = shutdown_tx.send(());
+        return Ok(());
+    }
 
     if first_frame.frame_type != FrameType::Request {
         return Ok(());
@@ -230,9 +261,22 @@ async fn handle_connection(stream: tokio::net::UnixStream) -> Result<()> {
     });
 
     let writer_task = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            if framed_write.send(frame).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                frame = rx.recv() => {
+                    match frame {
+                        Some(f) => {
+                            if framed_write.send(f).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    let _ = send_server_stopping(&mut framed_write, None).await;
+                    break;
+                }
             }
         }
         framed_write
@@ -302,4 +346,22 @@ where
             })
             .await;
     }
+}
+
+async fn send_server_stopping<S>(sink: &mut S, reason: Option<&str>) -> Result<()>
+where
+    S: SinkExt<Frame> + Unpin,
+{
+    let msg = ServerStopping {
+        reason: reason.map(|s| s.to_string()),
+    };
+    let payload =
+        serde_json::to_vec(&msg).map_err(|e| anyhow!("Failed to serialize ServerStopping: {e}"))?;
+    sink.send(Frame {
+        frame_type: FrameType::ServerStopping,
+        payload,
+    })
+    .await
+    .map_err(|_| anyhow!("Failed to send ServerStopping"))?;
+    Ok(())
 }

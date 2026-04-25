@@ -1,8 +1,13 @@
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::{sleep, spawn};
 use std::time::Duration;
+
+use bytes::BytesMut;
+use nix_capsule::protocol::{Frame, FrameCodec, FrameType};
+use tokio_util::codec::Encoder;
 
 const NCAP: &str = env!("CARGO_BIN_EXE_ncap");
 const NCAP_SERVER: &str = env!("CARGO_BIN_EXE_ncap-server");
@@ -384,4 +389,47 @@ fn idle_connection() {
     drop(stdin);
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
+}
+
+fn send_request_shutdown(socket: &std::path::Path) {
+    let frame = Frame {
+        frame_type: FrameType::RequestShutdown,
+        payload: vec![],
+    };
+    let mut buf = BytesMut::new();
+    FrameCodec.encode(frame, &mut buf).unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream.write_all(&buf).unwrap();
+}
+
+#[test]
+fn server_refuses_after_shutdown() {
+    let server = TestServer::start();
+
+    send_request_shutdown(&server.socket);
+
+    sleep(Duration::from_millis(200));
+
+    let output = server.run(&["--", "echo", "should fail"]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn client_receives_server_stopping() {
+    let server = TestServer::start();
+
+    let client = server
+        .ncap_cmd()
+        .args(["--", "sleep", "10"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    sleep(Duration::from_millis(100));
+
+    send_request_shutdown(&server.socket);
+
+    let output = client.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(78));
 }

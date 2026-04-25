@@ -11,6 +11,10 @@ path = "src/client.rs"
 name = "ncap-server"
 path = "src/server.rs"
 
+[[bin]]
+name = "ncap-init"
+path = "src/init.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,6 +27,7 @@ tokio = { version = "1", features = [
   "process",
   "rt",
   "rt-multi-thread",
+  "signal",
   "sync",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }

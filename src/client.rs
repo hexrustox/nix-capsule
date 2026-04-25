@@ -13,7 +13,9 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use nix_capsule::protocol::{ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request};
+use nix_capsule::protocol::{
+    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping,
+};
 
 #[derive(Parser)]
 #[command(name = "ncap", about = "Execute commands inside a capsule container")]
@@ -166,6 +168,18 @@ async fn run() -> Result<ExitCode> {
                         }
                     })
                     .wrap_err("Server error");
+                }
+                Some(Ok(Frame {
+                    frame_type: FrameType::ServerStopping,
+                    payload,
+                })) => {
+                    let msg: ServerStopping =
+                        from_slice(&payload).wrap_err("Failed to parse payload")?;
+                    if let Some(reason) = msg.reason {
+                        eprintln!("ncap: server stopping: {reason}");
+                    }
+                    exit_code = 78;
+                    break;
                 }
                 Some(Ok(frame)) => {
                     return Err(eyre!("Unexpected frame: {:?}", frame.frame_type)
