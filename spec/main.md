@@ -32,7 +32,7 @@ Goals:
 
 1. `start-container` launches a Podman container running `ncap-init` as the entrypoint.
 2. Optionally, `nix develop` is executed inside the container to verify the devshell is realizable.
-3. `ncap-server` is started in the background inside the container via `podman exec -d` running `nix develop .#${devShell} --command ncap-server`.
+3. `ncap-server` is started in the background inside the container's devshell.
 4. `ncap-server` remains alive, listening on a Unix socket.
 5. Each `ncap <cmd>` invocation opens a new connection to the socket, sends a request, and bridges stdio until the child exits.
 6. When the container stops, `ncap-init` receives the signal, requests shutdown, and the server notifies active clients before exiting.
@@ -94,59 +94,7 @@ Each frame consists of:
 2. `ncap-init` connects to the Unix socket and sends a `RequestShutdown` frame.
 3. Server broadcasts a `ServerStopping` frame to all active client connections.
 4. Server stops accepting new connections and exits after active connections close.
-5. Clients receiving `ServerStopping` print a message to stderr and exit with code 78.
-
-### Payload Formats
-
-**Request** (JSON):
-
-```json
-{
-  "command": "cargo",
-  "args": ["build"],
-  "cwd": "/path/to/project",
-  "env": ["KEY=VALUE"]
-}
-```
-
-- `command`: The program to execute.
-- `args`: Arguments to the program.
-- `cwd`: Working directory for the child process.
-- `env`: Environment variable overrides in `KEY=VALUE` format.
-
-**Exit** (JSON):
-
-```json
-{
-  "exit_code": 0
-}
-```
-
-- `exit_code`: The child process exit code (0–255).
-
-**Error** (JSON):
-
-```json
-{
-  "error": "No such file or directory",
-  "cause": "Failed to run command \"foo\""
-}
-```
-
-- `error`: Human-readable error message.
-- `cause`: Optional context about what failed.
-
-**ServerStopping** (JSON):
-
-```json
-{
-  "reason": null
-}
-```
-
-- `reason`: Optional human-readable reason for the shutdown.
-
-**Stdin / Stdout / Stderr**: Raw bytes, no JSON encoding.
+5. Clients receiving `ServerStopping` print reason if any and exit with code 78.
 
 ## 4. Client (`ncap`) Requirements
 
@@ -169,13 +117,13 @@ Options:
 2. Determine `cwd` (explicit `--cwd` or client's current directory).
 3. Connect to the Unix socket at `--socket`.
 4. Send a `Request` frame with `command`, `args`, `cwd`, and `env`.
-5. Spawn a thread to read stdin and send `Stdin` frames.
+5. Read stdin and send `Stdin` frames.
 6. Read frames from the server:
    - `Stdout` → write to stdout
    - `Stderr` → write to stderr
    - `Exit` → record exit code, close connection
-   - `Error` → report error to stderr, exit with code 1
-   - `ServerStopping` → print reason to stderr, exit with code 78
+   - `Error` → report error, exit with code 1
+   - `ServerStopping` → print reason, exit with code 78
 7. Return the child's exit code.
 
 ### Exit Code Propagation
@@ -198,7 +146,7 @@ Options:
 ### Socket Lifecycle
 
 1. Remove any stale socket file at the configured path.
-2. Bind a `UnixListener` to the socket path.
+2. Listen on the Unix socket path.
 3. Accept connections in a loop.
 4. Upon receiving a `RequestShutdown` frame from `ncap-init`, broadcast `ServerStopping` to all active connections, stop accepting new connections, and exit.
 
@@ -208,7 +156,7 @@ For each accepted connection:
 
 1. Read the first frame. If it is a `RequestShutdown` frame, trigger graceful shutdown. If it is not a `Request` frame, close the connection.
 2. Parse the `Request` payload.
-3. Spawn the child process with:
+3. Start the child process with:
    - The specified `command` and `args`.
    - The specified `cwd`.
    - The specified `env` overrides applied on top of the inherited devshell environment.
@@ -219,7 +167,7 @@ For each accepted connection:
    - Read from the child's stdout and send `Stdout` frames.
    - Read from the child's stderr and send `Stderr` frames.
 6. When the child exits, send an `Exit` frame with the exit code.
-7. If the child wait fails, send an `Error` frame.
+7. If the child process fails to complete, send an `Error` frame.
 
 ### Concurrency
 
@@ -238,13 +186,13 @@ The server must handle multiple concurrent client connections. Each connection i
 
 1. Determine `project_root` via `git rev-parse --show-toplevel` or fall back to `pwd`.
 2. Create the socket directory if it doesn't exist.
-3. Run `podman run -d` with the configured options and image, executing `ncap-init` as the entrypoint.
-4. Optionally wait for the devshell to be realizable by running `podman exec -t ... nix develop ... --command true` (controlled by the `wait` parameter).
-5. Start `ncap-server` in the background via `podman exec -d ... nix develop .#${devShell} --command ncap-server`.
+3. Launch the container with `ncap-init` as the entrypoint.
+4. Optionally verify the devshell is realizable inside the container (controlled by the `wait` parameter).
+5. Start `ncap-server` in the background inside the container's devshell.
 
 ### `stop-container`
 
-Run `podman stop <containerName>` to stop the container. The container's `ncap-init` entrypoint receives SIGTERM and triggers graceful shutdown of the server and all active connections.
+Stop the container. The container's `ncap-init` entrypoint receives SIGTERM and triggers graceful shutdown of the server and all active connections.
 
 ### `restart-container`
 
@@ -252,7 +200,7 @@ Run `stop-container` followed by `start-container`.
 
 ### `enter-container`
 
-Run `podman exec -it <containerName> nix develop .#${devShell>` to open an interactive shell inside the container's devshell.
+Open an interactive shell inside the container's devshell.
 
 ### `autoStart`
 
