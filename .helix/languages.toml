@@ -1,7 +1,0 @@
-[language-server.codebook]
-command = "codebook-lsp"
-args = ["serve"]
-
-[[language]]
-name = "rust"
-language-servers = ["rust-analyzer", "codebook"]

@@ -1,110 +1,55 @@
-# AGENTS.md
+# nix-capsule
 
 ## Project Overview
 
-`nix-capsule` is a Rust + Nix Flakes project that provides containerized execution of dev tools via Podman.
-The host CLI (`ncap`) sends commands over a Unix socket to a long-lived server (`ncap-server`) running inside a Podman container with a real Nix devshell.
+Rust project providing containerized dev tool execution via Unix socket protocol. Three binaries: `ncap` (client), `ncap-server`, `ncap-init`.
 
-Read `spec.md` for the full project specification before implementing.
+## Build & Test Commands
 
-## Build / Lint / Test Commands
+```bash
+# Standard Rust commands (requires mold linker on Linux)
+cargo build
+cargo test
 
-The Nix devShell is entered automatically via direnv (`use flake . --impure`). All commands below assume you are inside the devShell.
+# Run a single test
+cargo test init_sends_shutdown_and_exits
+cargo test stdout_bridging
 
-```sh
-# Build
-cargo build                # debug build
-cargo build --release      # release build
-
-# Run
-cargo run                  # run the binary
-cargo run -- <args>        # run with arguments
-
-# Test
-cargo test                 # run all tests
-cargo test <test_name>     # run a single test by name
-
-# Lint
-cargo clippy               # Rust lints (available in devshell)
-cargo clippy -- -D warnings  # deny warnings (use in CI)
-
-# Format
-cargo fmt                  # format Rust code
-cargo fmt -- --check       # check formatting without writing
-nixfmt                     # format Nix files
-taplo fmt                  # format TOML files
-
-# Other
-cargo deny check           # license/advisory checks
-cargo machete              # find unused dependencies
-nix flake check            # validate the Nix flake
+# Run tests in a specific file
+cargo test --test server
+cargo test --test init
 ```
 
-## Project Structure
+## Development Environment
 
-```
-src/           # Rust source code (binary crate)
-spec.md        # Project specification — read this first
-flake.nix      # Nix flake: devShell and build config
-Cargo.toml     # Rust package manifest
-.cargo/config.toml  # Linker config (clang + mold)
-```
+This project uses Nix flakes with direnv. The dev shell provides:
+- Rust 1.93.1 (stable) with rust-analyzer
+- mold linker (configured in `.cargo/config.toml`)
+- cargo-deny, cargo-edit, cargo-machete
+- nixd, nixfmt, taplo, codebook
 
-## Code Style
+Enter dev shell: `nix develop` or rely on direnv (auto-activates via `.envrc`).
 
-### Rust
+## Architecture
 
-- Edition: 2024 (stable toolchain 1.93.1)
-- Formatter: `cargo fmt` (default rustfmt settings)
-- Linter: `cargo clippy` — fix all warnings
-- Run `cargo fmt && cargo clippy -- -D warnings` before finishing a task
-- Use `snake_case` for functions, variables, modules; `CamelCase` for types/traits
-- Prefer explicit types in public APIs; use `let` with inference for local variables
-- Use `anyhow::Result` or `thiserror` for error handling (when added as dependencies)
-- Use `clap` for CLI argument parsing (when added)
-- Keep `main()` thin — delegate to library modules
+- **Protocol**: Custom binary framing over Unix sockets (1 byte type + 4 byte length + payload)
+- **Client** (`src/client.rs`): Connects to socket, sends Request, bridges stdio
+- **Server** (`src/server.rs`): Long-lived process in container, handles concurrent connections
+- **Init** (`src/init.rs`): Container entrypoint, sends RequestShutdown on SIGTERM/SIGINT
+- **Nix library** (`lib.nix`): `mkShell` produces host-facing devShell with lifecycle scripts
 
-### Imports
+## Test Patterns
 
-- Group imports: `std` → external crates → local crate modules
-- Use `use` statements rather than full paths in function bodies
-- Avoid glob imports (`use foo::*`) in production code
+Tests in `tests/` are integration tests that spawn actual server/client processes:
+- Use `tempfile::tempdir()` for socket isolation
+- Spawn server with `Command::new(NCAP_SERVER)`
+- Use `sleep()` for process startup synchronization
+- Test binary paths via `env!("CARGO_BIN_EXE_*")` constants
 
-### Modules
+## Key Constraints
 
-- One module per file or per directory with `mod.rs`
-- Keep modules small and focused (e.g., `client`, `server`, `protocol`)
-- Re-export public API from `lib.rs`
-
-### Nix
-
-- Use `nixfmt` to format all Nix files
-- Follow functional style: prefer `let` bindings and `with` sparingly
-- Keep `flake.nix` focused on orchestration; put logic in library files if it grows
-
-### TOML
-
-- Use `taplo fmt` to format `Cargo.toml` and other TOML files
-
-### Git
-
-- Commits should be small, focused, and descriptive
-- Use conventional-style prefixes when practical (`feat:`, `fix:`, `refactor:`, `chore:`)
-
-## Architecture Notes
-
-Three main components to implement:
-
-1. **`ncap`** — host CLI client; connects to a Unix socket, sends command requests, bridges stdio
-2. **`ncap-server`** — long-lived server inside the container; listens on the Unix socket, spawns child processes, bridges their stdio back to the client
-3. **Nix library (`lib.mkShell`)** — produces the host-facing devShell with lifecycle scripts (`start-container`, `stop-container`, `restart-container`)
-
-The protocol between client and server is implementation-defined but must preserve: command, args, cwd, env overrides, stdin/stdout/stderr, and exit code.
-
-## Important Constraints
-
-- `ncap-server` must never replace itself with the executed command (no `exec`)
-- Multiple concurrent client connections must be supported
-- The implementation must not assume a fixed devshell name (e.g., `container`)
-- Socket path is configurable, not hardcoded
-- Container lifecycle: `finalOpts = defaultOpts - removeOpts + opts`
+- Rust edition 2024 (unusual - ensure toolchain supports it)
+- `mold` linker required on Linux (configured in `.cargo/config.toml`)
+- Socket path read from `NCAP_SOCKET` env var
+- Server logs to timestamped files in socket directory
+- Exit code 78 = server stopping (special case)
