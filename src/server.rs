@@ -142,12 +142,7 @@ async fn handle_connection(
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);
     cmd.current_dir(&request.cwd);
-    cmd.envs(request.env.iter().filter_map(|e| {
-        let mut parts = e.splitn(2, '=');
-        let key = parts.next()?;
-        let val = parts.next().unwrap_or("");
-        Some((key, val))
-    }));
+    cmd.envs(request.env.iter().filter_map(|e| e.split_once('=')));
 
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());

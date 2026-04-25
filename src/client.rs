@@ -24,8 +24,8 @@ struct Cli {
     #[arg(short, long, env = "NCAP_SOCKET")]
     socket: String,
 
-    /// Environment overrides (KEY=VALUE)
-    #[arg(short, long, value_name = "KEY=VALUE")]
+    /// Environment overrides (KEY=VALUE or KEY to pass through from host)
+    #[arg(short, long, value_name = "KEY[=VALUE]")]
     env: Vec<String>,
 
     /// Override working directory
@@ -57,11 +57,23 @@ async fn run() -> Result<ExitCode> {
 
     let (command, args) = cli.command.split_first().unwrap();
 
+    let resolved_env: Vec<String> = cli
+        .env
+        .iter()
+        .filter_map(|e| match e.find('=') {
+            Some(_) => Some(e.clone()),
+            None => match std::env::var(e) {
+                Ok(val) => Some(format!("{e}={val}")),
+                Err(_) => None,
+            },
+        })
+        .collect();
+
     let request = Request {
         command: command.clone(),
         args: args.to_vec(),
         cwd,
-        env: cli.env,
+        env: resolved_env,
     };
 
     let stream = UnixStream::connect(&cli.socket)
