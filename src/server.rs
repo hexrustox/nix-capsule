@@ -156,7 +156,7 @@ async fn handle_connection(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            send_error(
+            return send_error(
                 &mut framed_write,
                 e.to_string(),
                 Some(&format!(
@@ -181,7 +181,6 @@ async fn handle_connection(
                 )),
             )
             .await;
-            return Ok(());
         }
     };
 
@@ -219,7 +218,7 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Error reading child stdout: {e}");
+                    tracing::error!("Failed to read child stdout: {e}");
                     break;
                 }
             }
@@ -241,7 +240,7 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Error reading child stderr: {e}");
+                    tracing::error!("Failed to read child stderr: {e}");
                     break;
                 }
             }
@@ -298,7 +297,7 @@ async fn handle_connection(
 
             let exit = Exit { exit_code };
             let exit_payload =
-                serde_json::to_vec(&exit).map_err(|e| anyhow!("Failed to serialize exit: {e}"))?;
+                serde_json::to_vec(&exit).map_err(|e| anyhow!("Failed to serialize Exit: {e}"))?;
             if let Err(e) = framed_write
                 .send(Frame {
                     frame_type: FrameType::Exit,
@@ -306,7 +305,7 @@ async fn handle_connection(
                 })
                 .await
             {
-                tracing::error!("Failed to send exit frame: {e}");
+                tracing::error!("Failed to send Exit: {e}");
             }
         }
         Err(e) => {
@@ -323,34 +322,37 @@ async fn handle_connection(
                 e.to_string(),
                 Some("Command was not running"),
             )
-            .await;
+            .await?;
         }
     };
 
     Ok(())
 }
 
-async fn send_error<S>(sink: &mut S, error: String, context: Option<&str>)
+async fn send_error<S>(sink: &mut S, error: String, context: Option<&str>) -> Result<()>
 where
     S: SinkExt<Frame> + Unpin,
+    S::Error: std::fmt::Display,
 {
     let error = ErrorMessage {
         error,
         cause: context.map(|s| s.to_string()),
     };
-    if let Ok(payload) = serde_json::to_vec(&error) {
-        let _ = sink
-            .send(Frame {
-                frame_type: FrameType::Error,
-                payload,
-            })
-            .await;
-    }
+    let payload =
+        serde_json::to_vec(&error).map_err(|e| anyhow!("Failed to serialize ErrorMessage: {e}"))?;
+    sink.send(Frame {
+        frame_type: FrameType::Error,
+        payload,
+    })
+    .await
+    .map_err(|e| anyhow!("Failed to send ErrorMessage: {e}"))?;
+    Ok(())
 }
 
 async fn send_server_stopping<S>(sink: &mut S, reason: Option<&str>) -> Result<()>
 where
     S: SinkExt<Frame> + Unpin,
+    S::Error: std::fmt::Display,
 {
     let msg = ServerStopping {
         reason: reason.map(|s| s.to_string()),
@@ -362,6 +364,6 @@ where
         payload,
     })
     .await
-    .map_err(|_| anyhow!("Failed to send ServerStopping"))?;
+    .map_err(|e| anyhow!("Failed to send ServerStopping: {e}"))?;
     Ok(())
 }

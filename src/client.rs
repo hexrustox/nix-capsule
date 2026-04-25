@@ -73,7 +73,7 @@ async fn run() -> Result<ExitCode> {
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
     let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
-    let request_payload = serde_json::to_vec(&request).wrap_err("Failed to serialize request")?;
+    let request_payload = serde_json::to_vec(&request).wrap_err("Failed to serialize Request")?;
 
     framed_write
         .send(Frame {
@@ -149,7 +149,7 @@ async fn run() -> Result<ExitCode> {
                     payload,
                 })) => {
                     let exit: Exit =
-                        serde_json::from_slice(&payload).wrap_err("Failed to parse payload")?;
+                        serde_json::from_slice(&payload).wrap_err("Failed to parse Exit")?;
                     exit_code = exit.exit_code;
                     break;
                 }
@@ -158,7 +158,7 @@ async fn run() -> Result<ExitCode> {
                     payload,
                 })) => {
                     let msg: ErrorMessage =
-                        from_slice(&payload).wrap_err("Failed to parse payload")?;
+                        from_slice(&payload).wrap_err("Failed to parse ErrorMessage")?;
                     return Err({
                         let report = Report::msg(msg.error);
                         if let Some(cause) = msg.cause {
@@ -174,18 +174,19 @@ async fn run() -> Result<ExitCode> {
                     payload,
                 })) => {
                     let msg: ServerStopping =
-                        from_slice(&payload).wrap_err("Failed to parse payload")?;
-                    if let Some(reason) = msg.reason {
-                        eprintln!("ncap: server stopping: {reason}");
-                    }
-                    exit_code = 78;
-                    break;
+                        from_slice(&payload).wrap_err("Failed to parse ServerStopping")?;
+                    let err = eyre!("Server stopping");
+                    return Err(if let Some(reason) = msg.reason {
+                        eyre!(reason).wrap_err(err)
+                    } else {
+                        err
+                    });
                 }
                 Some(Ok(frame)) => {
                     return Err(eyre!("Unexpected frame: {:?}", frame.frame_type)
                         .wrap_err("Protocol error"));
                 }
-                Some(Err(e)) => return Err(Report::from(e)).wrap_err("Socket read error"),
+                Some(Err(e)) => return Err(Report::from(e)).wrap_err("Failed to read from socket"),
                 None => {
                     break;
                 }
@@ -195,6 +196,5 @@ async fn run() -> Result<ExitCode> {
     });
 
     let exit_code = response_task.await.wrap_err("Response task panicked")??;
-
     Ok(ExitCode::from(exit_code as u8))
 }
