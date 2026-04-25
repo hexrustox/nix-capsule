@@ -1,4 +1,4 @@
-{ pkgs, nixCapsule }:
+{ pkgs }:
 {
   mkShell =
     {
@@ -52,11 +52,11 @@
           ${runtime} run -d \
             ${lib.concatStringsSep " " finalOpts} -- \
             ${image} \
-            ${nixCapsule}/bin/ncap-init
+            ${pkgs.ncap}/bin/ncap-init
 
           ${lib.optionalString wait blocking}
 
-          ${runtime} exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${nixCapsule}/bin/ncap-server
+          ${runtime} exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${pkgs.ncap}/bin/ncap-server
         '';
 
       stopContainer = pkgs.writeShellScriptBin "stop-container" ''
@@ -75,7 +75,7 @@
       name = nixShellName;
 
       packages = [
-        nixCapsule
+        pkgs.ncap
         startContainer
         stopContainer
         restartContainer

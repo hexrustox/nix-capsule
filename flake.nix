@@ -12,12 +12,11 @@
     { flake-parts, ... }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
       flake = {
-        lib =
-          { system, pkgs }:
-          import ./lib.nix {
-            inherit pkgs;
-            nixCapsule = inputs.self.packages.${system}.ncap;
-          };
+        lib = { pkgs }: import ./lib.nix { inherit pkgs; };
+
+        overlays.default = final: prev: {
+          ncap = prev.callPackage ./package.nix { };
+        };
       };
 
       perSystem =
@@ -28,9 +27,12 @@
         let
           pkgs = import inputs.nixpkgs {
             inherit system;
-            overlays = [ inputs.rust-overlay.overlays.default ];
+            overlays = [
+              inputs.rust-overlay.overlays.default
+              inputs.self.overlays.default
+            ];
           };
-          capsule-lib = inputs.self.lib { inherit system pkgs; };
+          capsule-lib = inputs.self.lib { inherit pkgs; };
         in
         {
           packages.ncap = pkgs.callPackage ./package.nix { };
