@@ -2,18 +2,22 @@
   pkgs,
 }:
 let
-  lib = pkgs.lib;
-  src = lib.sourceByRegex ./. [
-    "Cargo\.lock"
-    "Cargo\.toml"
-    "src"
-    ".*\.rs$"
-  ];
+  inherit (pkgs) lib;
+
+  cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.unions [
+      ./Cargo.toml
+      ./Cargo.lock
+      ./src
+    ];
+  };
 in
 pkgs.rustPlatform.buildRustPackage {
   inherit src;
   pname = "ncap";
-  version = "0.3.0";
+  version = cargoToml.package.version;
   cargoLock = {
     lockFile = src + /Cargo.lock;
   };

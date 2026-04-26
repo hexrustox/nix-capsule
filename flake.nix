@@ -1,4 +1,6 @@
 {
+  description = "Containerized dev shells with transparent binary execution";
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-25.11";
     rust-overlay = {
@@ -50,7 +52,7 @@
               ];
               wrappers = [
                 "cargo"
-                "codebook"
+                "codebook-lsp"
                 "rust-analyzer"
                 "nixd"
                 "taplo"
@@ -70,8 +72,6 @@
               in
               pkgs.mkShellNoCC {
                 packages = with pkgs; [
-                  opencode
-
                   cargo-deny
                   cargo-edit
                   cargo-machete
