@@ -67,45 +67,37 @@ in
         NIX="${pkgs.nix}/bin/nix"
         BASH="${pkgs.bash}/bin/bash"
 
-        cache_shell() {
-          local need_cache=false
-          local lock_file="$PROJECT_ROOT/flake.lock"
-
-          if [[ -f "$lock_file" ]]; then
-            local current_hash cached_hash
-            current_hash=$(sha256sum "$lock_file" | cut -d' ' -f1)
-            cached_hash=$(cat "$CACHE_HASH" 2>/dev/null || echo "")
-            if [[ "$current_hash" != "$cached_hash" ]] || [[ ! -f "$CACHE" ]]; then
-              need_cache=true
-            fi
-          elif [[ ! -f "$CACHE" ]]; then
-            need_cache=true
-          fi
-
-          if $need_cache; then
-            echo "Caching dev environment..." >&2
-            mkdir -p "$CACHE_DIR"
-            "$NIX" print-dev-env "$DEVSHELL" > "$CACHE" || {
-              echo "Failed to evaluate dev shell: $DEVSHELL" >&2
-              rm -f "$CACHE"
-              return 1
-            }
-            [[ -f "$lock_file" ]] && echo "$current_hash" > "$CACHE_HASH"
-          fi
-        }
-
         is_running() {
           local state
           state=$("$RUNTIME" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo "false")
           [[ "$state" == "true" ]]
         }
 
-        cmd_start() {
-          cache_shell || return 1
+        cmd_init() {
+          local output new_hash old_hash
+          output=$("$NIX" print-dev-env "$DEVSHELL")
+          new_hash=$(echo "$output" | sha256sum | cut -d' ' -f1)
+          old_hash=$(cat "$CACHE_HASH" 2>/dev/null || echo "")
+          if [[ "$new_hash" == "$old_hash" ]] && [[ -f "$CACHE" ]]; then
+            cmd_start
+            return
+          fi
+          echo "Caching dev environment..." >&2
+          mkdir -p "$CACHE_DIR"
+          echo "$output" > "$CACHE"
+          echo "$new_hash" > "$CACHE_HASH"
+          cmd_restart
+        }
 
+        cmd_start() {
           if is_running; then
             echo "Container '$CONTAINER' is already running." >&2
             return 0
+          fi
+
+          if [[ ! -f "$CACHE" ]]; then
+            echo "No cached dev environment found. Run 'ncap-ctl init' first." >&2
+            return 1
           fi
 
           mkdir -p "$SOCKET_DIR"
@@ -129,7 +121,6 @@ in
         }
 
         cmd_enter() {
-          cache_shell || return 1
           if [[ ! -f "$CACHE" ]]; then
             echo "No cached dev environment found. Have you run 'start'?" >&2
             return 1
@@ -148,13 +139,14 @@ in
         }
 
         case "''${1:-}" in
+          init)    cmd_init ;;
           start)   cmd_start ;;
           stop)    cmd_stop ;;
           restart) cmd_restart ;;
           enter)   cmd_enter ;;
           status)  cmd_status ;;
           *)
-            echo "usage: ncap-ctl {start|stop|restart|enter|status}" >&2
+            echo "usage: ncap-ctl {init|start|stop|restart|enter|status}" >&2
             exit 1
             ;;
         esac
@@ -182,6 +174,6 @@ in
 
       NCAP_SOCKET = socketPath;
 
-      shellHook = optionalString autoStart "ncap-ctl start\n" + shellHook;
+      shellHook = optionalString autoStart "ncap-ctl init\n" + shellHook;
     };
 }
