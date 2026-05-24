@@ -132,7 +132,7 @@ async fn run() -> Result<ExitCode> {
     });
 
     let response_task = tokio::spawn(async move {
-        let mut exit_code: i32 = 0;
+        let exit_code: u8;
         loop {
             let frame = framed_read.next().await;
             match frame {
@@ -162,7 +162,7 @@ async fn run() -> Result<ExitCode> {
                 })) => {
                     let exit: Exit =
                         serde_json::from_slice(&payload).wrap_err("Failed to parse Exit")?;
-                    exit_code = exit.exit_code;
+                    exit_code = exit.exit_code as u8;
                     break;
                 }
                 Some(Ok(Frame {
@@ -198,6 +198,7 @@ async fn run() -> Result<ExitCode> {
                 }
                 Some(Err(e)) => return Err(Report::from(e)).wrap_err("Failed to read from socket"),
                 None => {
+                    exit_code = 1;
                     break;
                 }
             }
@@ -211,5 +212,5 @@ async fn run() -> Result<ExitCode> {
         eprintln!("{err}");
     }
 
-    Ok(ExitCode::from(exit_code as u8))
+    Ok(ExitCode::from(exit_code))
 }
