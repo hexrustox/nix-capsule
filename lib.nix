@@ -135,7 +135,7 @@ in
             return 1
           fi
           exec "$RUNTIME" exec -it "$CONTAINER" \
-            "$BASH" -c "source $CACHE && exec $BASH"
+            "$BASH" -c '[ -f ~/.bashrc ] && source ~/.bashrc; source '"$CACHE"'; exec '"$BASH"' --norc'
         }
 
         cmd_status() {
