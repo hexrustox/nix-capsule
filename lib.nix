@@ -1,4 +1,8 @@
 { pkgs }:
+let
+  lib = pkgs.lib;
+  inherit (lib) optionalString optionals concatStringsSep hasPrefix;
+in
 {
   mkShell =
     {
@@ -7,106 +11,188 @@
       socketPath,
       containerName,
       runtime ? "podman",
-      options ? [ ],
-      removeOptions ? [ ],
-      useDefaultOptions ? true,
-      hardenContainer ? false,
+      extraOptions ? [ ],
+      harden ? false,
       autoStart ? true,
-      wait ? true,
-      nixShellName ? "nix-capsule",
       wrappers ? [ ],
       shellHook ? "",
+      cachePath ? null,
     }:
     let
-      lib = pkgs.lib;
-
       socketDir = builtins.dirOf socketPath;
-      defaultOpts = lib.optionals useDefaultOptions [
+
+      devShellPath =
+        if hasPrefix "." devShell || hasPrefix "/" devShell
+        then devShell
+        else ".#${devShell}";
+
+      defaultOpts = [
         "--replace"
         "--name ${containerName}"
         "-v /nix:/nix"
         "-v /etc:/etc"
-        "-v \"$project_root\":\"$project_root\""
-        "-w \"$project_root\""
+        "-v \"$PROJECT_ROOT\":\"$PROJECT_ROOT\""
+        "-w \"$PROJECT_ROOT\""
         "-v ${socketDir}:${socketDir}"
       ];
-      hardenOpts = lib.optionals hardenContainer [
+
+      hardenOpts = optionals harden [
         "--cap-drop=all"
         "--security-opt=no-new-privileges"
       ];
-      finalOpts = lib.subtractLists removeOptions (defaultOpts ++ hardenOpts ++ options);
 
-      devShellPath =
-        if (lib.hasPrefix "." devShell) || (lib.hasPrefix "/" devShell) then devShell else ".#${devShell}";
+      finalOpts = concatStringsSep " " (defaultOpts ++ hardenOpts ++ extraOptions);
 
-      startContainer =
-        let
-          blocking = "${runtime} exec -t ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command true";
-        in
-        pkgs.writeShellScriptBin "start-container" ''
-          project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+      cacheDir =
+        if cachePath == null
+        then "$PROJECT_ROOT/.ncap-cache"
+        else cachePath;
 
-          mkdir -p ${socketDir}
+      ncapCtl = pkgs.writeShellScriptBin "ncap-ctl" ''
+        set -euo pipefail
 
-          ${runtime} run -d \
-            ${lib.concatStringsSep " " finalOpts} -- \
-            ${image} \
-            ${pkgs.ncap}/bin/ncap-init --socket ${socketPath}
+        PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+        CACHE_DIR="${cacheDir}"
+        CACHE="$CACHE_DIR/cache"
+        CACHE_HASH="$CACHE_DIR/hash"
 
-          ${lib.optionalString wait blocking}
+        SOCKET_DIR="${socketDir}"
+        SOCKET_PATH="${socketPath}"
+        CONTAINER="${containerName}"
+        IMAGE="${image}"
+        RUNTIME="${runtime}"
+        DEVSHELL="${devShellPath}"
+        NCAP_INIT="${pkgs.ncap}/bin/ncap-init"
+        NCAP_SERVER="${pkgs.ncap}/bin/ncap-server"
+        NIX="${pkgs.nix}/bin/nix"
+        BASH="${pkgs.bash}/bin/bash"
 
-          ${runtime} exec -d ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath} --command ${pkgs.ncap}/bin/ncap-server --socket ${socketPath}
-        '';
+        cache_shell() {
+          local need_cache=false
+          local lock_file="$PROJECT_ROOT/flake.lock"
 
-      stopContainer = pkgs.writeShellScriptBin "stop-container" ''
-        ${runtime} stop ${containerName}
+          if [[ -f "$lock_file" ]]; then
+            local current_hash cached_hash
+            current_hash=$(sha256sum "$lock_file" | cut -d' ' -f1)
+            cached_hash=$(cat "$CACHE_HASH" 2>/dev/null || echo "")
+            if [[ "$current_hash" != "$cached_hash" ]] || [[ ! -f "$CACHE" ]]; then
+              need_cache=true
+            fi
+          elif [[ ! -f "$CACHE" ]]; then
+            need_cache=true
+          fi
+
+          if $need_cache; then
+            echo "Caching dev environment..." >&2
+            mkdir -p "$CACHE_DIR"
+            "$NIX" print-dev-env "$DEVSHELL" > "$CACHE" || {
+              echo "Failed to evaluate dev shell: $DEVSHELL" >&2
+              rm -f "$CACHE"
+              return 1
+            }
+            [[ -f "$lock_file" ]] && echo "$current_hash" > "$CACHE_HASH"
+          fi
+        }
+
+        is_running() {
+          local state
+          state=$("$RUNTIME" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo "false")
+          [[ "$state" == "true" ]]
+        }
+
+        cmd_start() {
+          cache_shell || return 1
+
+          if is_running; then
+            echo "Container '$CONTAINER' is already running." >&2
+            return 0
+          fi
+
+          mkdir -p "$SOCKET_DIR"
+
+          "$RUNTIME" run -d \
+            ${finalOpts} -- \
+            "$IMAGE" \
+            "$NCAP_INIT" --socket "$SOCKET_PATH"
+
+          "$RUNTIME" exec -d "$CONTAINER" \
+            "$BASH" -c "source $CACHE && exec $NCAP_SERVER --socket $SOCKET_PATH"
+        }
+
+        cmd_stop() {
+          "$RUNTIME" stop "$CONTAINER"
+        }
+
+        cmd_restart() {
+          cmd_stop
+          cmd_start
+        }
+
+        cmd_enter() {
+          cache_shell || return 1
+          if [[ ! -f "$CACHE" ]]; then
+            echo "No cached dev environment found. Have you run 'start'?" >&2
+            return 1
+          fi
+          exec "$RUNTIME" exec -it "$CONTAINER" \
+            "$BASH" -c "source $CACHE && exec $BASH"
+        }
+
+        cmd_status() {
+          if is_running; then
+            echo "Container '$CONTAINER' is running."
+          else
+            echo "Container '$CONTAINER' is not running."
+            return 1
+          fi
+        }
+
+        self=$(basename "$0")
+        sub="''${1:-}"
+        case "''${sub:-$self}" in
+          start|start-container)    cmd_start ;;
+          stop|stop-container)      cmd_stop ;;
+          restart|restart-container) cmd_restart ;;
+          enter|enter-container)    cmd_enter ;;
+          status|ncap-ctl)          cmd_status ;;
+          *)
+            echo "usage: ncap-ctl {start|stop|restart|enter|status}" >&2
+            exit 1
+            ;;
+        esac
       '';
 
-      restartContainer = pkgs.writeShellScriptBin "restart-container" ''
-        stop-container && start-container
+      ncapAliases = pkgs.runCommand "ncap-aliases" { } ''
+        mkdir -p "$out/bin"
+        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/start-container"
+        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/stop-container"
+        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/restart-container"
+        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/enter-container"
       '';
 
-      enterContainer = pkgs.writeShellScriptBin "enter-container" ''
-        ${runtime} exec -it ${containerName} ${pkgs.nix}/bin/nix develop ${devShellPath}
-      '';
+      mkWrapperScript =
+        elem:
+        if builtins.isString elem then
+          {
+            name = elem;
+            value = elem;
+          }
+        else
+          elem;
     in
     pkgs.mkShellNoCC {
-      name = nixShellName;
+      name = "nix-capsule";
 
       packages = [
         pkgs.ncap
-        startContainer
-        stopContainer
-        restartContainer
-        enterContainer
-      ]
-      ++ (map ({ name, value }: pkgs.writeShellScriptBin name ''ncap ${value} "$@"'') (
-        map (
-          elem:
-          if builtins.isString elem then
-            {
-              name = elem;
-              value = elem;
-            }
-          else
-            elem
-        ) wrappers
-      ));
+        ncapCtl
+        ncapAliases
+      ] ++ map ({ name, value }: pkgs.writeShellScriptBin name ''exec ncap ${value} "$@"'') (
+        map mkWrapperScript wrappers
+      );
 
       NCAP_SOCKET = socketPath;
 
-      shellHook =
-        let
-          init = lib.optionalString autoStart ''
-            if [[ "$(${runtime} inspect -f '{{.State.Running}}' ${containerName} 2>/dev/null)" != "true" ]]; then
-              start-container
-            fi
-          '';
-        in
-        ''
-          ${init}
-
-          ${shellHook}
-        '';
+      shellHook = optionalString autoStart "ncap-ctl start\n" + shellHook;
     };
 }

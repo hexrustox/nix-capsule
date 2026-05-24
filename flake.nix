@@ -45,7 +45,7 @@
               devShell = "container";
               socketPath = "/tmp/nix-capsule/ncap-socket";
               containerName = "ncap";
-              options = [
+              extraOptions = [
                 "-e HOME"
                 "-e NIX_PATH"
                 "-v \"$HOME/.cargo\":\"$HOME/.cargo\""
