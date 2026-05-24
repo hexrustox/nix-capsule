@@ -147,27 +147,17 @@ in
           fi
         }
 
-        self=$(basename "$0")
-        sub="''${1:-}"
-        case "''${sub:-$self}" in
-          start|start-container)    cmd_start ;;
-          stop|stop-container)      cmd_stop ;;
-          restart|restart-container) cmd_restart ;;
-          enter|enter-container)    cmd_enter ;;
-          status|ncap-ctl)          cmd_status ;;
+        case "''${1:-}" in
+          start)   cmd_start ;;
+          stop)    cmd_stop ;;
+          restart) cmd_restart ;;
+          enter)   cmd_enter ;;
+          status)  cmd_status ;;
           *)
             echo "usage: ncap-ctl {start|stop|restart|enter|status}" >&2
             exit 1
             ;;
         esac
-      '';
-
-      ncapAliases = pkgs.runCommand "ncap-aliases" { } ''
-        mkdir -p "$out/bin"
-        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/start-container"
-        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/stop-container"
-        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/restart-container"
-        ln -s ${ncapCtl}/bin/ncap-ctl "$out/bin/enter-container"
       '';
 
       mkWrapperScript =
@@ -186,7 +176,6 @@ in
       packages = [
         pkgs.ncap
         ncapCtl
-        ncapAliases
       ] ++ map ({ name, value }: pkgs.writeShellScriptBin name ''exec ncap ${value} "$@"'') (
         map mkWrapperScript wrappers
       );
