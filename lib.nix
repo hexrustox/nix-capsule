@@ -53,15 +53,18 @@ in
 
         PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
         CACHE_DIR="${cacheDir}"
-        CACHE="$CACHE_DIR/cache"
-        CACHE_HASH="$CACHE_DIR/hash"
+        DEVSHELL="${devShellPath}"
+        DEVSHELL_NAME=$(echo "$DEVSHELL" | sed 's/[^a-zA-Z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')
+        CACHE_BASE="$CACHE_DIR/$DEVSHELL_NAME"
+        CACHE="$CACHE_BASE/cache"
+        CACHE_HASH="$CACHE_BASE/hash"
+        PROFILE="$CACHE_BASE/profile"
 
         SOCKET_DIR="${socketDir}"
         SOCKET_PATH="${socketPath}"
         CONTAINER="${containerName}"
         IMAGE="${image}"
         RUNTIME="${runtime}"
-        DEVSHELL="${devShellPath}"
         NCAP_INIT="${pkgs.ncap}/bin/ncap-init"
         NCAP_SERVER="${pkgs.ncap}/bin/ncap-server"
         NIX="${pkgs.nix}/bin/nix"
@@ -75,7 +78,8 @@ in
 
         cmd_init() {
           local output new_hash old_hash
-          output=$("$NIX" print-dev-env "$DEVSHELL")
+          mkdir -p "$CACHE_BASE"
+          output=$("$NIX" print-dev-env --profile "$PROFILE" "$DEVSHELL")
           new_hash=$(echo "$output" | sha256sum | cut -d' ' -f1)
           old_hash=$(cat "$CACHE_HASH" 2>/dev/null || echo "")
           if [[ "$new_hash" == "$old_hash" ]] && [[ -f "$CACHE" ]]; then
@@ -83,9 +87,9 @@ in
             return
           fi
           echo "Caching dev environment..." >&2
-          mkdir -p "$CACHE_DIR"
           echo "$output" > "$CACHE"
           echo "$new_hash" > "$CACHE_HASH"
+          "$NIX" profile wipe-history --profile "$PROFILE"
           cmd_restart
         }
 
