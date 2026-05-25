@@ -41,14 +41,15 @@
 
           devShells = {
             default = capsule-lib.mkShell {
-              image = "ubuntu:latest";
+              image = "alpine:latest";
               devShell = "container";
               socketPath = "/tmp/nix-capsule/ncap-socket";
               containerName = "ncap";
               extraOptions = [
                 "-e HOME"
                 "-e NIX_PATH"
-                "-v \"$HOME/.cargo\":\"$HOME/.cargo\""
+                "-e CARGO_HOME"
+                "-v \"$CARGO_HOME\":\"$CARGO_HOME\""
               ];
               wrappers = [
                 "cargo"
@@ -57,6 +58,9 @@
                 "nixd"
                 "taplo"
               ];
+              preShellHook = ''
+                export CARGO_HOME=''${CARGO_HOME:-$HOME/.cargo}
+              '';
             };
 
             container =
@@ -64,7 +68,7 @@
                 rust = (
                   pkgs.rust-bin.stable."1.93.1".default.override {
                     extensions = [
-                      "rust-src" # for rust-analyzer
+                      "rust-src"
                       "rust-analyzer"
                     ];
                   }

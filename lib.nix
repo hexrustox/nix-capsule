@@ -33,8 +33,7 @@ in
       defaultOpts = [
         "--replace"
         "--name ${containerName}"
-        "-v /nix:/nix"
-        "-v /etc:/etc"
+        "-v /nix/store:/nix/store:ro"
         "-v \"$PROJECT_ROOT\":\"$PROJECT_ROOT\""
         "-w \"$PROJECT_ROOT\""
         "-v ${socketDir}:${socketDir}"
