@@ -94,7 +94,7 @@ Each frame consists of:
 2. `ncap-init` connects to the Unix socket and sends a `RequestShutdown` frame.
 3. Server broadcasts a `ServerStopping` frame to all active client connections.
 4. Server stops accepting new connections and exits after active connections close.
-5. Clients receiving `ServerStopping` print reason if any and exit with code 78.
+5. Clients receiving `ServerStopping` print reason if any and exit with code 143 (128 + SIGTERM).
 
 ## 4. Client (`ncap`) Requirements
 
@@ -123,12 +123,12 @@ Options:
    - `Stderr` → write to stderr
    - `Exit` → record exit code, close connection
    - `Error` → report error, exit with code 1
-   - `ServerStopping` → print reason, exit with code 78
+   - `ServerStopping` → print reason, exit with code 143
 7. Return the child's exit code.
 
 ### Exit Code Propagation
 
-The client exits with the same code as the child process. If the server reports an error or the connection fails, the client exits with code 1. If the server is shutting down, the client exits with code 78.
+The client exits with the same code as the child process. If the server reports an error or the connection fails, the client exits with code 1. If the server is shutting down or the connection drops without an `Exit` frame, the client exits with code 143 (128 + SIGTERM).
 
 ## 5. Server (`ncap-server`) Requirements
 
@@ -227,4 +227,4 @@ Multiple `ncap` invocations may run simultaneously against the same server. Each
 
 ### Graceful Shutdown
 
-When the container stops, `ncap-init` signals the server. The server notifies all active clients via `ServerStopping` frames before exiting. Clients receiving the notification exit with code 78. This allows LSP servers and other long-lived processes to terminate cleanly during container shutdown.
+When the container stops, `ncap-init` signals the server. The server notifies all active clients via `ServerStopping` frames before exiting. Clients receiving the notification exit with code 143. This allows LSP servers and other long-lived processes to terminate cleanly during container shutdown.

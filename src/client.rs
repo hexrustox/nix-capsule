@@ -188,7 +188,7 @@ async fn run() -> Result<ExitCode> {
                     } else {
                         eyre!("Server is shutting down")
                     };
-                    return Ok((78, Some(err)));
+                    return Ok((143, Some(err)));
                 }
                 Some(Ok(frame)) => {
                     return Err(eyre!(
@@ -198,8 +198,7 @@ async fn run() -> Result<ExitCode> {
                 }
                 Some(Err(e)) => return Err(Report::from(e)).wrap_err("Failed to read from socket"),
                 None => {
-                    exit_code = 1;
-                    break;
+                    return Ok((143, Some(eyre!("Server disconnected"))));
                 }
             }
         }

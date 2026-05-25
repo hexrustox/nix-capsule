@@ -70,7 +70,7 @@ fn init_shutdown_notifies_all_clients() {
     assert!(status.success());
     for client in clients {
         let output = client.wait_with_output().unwrap();
-        assert_eq!(output.status.code(), Some(78));
+        assert_eq!(output.status.code(), Some(143));
     }
     let _ = server.kill();
     let _ = server.wait();

@@ -353,5 +353,5 @@ fn client_receives_server_stopping() {
     send_request_shutdown(&server.socket);
 
     let output = client.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(78));
+    assert_eq!(output.status.code(), Some(143));
 }
