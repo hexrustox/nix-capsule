@@ -20,7 +20,8 @@ in
       harden ? false,
       autoStart ? true,
       wrappers ? [ ],
-      shellHook ? "",
+      preShellHook ? "",
+      postShellHook ? "",
       cachePath ? null,
     }:
     let
@@ -179,6 +180,10 @@ in
 
       NCAP_SOCKET = socketPath;
 
-      shellHook = optionalString autoStart "ncap-ctl init\n" + shellHook;
+      shellHook = ''
+        ${preShellHook}
+        ${optionalString autoStart "ncap-ctl init"}
+        ${postShellHook}
+      '';
     };
 }
