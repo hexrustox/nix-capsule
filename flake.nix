@@ -50,6 +50,9 @@
                 "-e NIX_PATH"
                 "-e CARGO_HOME"
                 "-v \"$CARGO_HOME\":\"$CARGO_HOME\""
+                "-v /etc/nix:/etc/nix"
+                "-v /etc/static/nix:/etc/static/nix"
+                "-v /nix:/nix:ro"
               ];
               wrappers = [
                 "cargo"
