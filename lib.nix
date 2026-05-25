@@ -1,7 +1,12 @@
 { pkgs }:
 let
   lib = pkgs.lib;
-  inherit (lib) optionalString optionals concatStringsSep hasPrefix;
+  inherit (lib)
+    optionalString
+    optionals
+    concatStringsSep
+    hasPrefix
+    ;
 in
 {
   mkShell =
@@ -22,9 +27,7 @@ in
       socketDir = builtins.dirOf socketPath;
 
       devShellPath =
-        if hasPrefix "." devShell || hasPrefix "/" devShell
-        then devShell
-        else ".#${devShell}";
+        if hasPrefix "." devShell || hasPrefix "/" devShell then devShell else ".#${devShell}";
 
       defaultOpts = [
         "--replace"
@@ -43,10 +46,7 @@ in
 
       finalOpts = concatStringsSep " " (defaultOpts ++ hardenOpts ++ extraOptions);
 
-      cacheDir =
-        if cachePath == null
-        then "$PROJECT_ROOT/.ncap-cache"
-        else cachePath;
+      cacheDir = if cachePath == null then "$PROJECT_ROOT/.ncap-cache" else cachePath;
 
       ncapCtl = pkgs.writeShellScriptBin "ncap-ctl" ''
         set -euo pipefail
@@ -172,7 +172,8 @@ in
       packages = [
         pkgs.ncap
         ncapCtl
-      ] ++ map ({ name, value }: pkgs.writeShellScriptBin name ''exec ncap ${value} "$@"'') (
+      ]
+      ++ map ({ name, value }: pkgs.writeShellScriptBin name ''exec ncap ${value} "$@"'') (
         map mkWrapperScript wrappers
       );
 
