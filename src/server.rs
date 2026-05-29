@@ -1,4 +1,3 @@
-use chrono::Local;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -30,7 +29,11 @@ struct Cli {
 }
 
 fn init_logging(log_dir: &Path) -> WorkerGuard {
-    let timestamp = Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
     let log_filename = format!("ncap-server-{}.log", timestamp);
 
     let file_appender = tracing_appender::rolling::never(log_dir, log_filename);

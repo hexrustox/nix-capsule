@@ -22,7 +22,6 @@ in
       wrappers ? [ ],
       preShellHook ? "",
       postShellHook ? "",
-      cachePath ? null,
     }:
     let
       socketDir = builtins.dirOf socketPath;
@@ -33,9 +32,9 @@ in
       defaultOpts = [
         "--replace"
         "--name ${containerName}"
-        "-v /nix/store:/nix/store:ro"
-        "-v \"$PROJECT_ROOT\":\"$PROJECT_ROOT\""
-        "-w \"$PROJECT_ROOT\""
+        "-v /nix:/nix:ro"
+        "-v \"$project_root\":\"$project_root\""
+        "-w \"$project_root\""
         "-v ${socketDir}:${socketDir}"
       ];
 
@@ -46,77 +45,70 @@ in
 
       finalOpts = concatStringsSep " " (defaultOpts ++ hardenOpts ++ extraOptions);
 
-      cacheDir = if cachePath == null then "$PROJECT_ROOT/.ncap-cache" else cachePath;
-
       ncapCtl = pkgs.writeShellScriptBin "ncap-ctl" ''
         set -euo pipefail
 
-        PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-        CACHE_DIR="${cacheDir}"
-        DEVSHELL="${devShellPath}"
-        DEVSHELL_NAME=$(echo "$DEVSHELL" | sed 's/[^a-zA-Z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')
-        CACHE_BASE="$CACHE_DIR/$DEVSHELL_NAME"
-        CACHE="$CACHE_BASE/cache"
-        CACHE_HASH="$CACHE_BASE/hash"
-        PROFILE="$CACHE_BASE/profile"
+        project_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+        devshell="${devShellPath}"
+        devshell_name=$(echo "$devshell" | sed 's/[^a-zA-Z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')
+        cache_dir="$project_root/.ncap-cache/$devshell_name"
+        cache_file="$cache_dir/env"
+        nix_profile="$cache_dir/profile"
 
-        SOCKET_DIR="${socketDir}"
-        SOCKET_PATH="${socketPath}"
-        CONTAINER="${containerName}"
-        IMAGE="${image}"
-        RUNTIME="${runtime}"
-        NCAP_INIT="${pkgs.ncap}/bin/ncap-init"
-        NCAP_SERVER="${pkgs.ncap}/bin/ncap-server"
-        NIX="${pkgs.nix}/bin/nix"
-        BASH="${pkgs.bash}/bin/bash"
+        socket_dir="${socketDir}"
+        socket_path="${socketPath}"
+        container="${containerName}"
+        image="${image}"
+        runtime="${runtime}"
+        ncap_init_bin="${pkgs.ncap}/bin/ncap-init"
+        ncap_server_bin="${pkgs.ncap}/bin/ncap-server"
+        nix_bin="${pkgs.nix}/bin/nix"
+        bash_bin="${pkgs.bash}/bin/bash"
 
         is_running() {
           local state
-          state=$("$RUNTIME" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo "false")
+          state=$("$runtime" inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo "false")
           [[ "$state" == "true" ]]
         }
 
         cmd_init() {
-          local output new_hash old_hash
-          mkdir -p "$CACHE_BASE"
-          output=$("$NIX" print-dev-env --profile "$PROFILE" "$DEVSHELL")
-          new_hash=$(echo "$output" | sha256sum | cut -d' ' -f1)
-          old_hash=$(cat "$CACHE_HASH" 2>/dev/null || echo "")
-          if [[ "$new_hash" == "$old_hash" ]] && [[ -f "$CACHE" ]]; then
-            cmd_start
+          local output
+          mkdir -p "$cache_dir"
+          if [[ "''${NCAP_CACHE:-0}" -eq 0 ]] || [[ ! -f "$cache_file" ]]; then
+            echo "Caching dev environment..." >&2
+            output=$("$nix_bin" print-dev-env --profile "$nix_profile" "$devshell")
+            echo "$output" > "$cache_file"
+            "$nix_bin" profile wipe-history --profile "$nix_profile"
+            cmd_restart
             return
           fi
-          echo "Caching dev environment..." >&2
-          echo "$output" > "$CACHE"
-          echo "$new_hash" > "$CACHE_HASH"
-          "$NIX" profile wipe-history --profile "$PROFILE"
-          cmd_restart
+          cmd_start
         }
 
         cmd_start() {
           if is_running; then
-            echo "Container '$CONTAINER' is already running." >&2
+            echo "Container '$container' is already running." >&2
             return 0
           fi
 
-          if [[ ! -f "$CACHE" ]]; then
+          if [[ ! -f "$cache_file" ]]; then
             echo "No cached dev environment found. Run 'ncap-ctl init' first." >&2
             return 1
           fi
 
-          mkdir -p "$SOCKET_DIR"
+          mkdir -p "$socket_dir"
 
-          "$RUNTIME" run -d \
+          "$runtime" run -d \
             ${finalOpts} -- \
-            "$IMAGE" \
-            "$NCAP_INIT" --socket "$SOCKET_PATH"
+            "$image" \
+            "$ncap_init_bin" --socket "$socket_path"
 
-          "$RUNTIME" exec -d "$CONTAINER" \
-            "$BASH" -c "source $CACHE && exec $NCAP_SERVER --socket $SOCKET_PATH"
+          "$runtime" exec -d "$container" \
+            "$bash_bin" -c "source $cache_file && exec $ncap_server_bin --socket $socket_path"
         }
 
         cmd_stop() {
-          "$RUNTIME" stop "$CONTAINER"
+          "$runtime" stop "$container"
         }
 
         cmd_restart() {
@@ -125,19 +117,19 @@ in
         }
 
         cmd_enter() {
-          if [[ ! -f "$CACHE" ]]; then
+          if [[ ! -f "$cache_file" ]]; then
             echo "No cached dev environment found. Have you run 'start'?" >&2
             return 1
           fi
-          exec "$RUNTIME" exec -it "$CONTAINER" \
-            "$BASH" -c '[ -f ~/.bashrc ] && source ~/.bashrc; source '"$CACHE"'; exec '"$BASH"' --norc'
+          exec "$runtime" exec -it "$container" \
+            "$bash_bin" -c "source $cache_file; exec $bash_bin"
         }
 
         cmd_status() {
           if is_running; then
-            echo "Container '$CONTAINER' is running."
+            echo "Container '$container' is running."
           else
-            echo "Container '$CONTAINER' is not running."
+            echo "Container '$container' is not running."
             return 1
           fi
         }

@@ -15,6 +15,10 @@ path = "src/server.rs"
 name = "ncap-init"
 path = "src/init.rs"
 
+[[bin]]
+name = "ncap-direnv"
+path = "src/direnv.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
@@ -38,7 +42,6 @@ color-eyre = { version = "0.6", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

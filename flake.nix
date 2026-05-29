@@ -39,6 +39,11 @@
         {
           packages.ncap = pkgs.callPackage ./package.nix { };
 
+          apps.default = {
+            type = "app";
+            program = "${pkgs.ncap}/bin/ncap-direnv";
+          };
+
           devShells = {
             default = capsule-lib.mkShell {
               image = "alpine:latest";
@@ -50,9 +55,6 @@
                 "-e NIX_PATH"
                 "-e CARGO_HOME"
                 "-v \"$CARGO_HOME\":\"$CARGO_HOME\""
-                "-v /etc/nix:/etc/nix"
-                "-v /etc/static/nix:/etc/static/nix"
-                "-v /nix:/nix:ro"
               ];
               wrappers = [
                 "cargo"
