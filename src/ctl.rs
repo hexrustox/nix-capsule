@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
-use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use color_eyre::eyre::{Context, Result};
+use nix_capsule::path;
 
 #[derive(Parser)]
 #[command(
@@ -45,6 +47,7 @@ struct Config {
 }
 
 fn main() -> Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
     let cfg = Config::from_env()?;
     match cli.command {
@@ -61,7 +64,11 @@ impl Config {
         let project_root = project_root()?;
         let devshell = env("NCAP_DEVSHELL")?;
         let devshell_name = sanitize_name(&devshell);
-        let cache_dir = PathBuf::from(format!("{}/.ncap-cache/{devshell_name}", project_root));
+        let cache_dir = PathBuf::from(format!(
+            "{}/{}/{devshell_name}",
+            project_root,
+            path::CACHE_DIR
+        ));
         let socket = env("NCAP_SOCKET")?;
         let socket_dir = Path::new(&socket)
             .parent()
@@ -94,121 +101,13 @@ impl Config {
     }
 }
 
-fn init(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(cfg.cache_file.parent().unwrap())?;
-
-    let ncaps = std::env::var("NCAP_CACHE").unwrap_or_default();
-    if ncaps != "1" || !cfg.cache_file.exists() {
-        eprintln!("Caching dev environment...");
-        let output = std::process::Command::new(&cfg.nix_bin)
-            .args([
-                "print-dev-env",
-                "--profile",
-                &cfg.nix_profile.to_string_lossy(),
-                &cfg.devshell,
-            ])
-            .output()
-            .context("nix print-dev-env")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("nix print-dev-env failed: {stderr}");
-        }
-        std::fs::write(&cfg.cache_file, &output.stdout)?;
-
-        let _ = std::process::Command::new(&cfg.nix_bin)
-            .args([
-                "profile",
-                "wipe-history",
-                "--profile",
-                &cfg.nix_profile.to_string_lossy(),
-            ])
-            .status();
-
-        restart(cfg)
-    } else {
-        start(cfg)
-    }
+fn env(name: &str) -> Result<String> {
+    std::env::var(name).wrap_err(format!("NCAP_* env var not set: {name}"))
 }
 
-fn start(cfg: &Config) -> Result<()> {
-    if is_running(&cfg.runtime, &cfg.container) {
-        eprintln!("Container '{}' is already running.", cfg.container);
-        return Ok(());
-    }
-
-    if !cfg.cache_file.exists() {
-        anyhow::bail!("No cached dev environment found. Run 'ncap-ctl init' first.");
-    }
-
-    std::fs::create_dir_all(&cfg.socket_dir)?;
-
-    let mut run = std::process::Command::new(&cfg.runtime);
-    run.args(["run", "-d"]);
-    for opt in cfg.podman_run_args() {
-        run.arg(opt);
-    }
-    run.args(["--", &cfg.image, &cfg.init_bin, "--socket", &cfg.socket]);
-    let status = run.status().context("podman run")?;
-    if !status.success() {
-        anyhow::bail!("podman run failed with exit code: {status}");
-    }
-
-    let exec_cmd = format!(
-        "source {} && exec {} --socket {}",
-        cfg.cache_file.display(),
-        cfg.server_bin,
-        cfg.socket,
-    );
-    std::process::Command::new(&cfg.runtime)
-        .args(["exec", "-d", &cfg.container, &cfg.bash_bin, "-c", &exec_cmd])
-        .status()
-        .context("podman exec")?;
-
-    Ok(())
-}
-
-fn stop(cfg: &Config) -> Result<()> {
-    std::process::Command::new(&cfg.runtime)
-        .args(["stop", &cfg.container])
-        .status()
-        .context("podman stop")?;
-    Ok(())
-}
-
-fn restart(cfg: &Config) -> Result<()> {
-    stop(cfg)?;
-    start(cfg)
-}
-
-fn enter(cfg: &Config) -> Result<()> {
-    if !cfg.cache_file.exists() {
-        anyhow::bail!("No cached dev environment found. Run 'ncap-ctl init' first.");
-    }
-
-    let shell_cmd = format!("source {}; exec {}", cfg.cache_file.display(), cfg.bash_bin,);
-    let status = std::process::Command::new(&cfg.runtime)
-        .args([
-            "exec",
-            "-it",
-            &cfg.container,
-            &cfg.bash_bin,
-            "-c",
-            &shell_cmd,
-        ])
-        .status()
-        .context("podman exec")?;
-
-    std::process::exit(status.code().unwrap_or(1));
-}
-
-fn is_running(runtime: &str, container: &str) -> bool {
-    let Ok(output) = std::process::Command::new(runtime)
-        .args(["inspect", "-f", "{{.State.Running}}", container])
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&output.stdout).trim() == "true"
+fn json_env(name: &str) -> Result<Vec<String>> {
+    let val = env(name)?;
+    serde_json::from_str(&val).wrap_err("failed to parse NCAP_PODMAN_OPTS as JSON")
 }
 
 fn project_root() -> Result<String> {
@@ -294,11 +193,148 @@ fn expand_env(s: &str) -> String {
     result
 }
 
-fn env(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("NCAP_* env var not set: {name}"))
+fn init(cfg: &Config) -> Result<()> {
+    std::fs::create_dir_all(cfg.cache_file.parent().unwrap())?;
+
+    let valid = std::env::var("NCAP_CACHE").ok();
+    if valid.is_none_or(|s| s != "1") || !cfg.cache_file.exists() {
+        eprintln!("caching dev environment...");
+        let output = std::process::Command::new(&cfg.nix_bin)
+            .args([
+                "print-dev-env",
+                "--profile",
+                &cfg.nix_profile.to_string_lossy(),
+                &cfg.devshell,
+            ])
+            .output()
+            .wrap_err("failed to evaluate devshell")?;
+        if !output.status.success() {
+            dump_failure(&output);
+            color_eyre::eyre::bail!("nix print-dev-env failed with exit code: {}", output.status,);
+        }
+        std::fs::write(&cfg.cache_file, &output.stdout)?;
+
+        let output = std::process::Command::new(&cfg.nix_bin)
+            .args([
+                "profile",
+                "wipe-history",
+                "--profile",
+                &cfg.nix_profile.to_string_lossy(),
+            ])
+            .output()
+            .wrap_err("failed to clean nix profile")?;
+        if !output.status.success() {
+            dump_failure(&output);
+        }
+
+        restart(cfg)
+    } else {
+        start(cfg)
+    }
 }
 
-fn json_env(name: &str) -> Result<Vec<String>> {
-    let val = env(name)?;
-    serde_json::from_str(&val).context("Failed to parse JSON")
+fn start(cfg: &Config) -> Result<()> {
+    if is_running(&cfg.runtime, &cfg.container) {
+        eprintln!("container {} is already running", cfg.container);
+        return Ok(());
+    }
+
+    if !cfg.cache_file.exists() {
+        color_eyre::eyre::bail!("no cached dev environment found — run ncap-ctl init first");
+    }
+
+    std::fs::create_dir_all(&cfg.socket_dir)?;
+
+    let mut run = std::process::Command::new(&cfg.runtime);
+    run.args(["run", "-d"]);
+    for opt in cfg.podman_run_args() {
+        run.arg(opt);
+    }
+    run.args(["--", &cfg.image, &cfg.init_bin, "--socket", &cfg.socket]);
+    let output = run.output().wrap_err("failed to start container")?;
+    if !output.status.success() {
+        dump_failure(&output);
+        color_eyre::eyre::bail!("podman run failed with exit code: {}", output.status);
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !id.is_empty() {
+        eprintln!("container started: {id}");
+    }
+
+    let exec_cmd = format!(
+        "source {} && exec {} --socket {}",
+        cfg.cache_file.display(),
+        cfg.server_bin,
+        cfg.socket,
+    );
+    let output = std::process::Command::new(&cfg.runtime)
+        .args(["exec", "-d", &cfg.container, &cfg.bash_bin, "-c", &exec_cmd])
+        .output()
+        .wrap_err("failed to start server in container")?;
+    if !output.status.success() {
+        dump_failure(&output);
+        color_eyre::eyre::bail!("podman exec failed with exit code: {}", output.status);
+    }
+
+    Ok(())
+}
+
+fn stop(cfg: &Config) -> Result<()> {
+    let output = std::process::Command::new(&cfg.runtime)
+        .args(["stop", &cfg.container])
+        .output()
+        .wrap_err("failed to stop container")?;
+    if !output.status.success() {
+        dump_failure(&output);
+    }
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !msg.is_empty() {
+        eprintln!("container stopped: {msg}");
+    }
+    Ok(())
+}
+
+fn restart(cfg: &Config) -> Result<()> {
+    stop(cfg)?;
+    start(cfg)
+}
+
+fn enter(cfg: &Config) -> Result<()> {
+    if !cfg.cache_file.exists() {
+        color_eyre::eyre::bail!("no cached dev environment found — run ncap-ctl init first");
+    }
+
+    let shell_cmd = format!("source {}; exec {}", cfg.cache_file.display(), cfg.bash_bin,);
+    let status = std::process::Command::new(&cfg.runtime)
+        .args([
+            "exec",
+            "-it",
+            &cfg.container,
+            &cfg.bash_bin,
+            "-c",
+            &shell_cmd,
+        ])
+        .status()
+        .wrap_err("failed to enter container")?;
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn is_running(runtime: &str, container: &str) -> bool {
+    let Ok(output) = std::process::Command::new(runtime)
+        .args(["inspect", "-f", "{{.State.Running}}", container])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
+fn dump_failure(output: &Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stdout.is_empty() && stderr.is_empty() {
+        return;
+    }
+    eprint!("{stdout}{stderr}");
 }

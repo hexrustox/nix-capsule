@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::Result;
+use color_eyre::eyre::{Context, Result};
+use nix_capsule::path;
 use serde::Deserialize;
+
+const USE_FLAKE_TEMPLATE: &str = include_str!("use_flake.sh");
 
 #[derive(Debug, Deserialize)]
 struct WatchEntry {
@@ -13,33 +16,32 @@ struct WatchEntry {
 }
 
 fn main() -> Result<()> {
-    let project_root = std::env::current_dir()?;
-    let cache_dir = project_root.join(".ncap-cache");
+    color_eyre::install()?;
+
+    let project_root = std::env::current_dir().wrap_err("failed to get current directory")?;
+    let cache_dir = project_root.join(path::CACHE_DIR);
     let state_path = cache_dir.join("watch-state.json");
 
-    let current = direnv_show_dump(&project_root).unwrap_or_default();
+    let current = direnv_show_dump(&project_root).unwrap_or_else(|e| {
+        eprintln!("warn: {e}");
+        HashMap::new()
+    });
 
-    let stored = load_state(&state_path).unwrap_or_default();
+    let stored = load_state(&state_path).unwrap_or_else(|e| {
+        eprintln!("warn: {e}");
+        HashMap::new()
+    });
 
     let valid = compare(&stored, &current);
 
-    save_state(&state_path, &current)?;
+    save_state(&state_path, &current).unwrap_or_else(|e| eprintln!("warn: {e}"));
 
-    let valid = if valid { 1 } else { 0 };
-    let cache_dir_str = cache_dir.display();
+    let cache_valid = if valid { 1 } else { 0 };
 
-    println!(
-        "export NCAP_CACHE={valid}\n\
-         \n\
-         use_flake() {{\n\
-         \x20 local cache_dir=\"{cache_dir_str}\"\n\
-         \x20 mkdir -p \"$cache_dir\"\n\
-         \x20 if [[ $NCAP_CACHE -eq 0 ]]; then\n\
-         \x20   nix print-dev-env \"$@\" > \"$cache_dir/env\"\n\
-         \x20 fi\n\
-         \x20 source \"$cache_dir/env\"\n\
-         }}"
-    );
+    let script = USE_FLAKE_TEMPLATE
+        .replace("__NCAP_CACHE__", &cache_valid.to_string())
+        .replace("__CACHE_DIR__", &cache_dir.to_string_lossy());
+    print!("{script}");
 
     Ok(())
 }
@@ -54,13 +56,20 @@ fn direnv_show_dump(project_root: &Path) -> Result<HashMap<String, i64>> {
     let output = Command::new("direnv")
         .args(["show_dump", &watches_env])
         .current_dir(project_root)
-        .output()?;
+        .output()
+        .wrap_err("failed to run direnv show_dump")?;
 
     if !output.status.success() {
+        eprintln!(
+            "direnv show_dump exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
         return Ok(HashMap::new());
     }
 
-    let entries: Vec<WatchEntry> = serde_json::from_slice(&output.stdout)?;
+    let entries: Vec<WatchEntry> = serde_json::from_slice(&output.stdout)
+        .wrap_err("failed to parse direnv show_dump output")?;
 
     Ok(entries
         .into_iter()
@@ -73,17 +82,17 @@ fn load_state(path: &Path) -> Result<HashMap<String, i64>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let data = std::fs::read_to_string(path)?;
-    let map = serde_json::from_str(&data)?;
+    let data = std::fs::read_to_string(path).wrap_err("failed to read watch state")?;
+    let map = serde_json::from_str(&data).wrap_err("failed to parse watch state")?;
     Ok(map)
 }
 
 fn save_state(path: &Path, current: &HashMap<String, i64>) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).wrap_err("failed to create cache directory")?;
     }
-    let json = serde_json::to_string(current)?;
-    std::fs::write(path, json)?;
+    let json = serde_json::to_string(current).wrap_err("failed to serialize watch state")?;
+    std::fs::write(path, json).wrap_err("failed to save watch state")?;
     Ok(())
 }
 

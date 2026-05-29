@@ -50,7 +50,7 @@ async fn run() -> Result<ExitCode> {
     let cwd = match cli.cwd {
         Some(c) => c,
         None => std::env::current_dir()
-            .wrap_err("Failed to get current working directory")?
+            .wrap_err("failed to get current directory")?
             .to_string_lossy()
             .into_owned(),
     };
@@ -78,14 +78,14 @@ async fn run() -> Result<ExitCode> {
 
     let stream = UnixStream::connect(&cli.socket)
         .await
-        .wrap_err(format!("Failed to connect to socket: {}", cli.socket))
-        .suggestion("Make sure ncap-server is running")?;
+        .wrap_err(format!("failed to connect to socket: {}", cli.socket))
+        .suggestion("make sure ncap-server is running")?;
 
     let (read_half, write_half) = stream.into_split();
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
     let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
-    let request_payload = serde_json::to_vec(&request).wrap_err("Failed to serialize Request")?;
+    let request_payload = serde_json::to_vec(&request).wrap_err("failed to serialize request")?;
 
     framed_write
         .send(Frame {
@@ -93,7 +93,7 @@ async fn run() -> Result<ExitCode> {
             payload: request_payload,
         })
         .await
-        .wrap_err("Failed to send request")?;
+        .wrap_err("failed to send request")?;
 
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
@@ -143,8 +143,8 @@ async fn run() -> Result<ExitCode> {
                     stdout
                         .write_all(&payload)
                         .await
-                        .wrap_err("Failed to write stdout")?;
-                    stdout.flush().await.wrap_err("Failed to flush stdout")?;
+                        .wrap_err("failed to write stdout")?;
+                    stdout.flush().await.wrap_err("failed to flush stdout")?;
                 }
                 Some(Ok(Frame {
                     frame_type: FrameType::Stderr,
@@ -153,15 +153,15 @@ async fn run() -> Result<ExitCode> {
                     stderr
                         .write_all(&payload)
                         .await
-                        .wrap_err("Failed to write stderr")?;
-                    stderr.flush().await.wrap_err("Failed to flush stderr")?;
+                        .wrap_err("failed to write stderr")?;
+                    stderr.flush().await.wrap_err("failed to flush stderr")?;
                 }
                 Some(Ok(Frame {
                     frame_type: FrameType::Exit,
                     payload,
                 })) => {
                     let exit: Exit =
-                        serde_json::from_slice(&payload).wrap_err("Failed to parse Exit")?;
+                        serde_json::from_slice(&payload).wrap_err("failed to parse exit frame")?;
                     exit_code = exit.exit_code as u8;
                     break;
                 }
@@ -170,7 +170,7 @@ async fn run() -> Result<ExitCode> {
                     payload,
                 })) => {
                     let msg: ErrorMessage =
-                        from_slice(&payload).wrap_err("Failed to parse ErrorMessage")?;
+                        from_slice(&payload).wrap_err("failed to parse error frame")?;
                     return Err(if let Some(cause) = msg.cause {
                         eyre!("{cause}: {}", msg.error)
                     } else {
@@ -182,30 +182,30 @@ async fn run() -> Result<ExitCode> {
                     payload,
                 })) => {
                     let msg: ServerStopping =
-                        from_slice(&payload).wrap_err("Failed to parse ServerStopping")?;
+                        from_slice(&payload).wrap_err("failed to parse server shutdown frame")?;
                     let err = if let Some(reason) = msg.reason {
-                        eyre!("Server is shutting down: {reason}")
+                        eyre!("server is shutting down: {reason}")
                     } else {
-                        eyre!("Server is shutting down")
+                        eyre!("server is shutting down")
                     };
                     return Ok((143, Some(err)));
                 }
                 Some(Ok(frame)) => {
                     return Err(eyre!(
-                        "Protocol error: unexpected frame {:?}",
+                        "protocol error: unexpected frame {:?}",
                         frame.frame_type
                     ));
                 }
-                Some(Err(e)) => return Err(Report::from(e)).wrap_err("Failed to read from socket"),
+                Some(Err(e)) => return Err(Report::from(e)).wrap_err("failed to read from socket"),
                 None => {
-                    return Ok((143, Some(eyre!("Server disconnected"))));
+                    return Ok((143, Some(eyre!("server disconnected"))));
                 }
             }
         }
         Ok((exit_code, None))
     });
 
-    let (exit_code, stop_err) = response_task.await.wrap_err("Response task panicked")??;
+    let (exit_code, stop_err) = response_task.await.wrap_err("response task panicked")??;
 
     if let Some(err) = stop_err {
         eprintln!("{err}");
