@@ -51,10 +51,14 @@
               socketPath = "/tmp/nix-capsule/ncap-socket";
               containerName = "ncap";
               extraOptions = [
-                "-e HOME"
-                "-e NIX_PATH"
-                "-e CARGO_HOME"
-                "-v \"$CARGO_HOME\":\"$CARGO_HOME\""
+                "-e"
+                "HOME"
+                "-e"
+                "NIX_PATH"
+                "-e"
+                "CARGO_HOME"
+                "-v"
+                "$CARGO_HOME:$CARGO_HOME"
               ];
               wrappers = [
                 "cargo"

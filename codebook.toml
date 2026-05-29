@@ -1,5 +1,7 @@
 words = [
     "cwd",
+    "devshell",
     "direnv",
     "ncap",
+    "podman",
 ]

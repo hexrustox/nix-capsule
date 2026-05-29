@@ -19,6 +19,10 @@ path = "src/init.rs"
 name = "ncap-direnv"
 path = "src/direnv.rs"
 
+[[bin]]
+name = "ncap-ctl"
+path = "src/ctl.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
