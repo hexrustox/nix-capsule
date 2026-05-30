@@ -26,6 +26,8 @@ enum Cmd {
     Restart,
     /// Enter an interactive shell inside the devshell container
     Enter,
+    /// Print the expanded podman run arguments
+    ShowOptions,
 }
 
 struct Config {
@@ -55,6 +57,7 @@ fn main() -> Result<()> {
         Cmd::Stop => stop(&cfg),
         Cmd::Restart => restart(&cfg),
         Cmd::Enter => enter(&cfg),
+        Cmd::ShowOptions => show_options(&cfg),
     }
 }
 
@@ -63,11 +66,7 @@ impl Config {
         let project_root = project_root()?;
         let devshell = env("NCAP_DEVSHELL")?;
         let devshell_name = sanitize_name(&devshell);
-        let cache_dir = PathBuf::from(format!(
-            "{}/{}/{devshell_name}",
-            project_root,
-            path::CACHE_DIR
-        ));
+        let cache_dir = path::devshell_cache_dir(&project_root, &devshell_name);
         let socket = env("NCAP_SOCKET")?;
         let socket_dir = Path::new(&socket)
             .parent()
@@ -305,6 +304,13 @@ fn enter(cfg: &Config) -> Result<()> {
         .wrap_err("failed to enter container")?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+fn show_options(cfg: &Config) -> Result<()> {
+    for opt in cfg.podman_run_args() {
+        println!("{opt}");
+    }
+    Ok(())
 }
 
 fn is_running(runtime: &str, container: &str) -> bool {
