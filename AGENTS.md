@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rust project providing containerized dev tool execution via Unix socket protocol. Three binaries: `ncap` (client), `ncap-server`, `ncap-init`.
+Rust project providing containerized dev tool execution via Unix socket protocol. Five binaries: `ncap` (client), `ncap-server`, `ncap-init`, `ncap-ctl` (lifecycle management), `ncap-direnv` (direnv integration).
 
 ## Build & Test Commands
 
@@ -23,7 +23,7 @@ cargo test --test init
 ## Development Environment
 
 This project uses Nix flakes with direnv. The dev shell provides:
-- Rust 1.93.1 (stable) with rust-analyzer
+- Rust with rust-analyzer
 - mold linker (configured in `.cargo/config.toml`)
 - cargo-deny, cargo-edit, cargo-machete
 - nixd, nixfmt, taplo, codebook
@@ -32,11 +32,18 @@ Enter dev shell: `nix develop` or rely on direnv (auto-activates via `.envrc`).
 
 ## Architecture
 
-- **Protocol**: Custom binary framing over Unix sockets (1 byte type + 4 byte length + payload)
-- **Client** (`src/client.rs`): Connects to socket, sends Request, bridges stdio
-- **Server** (`src/server.rs`): Long-lived process in container, handles concurrent connections
-- **Init** (`src/init.rs`): Container entrypoint, sends RequestShutdown on SIGTERM/SIGINT
-- **Nix library** (`lib.nix`): `mkShell` produces host-facing devShell with lifecycle scripts
+```
+src/
+  client.rs       ncap       — Host CLI client
+  server.rs       ncap-server — Long-lived server inside the container
+  init.rs         ncap-init   — Container entrypoint (signal → shutdown)
+  ctl.rs          ncap-ctl    — Container lifecycle management
+  direnv.rs       ncap-direnv — direnv integration
+  protocol.rs                 — Wire protocol framing & types
+lib.nix                       — Nix library (mkShell)
+```
+
+Communication uses a custom binary framing protocol over Unix sockets.
 
 ## Test Patterns
 
