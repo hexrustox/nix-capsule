@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::process::Output;
 
 use clap::{Parser, Subcommand};
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::{Context, Result, eyre};
 use nix_capsule::path;
 
 #[derive(Parser)]
@@ -73,7 +72,7 @@ impl Config {
         let socket_dir = Path::new(&socket)
             .parent()
             .map(|p| p.to_owned())
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
+            .ok_or_else(|| eyre!("socket path has no parent directory: {socket}"))?;
 
         Ok(Self {
             devshell,
@@ -88,8 +87,8 @@ impl Config {
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
             project_root,
-            cache_file: cache_dir.join("env"),
-            nix_profile: cache_dir.join("profile"),
+            cache_file: cache_dir.join(path::ENV_CACHE_FILE),
+            nix_profile: cache_dir.join(path::NIX_PROFILE_FILE),
         })
     }
 
@@ -199,33 +198,24 @@ fn init(cfg: &Config) -> Result<()> {
     let valid = std::env::var("NCAP_CACHE").ok();
     if valid.is_none_or(|s| s != "1") || !cfg.cache_file.exists() {
         eprintln!("caching dev environment...");
-        let output = std::process::Command::new(&cfg.nix_bin)
-            .args([
-                "print-dev-env",
-                "--profile",
-                &cfg.nix_profile.to_string_lossy(),
-                &cfg.devshell,
-            ])
-            .output()
-            .wrap_err("failed to evaluate devshell")?;
-        if !output.status.success() {
-            dump_failure(&output);
-            color_eyre::eyre::bail!("nix print-dev-env failed with exit code: {}", output.status,);
-        }
+        let mut cmd = std::process::Command::new(&cfg.nix_bin);
+        cmd.args([
+            "print-dev-env",
+            "--profile",
+            &cfg.nix_profile.to_string_lossy(),
+            &cfg.devshell,
+        ]);
+        let output = run_cmd(cmd, "nix print-dev-env")?;
         std::fs::write(&cfg.cache_file, &output.stdout)?;
 
-        let output = std::process::Command::new(&cfg.nix_bin)
-            .args([
-                "profile",
-                "wipe-history",
-                "--profile",
-                &cfg.nix_profile.to_string_lossy(),
-            ])
-            .output()
-            .wrap_err("failed to clean nix profile")?;
-        if !output.status.success() {
-            dump_failure(&output);
-        }
+        let mut cmd = std::process::Command::new(&cfg.nix_bin);
+        cmd.args([
+            "profile",
+            "wipe-history",
+            "--profile",
+            &cfg.nix_profile.to_string_lossy(),
+        ]);
+        let _ = run_cmd(cmd, "nix profile wipe-history");
 
         restart(cfg)
     } else {
@@ -243,6 +233,15 @@ fn start(cfg: &Config) -> Result<()> {
         color_eyre::eyre::bail!("no cached dev environment found — run ncap-ctl init first");
     }
 
+    if cfg.socket_dir.exists()
+        && let Ok(mut dir) = std::fs::read_dir(&cfg.socket_dir)
+        && dir.next().is_some()
+    {
+        eprintln!(
+            "warn: socket directory is not empty: {}",
+            cfg.socket_dir.display(),
+        );
+    }
     std::fs::create_dir_all(&cfg.socket_dir)?;
 
     let mut run = std::process::Command::new(&cfg.runtime);
@@ -251,11 +250,7 @@ fn start(cfg: &Config) -> Result<()> {
         run.arg(opt);
     }
     run.args(["--", &cfg.image, &cfg.init_bin, "--socket", &cfg.socket]);
-    let output = run.output().wrap_err("failed to start container")?;
-    if !output.status.success() {
-        dump_failure(&output);
-        color_eyre::eyre::bail!("podman run failed with exit code: {}", output.status);
-    }
+    let output = run_cmd(run, "podman run")?;
     let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !id.is_empty() {
         eprintln!("container started: {id}");
@@ -267,26 +262,17 @@ fn start(cfg: &Config) -> Result<()> {
         cfg.server_bin,
         cfg.socket,
     );
-    let output = std::process::Command::new(&cfg.runtime)
-        .args(["exec", "-d", &cfg.container, &cfg.bash_bin, "-c", &exec_cmd])
-        .output()
-        .wrap_err("failed to start server in container")?;
-    if !output.status.success() {
-        dump_failure(&output);
-        color_eyre::eyre::bail!("podman exec failed with exit code: {}", output.status);
-    }
+    let mut exec = std::process::Command::new(&cfg.runtime);
+    exec.args(["exec", "-d", &cfg.container, &cfg.bash_bin, "-c", &exec_cmd]);
+    run_cmd(exec, "podman exec")?;
 
     Ok(())
 }
 
 fn stop(cfg: &Config) -> Result<()> {
-    let output = std::process::Command::new(&cfg.runtime)
-        .args(["stop", &cfg.container])
-        .output()
-        .wrap_err("failed to stop container")?;
-    if !output.status.success() {
-        dump_failure(&output);
-    }
+    let mut stop = std::process::Command::new(&cfg.runtime);
+    stop.args(["stop", &cfg.container]);
+    let output = run_cmd(stop, "podman stop")?;
     let msg = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !msg.is_empty() {
         eprintln!("container stopped: {msg}");
@@ -295,7 +281,8 @@ fn stop(cfg: &Config) -> Result<()> {
 }
 
 fn restart(cfg: &Config) -> Result<()> {
-    stop(cfg)?;
+    // stop failures are non-fatal for restart
+    let _ = stop(cfg);
     start(cfg)
 }
 
@@ -330,11 +317,16 @@ fn is_running(runtime: &str, container: &str) -> bool {
     String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
-fn dump_failure(output: &Output) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stdout.is_empty() && stderr.is_empty() {
-        return;
+fn run_cmd(mut cmd: std::process::Command, label: &str) -> Result<std::process::Output> {
+    let label = label.to_owned();
+    let output = cmd.output().wrap_err(label.clone())?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.is_empty() || !stderr.is_empty() {
+            eprint!("{stdout}{stderr}");
+        }
+        color_eyre::eyre::bail!("{label} failed with exit code: {}", output.status);
     }
-    eprint!("{stdout}{stderr}");
+    Ok(output)
 }

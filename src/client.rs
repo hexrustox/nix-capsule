@@ -55,7 +55,7 @@ async fn run() -> Result<ExitCode> {
             .into_owned(),
     };
 
-    let (command, args) = cli.command.split_first().unwrap();
+    let (command, args) = cli.command.split_first().expect("clap ensures at least one argument");
 
     let resolved_env: Vec<String> = cli
         .env

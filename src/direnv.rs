@@ -20,7 +20,7 @@ fn main() -> Result<()> {
 
     let project_root = std::env::current_dir().wrap_err("failed to get current directory")?;
     let cache_dir = project_root.join(path::CACHE_DIR);
-    let state_path = cache_dir.join("watch-state.json");
+    let state_path = cache_dir.join(path::MTIME_FILE);
 
     let current = direnv_show_dump(&project_root).unwrap_or_else(|e| {
         eprintln!("warn: {e}");

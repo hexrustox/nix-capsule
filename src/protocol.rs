@@ -44,6 +44,14 @@ pub struct Request {
     pub env: Vec<String>,
 }
 
+impl Request {
+    pub fn command_line(&self) -> String {
+        [vec![self.command.clone()], self.args.clone()]
+            .concat()
+            .join(" ")
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Exit {
     pub exit_code: i32,
