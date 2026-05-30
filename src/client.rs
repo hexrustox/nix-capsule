@@ -78,8 +78,8 @@ async fn run() -> Result<ExitCode> {
 
     let stream = UnixStream::connect(&cli.socket)
         .await
-        .wrap_err(format!("failed to connect to socket: {}", cli.socket))
-        .suggestion("make sure ncap-server is running")?;
+        .wrap_err(format!("failed to connect to socket: `{}`", cli.socket))
+        .suggestion("make sure `ncap-server` is running")?;
 
     let (read_half, write_half) = stream.into_split();
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
@@ -192,7 +192,7 @@ async fn run() -> Result<ExitCode> {
                 }
                 Some(Ok(frame)) => {
                     return Err(eyre!(
-                        "protocol error: unexpected frame {:?}",
+                        "protocol error: unexpected frame `{:?}`",
                         frame.frame_type
                     ));
                 }

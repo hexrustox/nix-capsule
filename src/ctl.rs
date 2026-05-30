@@ -72,7 +72,7 @@ impl Config {
         let socket_dir = Path::new(&socket)
             .parent()
             .map(|p| p.to_owned())
-            .ok_or_else(|| eyre!("socket path has no parent directory: {socket}"))?;
+            .ok_or_else(|| eyre!("socket path has no parent directory `{socket}`"))?;
 
         Ok(Self {
             devshell,
@@ -101,12 +101,12 @@ impl Config {
 }
 
 fn env(name: &str) -> Result<String> {
-    std::env::var(name).wrap_err(format!("NCAP_* env var not set: {name}"))
+    std::env::var(name).wrap_err(format!("NCAP_* env var not set: `{name}`"))
 }
 
 fn json_env(name: &str) -> Result<Vec<String>> {
     let val = env(name)?;
-    serde_json::from_str(&val).wrap_err("failed to parse NCAP_PODMAN_OPTS as JSON")
+    serde_json::from_str(&val).wrap_err("failed to parse `NCAP_PODMAN_OPTS` as json")
 }
 
 fn project_root() -> Result<String> {
@@ -197,7 +197,7 @@ fn init(cfg: &Config) -> Result<()> {
 
     let valid = std::env::var("NCAP_CACHE").ok();
     if valid.is_none_or(|s| s != "1") || !cfg.cache_file.exists() {
-        eprintln!("caching dev environment...");
+        eprintln!("caching dev environment");
         let mut cmd = std::process::Command::new(&cfg.nix_bin);
         cmd.args([
             "print-dev-env",
@@ -225,12 +225,12 @@ fn init(cfg: &Config) -> Result<()> {
 
 fn start(cfg: &Config) -> Result<()> {
     if is_running(&cfg.runtime, &cfg.container) {
-        eprintln!("container {} is already running", cfg.container);
+        eprintln!("container `{}` is already running", cfg.container);
         return Ok(());
     }
 
     if !cfg.cache_file.exists() {
-        color_eyre::eyre::bail!("no cached dev environment found — run ncap-ctl init first");
+        color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
     }
 
     if cfg.socket_dir.exists()
@@ -238,7 +238,7 @@ fn start(cfg: &Config) -> Result<()> {
         && dir.next().is_some()
     {
         eprintln!(
-            "warn: socket directory is not empty: {}",
+            "socket directory is not empty `{}`, skipping",
             cfg.socket_dir.display(),
         );
     }
@@ -253,7 +253,7 @@ fn start(cfg: &Config) -> Result<()> {
     let output = run_cmd(run, "podman run")?;
     let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !id.is_empty() {
-        eprintln!("container started: {id}");
+        eprintln!("container started: `{id}`");
     }
 
     let exec_cmd = format!(
@@ -275,7 +275,7 @@ fn stop(cfg: &Config) -> Result<()> {
     let output = run_cmd(stop, "podman stop")?;
     let msg = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !msg.is_empty() {
-        eprintln!("container stopped: {msg}");
+        eprintln!("container stopped: `{msg}`");
     }
     Ok(())
 }
@@ -288,7 +288,7 @@ fn restart(cfg: &Config) -> Result<()> {
 
 fn enter(cfg: &Config) -> Result<()> {
     if !cfg.cache_file.exists() {
-        color_eyre::eyre::bail!("no cached dev environment found — run ncap-ctl init first");
+        color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
     }
 
     let shell_cmd = format!("source {}; exec {}", cfg.cache_file.display(), cfg.bash_bin,);
@@ -326,7 +326,7 @@ fn run_cmd(mut cmd: std::process::Command, label: &str) -> Result<std::process::
         if !stdout.is_empty() || !stderr.is_empty() {
             eprint!("{stdout}{stderr}");
         }
-        color_eyre::eyre::bail!("{label} failed with exit code: {}", output.status);
+        color_eyre::eyre::bail!("`{label}` failed with exit code {}", output.status);
     }
     Ok(output)
 }

@@ -70,10 +70,10 @@ async fn main() -> Result<()> {
     let _ = std::fs::remove_file(&cli.socket);
 
     let listener = UnixListener::bind(&cli.socket).inspect_err(|e| {
-        tracing::error!("Failed to bind socket {}: {}", cli.socket, e);
+        tracing::error!("failed to bind socket `{}`: {}", cli.socket, e);
     })?;
 
-    tracing::info!("Listening on {}", cli.socket);
+    tracing::info!("listening on `{}`", cli.socket);
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let mut accept_shutdown = shutdown_tx.subscribe();
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
                         });
                     }
                     Err(e) => {
-                        tracing::error!("Failed to accept connection: {}", e);
+                        tracing::error!("failed to accept connection: {}", e);
                     }
                 }
             }
@@ -118,8 +118,8 @@ async fn handle_connection(
         frame = framed_read.next() => {
             frame
                 .transpose()
-                .map_err(|e| anyhow!("Failed to read first frame: {}", e))?
-                .ok_or_else(|| anyhow!("Connection closed before request"))?
+                .map_err(|e| anyhow!("failed to read first frame: {}", e))?
+                .ok_or_else(|| anyhow!("connection closed before request"))?
         }
         _ = shutdown_rx.recv() => {
             return Ok(());
@@ -127,8 +127,8 @@ async fn handle_connection(
     };
 
     if first_frame.frame_type == FrameType::RequestShutdown {
-        tracing::info!("Received shutdown request from init process");
-        tracing::info!("Shutting down");
+        tracing::info!("received shutdown request from init process");
+        tracing::info!("shutting down");
         let _ = shutdown_tx.send(());
         return Ok(());
     }
@@ -138,9 +138,9 @@ async fn handle_connection(
     }
 
     let request: Request = serde_json::from_slice(&first_frame.payload)
-        .map_err(|e| anyhow!("Failed to parse request: {}", e))?;
+        .map_err(|e| anyhow!("failed to parse request: {}", e))?;
 
-    tracing::debug!("Received request: {:?} {:?}", request.command, request.args);
+    tracing::debug!("received request: {:?} {:?}", request.command, request.args);
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);
@@ -158,14 +158,14 @@ async fn handle_connection(
                 &mut framed_write,
                 e.to_string(),
                 Some(&format!(
-                    "Failed to run \"{}\" in {}", request.command_line(), request.cwd
+                    "failed to run `{}` in `{}`", request.command_line(), request.cwd
                 )),
             )
             .await;
         }
     };
 
-    tracing::info!("Executing: {} {:?}", request.command, request.args);
+    tracing::info!("executing: `{}` {:?}", request.command, request.args);
 
     let mut child_stdin = child.stdin.take().expect("stdin configured as piped");
     let child_stdout = child.stdout.take().expect("stdout configured as piped");
@@ -232,14 +232,14 @@ async fn handle_connection(
 
             let mut framed_write = writer_task
                 .await
-                .map_err(|e| anyhow!("Writer task panicked: {e}"))?;
+                .map_err(|e| anyhow!("writer task panicked: {e}"))?;
 
             let exit_code = status.code().unwrap_or(1);
-            tracing::info!("Command finished with exit_code: {:?}", exit_code);
+            tracing::info!("command finished with exit_code {:?}", exit_code);
 
             let exit = Exit { exit_code };
             let exit_payload =
-                serde_json::to_vec(&exit).map_err(|e| anyhow!("Failed to serialize Exit: {e}"))?;
+                serde_json::to_vec(&exit).map_err(|e| anyhow!("failed to serialize Exit: {e}"))?;
             if let Err(e) = framed_write
                 .send(Frame {
                     frame_type: FrameType::Exit,
@@ -247,7 +247,7 @@ async fn handle_connection(
                 })
                 .await
             {
-                tracing::error!("Failed to send Exit: {e}");
+                tracing::error!("failed to send Exit: {e}");
             }
         }
         Err(e) => {
@@ -257,12 +257,12 @@ async fn handle_connection(
 
             let mut framed_write = writer_task
                 .await
-                .map_err(|e| anyhow!("Writer task panicked: {e}"))?;
+                .map_err(|e| anyhow!("writer task panicked: {e}"))?;
 
             send_error(
                 &mut framed_write,
                 e.to_string(),
-                Some(&format!("Failed to wait on \"{}\"", request.command_line())),
+                Some(&format!("failed to wait on `{}`", request.command_line())),
             )
             .await?;
         }
@@ -291,7 +291,7 @@ async fn forward_output(
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to read {label}: {e}");
+                tracing::error!("failed to read `{label}`: {e}");
                 break;
             }
         }
@@ -308,13 +308,13 @@ where
         cause: context.map(|s| s.to_string()),
     };
     let payload =
-        serde_json::to_vec(&error).map_err(|e| anyhow!("Failed to serialize ErrorMessage: {e}"))?;
+        serde_json::to_vec(&error).map_err(|e| anyhow!("failed to serialize ErrorMessage: {e}"))?;
     sink.send(Frame {
         frame_type: FrameType::Error,
         payload,
     })
     .await
-    .map_err(|e| anyhow!("Failed to send ErrorMessage: {e}"))?;
+    .map_err(|e| anyhow!("failed to send ErrorMessage: {e}"))?;
     Ok(())
 }
 
@@ -327,12 +327,12 @@ where
         reason: reason.map(|s| s.to_string()),
     };
     let payload =
-        serde_json::to_vec(&msg).map_err(|e| anyhow!("Failed to serialize ServerStopping: {e}"))?;
+        serde_json::to_vec(&msg).map_err(|e| anyhow!("failed to serialize ServerStopping: {e}"))?;
     sink.send(Frame {
         frame_type: FrameType::ServerStopping,
         payload,
     })
     .await
-    .map_err(|e| anyhow!("Failed to send ServerStopping: {e}"))?;
+    .map_err(|e| anyhow!("failed to send ServerStopping: {e}"))?;
     Ok(())
 }

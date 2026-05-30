@@ -22,19 +22,13 @@ fn main() -> Result<()> {
     let cache_dir = project_root.join(path::CACHE_DIR);
     let state_path = cache_dir.join(path::MTIME_FILE);
 
-    let current = direnv_show_dump(&project_root).unwrap_or_else(|e| {
-        eprintln!("warn: {e}");
-        HashMap::new()
-    });
+    let current = direnv_show_dump(&project_root)?;
 
-    let stored = load_state(&state_path).unwrap_or_else(|e| {
-        eprintln!("warn: {e}");
-        HashMap::new()
-    });
+    let stored = load_state(&state_path)?;
 
     let valid = compare(&stored, &current);
 
-    save_state(&state_path, &current).unwrap_or_else(|e| eprintln!("warn: {e}"));
+    save_state(&state_path, &current)?;
 
     let cache_valid = if valid { 1 } else { 0 };
 
@@ -57,11 +51,11 @@ fn direnv_show_dump(project_root: &Path) -> Result<HashMap<String, i64>> {
         .args(["show_dump", &watches_env])
         .current_dir(project_root)
         .output()
-        .wrap_err("failed to run direnv show_dump")?;
+        .wrap_err("failed to run `direnv show_dump`")?;
 
     if !output.status.success() {
         eprintln!(
-            "direnv show_dump exited with {}: {}",
+            "`direnv show_dump` exited with {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim(),
         );
@@ -69,7 +63,7 @@ fn direnv_show_dump(project_root: &Path) -> Result<HashMap<String, i64>> {
     }
 
     let entries: Vec<WatchEntry> = serde_json::from_slice(&output.stdout)
-        .wrap_err("failed to parse direnv show_dump output")?;
+        .wrap_err("failed to parse `direnv show_dump` output")?;
 
     Ok(entries
         .into_iter()
@@ -82,8 +76,10 @@ fn load_state(path: &Path) -> Result<HashMap<String, i64>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let data = std::fs::read_to_string(path).wrap_err("failed to read watch state")?;
-    let map = serde_json::from_str(&data).wrap_err("failed to parse watch state")?;
+    let data = std::fs::read_to_string(path)
+        .wrap_err_with(|| format!("failed to read `{}`", path.display()))?;
+    let map = serde_json::from_str(&data)
+        .wrap_err_with(|| format!("failed to parse `{}`", path.display()))?;
     Ok(map)
 }
 
@@ -91,8 +87,9 @@ fn save_state(path: &Path, current: &HashMap<String, i64>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).wrap_err("failed to create cache directory")?;
     }
-    let json = serde_json::to_string(current).wrap_err("failed to serialize watch state")?;
-    std::fs::write(path, json).wrap_err("failed to save watch state")?;
+    let json = serde_json::to_string(current)
+        .wrap_err_with(|| format!("failed to serialize `{}`", path.display()))?;
+    std::fs::write(path, json).wrap_err_with(|| format!("failed to save `{}`", path.display()))?;
     Ok(())
 }
 

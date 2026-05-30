@@ -89,7 +89,7 @@ impl Decoder for FrameCodec {
         let frame_type = FrameType::from_u8(frame_type_byte).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("unknown frame type: {frame_type_byte:#x}"),
+                format!("unknown frame type: `{frame_type_byte:#x}`"),
             )
         })?;
 
