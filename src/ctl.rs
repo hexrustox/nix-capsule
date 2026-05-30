@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
+use clap_complete::Shell;
 use color_eyre::eyre::{Context, Result, eyre};
 use nix_capsule::path;
 
@@ -28,6 +29,11 @@ enum Cmd {
     Enter,
     /// Print the expanded podman run arguments
     ShowOptions,
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
 }
 
 struct Config {
@@ -50,6 +56,14 @@ struct Config {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+
+    if let Cmd::Completions { shell } = cli.command {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+        return Ok(());
+    }
+
     let cfg = Config::from_env()?;
     match cli.command {
         Cmd::Init => init(&cfg),
@@ -58,6 +72,7 @@ fn main() -> Result<()> {
         Cmd::Restart => restart(&cfg),
         Cmd::Enter => enter(&cfg),
         Cmd::ShowOptions => show_options(&cfg),
+        Cmd::Completions { .. } => unreachable!(),
     }
 }
 
