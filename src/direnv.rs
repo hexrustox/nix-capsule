@@ -26,7 +26,7 @@ fn main() -> Result<()> {
 
     let stored = load_state(&state_path)?;
 
-    let valid = compare(&stored, &current);
+    let valid = is_valid(&stored, &current);
 
     save_state(&state_path, &current)?;
 
@@ -93,11 +93,28 @@ fn save_state(path: &Path, current: &HashMap<String, i64>) -> Result<()> {
     Ok(())
 }
 
-fn compare(stored: &HashMap<String, i64>, current: &HashMap<String, i64>) -> bool {
-    if stored.is_empty() {
-        return false;
-    }
-    stored
+fn is_valid(stored: &HashMap<String, i64>, current: &HashMap<String, i64>) -> bool {
+    current
         .iter()
-        .all(|(path, stored_mtime)| current.get(path) == Some(stored_mtime))
+        .all(|(path, mtime)| stored.get(path) == Some(mtime))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid;
+    use std::collections::HashMap;
+    use test_case::test_case;
+
+    fn map(pairs: &[(&str, i64)]) -> HashMap<String, i64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test_case(&[("a", 1)], &[("a", 1)] => true; "single_match")]
+    #[test_case(&[("a", 1), ("b", 2)], &[("a", 1), ("b", 2)] => true; "multi_match")]
+    #[test_case(&[("a", 1)], &[("a", 2)] => false; "mtime_differs")]
+    #[test_case(&[("a", 1), ("b", 2)], &[("a", 1)] => true; "stale_stored_entries_ignored")]
+    #[test_case(&[("a", 1)], &[("a", 1), ("b", 2)] => false; "unknown_file_appeared")]
+    fn test_is_valid(stored: &[(&str, i64)], current: &[(&str, i64)]) -> bool {
+        is_valid(&map(stored), &map(current))
+    }
 }
