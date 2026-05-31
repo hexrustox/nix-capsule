@@ -343,16 +343,27 @@ fn run_cmd(mut cmd: std::process::Command, label: &str) -> Result<std::process::
 
 #[cfg(test)]
 mod tests {
-    use super::expand_env;
+    use super::*;
     use std::sync::LazyLock;
     use test_case::test_case;
 
-    static SETUP: LazyLock<()> = LazyLock::new(|| {
-        // SAFETY: single-threaded test setup before any assertions
-        unsafe {
-            std::env::set_var("TEST_EXPAND_VAR", "world");
-            std::env::set_var("TEST_EXPAND_PATH", "/tmp/test");
-        }
+    #[test_case(".#container" => "container".to_owned(); "flake_shorthand")]
+    #[test_case("./path#container" => "path-container".to_owned(); "relative_path_hash")]
+    #[test_case("./path/to#" => "path-to".to_owned(); "relative_path_implicit")]
+    #[test_case("container" => "container".to_owned(); "clean_name")]
+    #[test_case("/abs/path#shell" => "abs-path-shell".to_owned(); "absolute_path_hash")]
+    #[test_case("github:owner/repo#devShell" => "github-owner-repo-devShell".to_owned(); "flake_uri")]
+    #[test_case("a#b#c" => "a-b-c".to_owned(); "multiple_hashes")]
+    #[test_case(".nix#dev" => "nix-dev".to_owned(); "leading_dot_hash")]
+    #[test_case("#" => "".to_owned(); "just_hash")]
+    #[test_case("" => "".to_owned(); "empty")]
+    fn test_sanitize_name(input: &str) -> String {
+        sanitize_name(input)
+    }
+
+    static SETUP: LazyLock<()> = LazyLock::new(|| unsafe {
+        std::env::set_var("TEST_EXPAND_VAR", "world");
+        std::env::set_var("TEST_EXPAND_PATH", "/tmp/test");
     });
 
     #[test_case("" => String::new(); "empty")]
@@ -369,7 +380,7 @@ mod tests {
     #[test_case("${}" => "${}".to_owned(); "empty_braces")]
     #[test_case("$123abc" => "$123abc".to_owned(); "var_starts_with_digit")]
     fn test_expand_env(input: &str) -> String {
-        let _ = *SETUP;
+        *SETUP;
         expand_env(input)
     }
 }
