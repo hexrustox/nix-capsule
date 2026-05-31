@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, CommandFactory};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use color_eyre::eyre::{Context, Result, eyre};
 use nix_capsule::path;
@@ -27,7 +27,7 @@ enum Cmd {
     Restart,
     /// Enter an interactive shell inside the devshell container
     Enter,
-    /// Print the expanded podman run arguments
+    /// Print the expanded runtime arguments
     ShowOptions,
     /// Generate shell completions
     Completions {
@@ -43,7 +43,7 @@ struct Config {
     container: String,
     image: String,
     runtime: String,
-    podman_opts: Vec<String>,
+    run_opts: Vec<String>,
     server_bin: String,
     nix_bin: String,
     bash_bin: String,
@@ -71,7 +71,7 @@ fn main() -> Result<()> {
         Cmd::Restart => restart(&cfg),
         Cmd::Enter => enter(&cfg),
         Cmd::ShowOptions => show_options(&cfg),
-        Cmd::Completions { .. } => unreachable!(),
+        _ => unreachable!()
     }
 }
 
@@ -94,7 +94,7 @@ impl Config {
             container: env("NCAP_CONTAINER")?,
             image: env("NCAP_IMAGE")?,
             runtime: env("NCAP_RUNTIME")?,
-            podman_opts: json_env("NCAP_PODMAN_OPTS")?,
+            run_opts: json_env("NCAP_RUN_OPTS")?,
             server_bin: env("NCAP_SERVER")?,
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
@@ -104,8 +104,8 @@ impl Config {
         })
     }
 
-    fn podman_run_args(&self) -> Vec<String> {
-        self.podman_opts
+    fn run_args(&self) -> Vec<String> {
+        self.run_opts
             .iter()
             .map(|opt| expand(opt, &self.project_root))
             .collect()
@@ -118,7 +118,7 @@ fn env(name: &str) -> Result<String> {
 
 fn json_env(name: &str) -> Result<Vec<String>> {
     let val = env(name)?;
-    serde_json::from_str(&val).wrap_err("failed to parse `NCAP_PODMAN_OPTS` as json")
+    serde_json::from_str(&val).wrap_err("failed to parse `NCAP_RUN_OPTS` as json".to_string())
 }
 
 fn project_root() -> Result<String> {
@@ -264,11 +264,11 @@ fn start(cfg: &Config) -> Result<()> {
     );
     let mut run = std::process::Command::new(&cfg.runtime);
     run.args(["run", "-d"]);
-    for opt in cfg.podman_run_args() {
+    for opt in cfg.run_args() {
         run.arg(opt);
     }
     run.args(["--", &cfg.image, &cfg.bash_bin, "-c", &exec_cmd]);
-    let output = run_cmd(run, "podman run")?;
+    let output = run_cmd(run, &format!("{} run", cfg.runtime))?;
     let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !id.is_empty() {
         eprintln!("container started: `{id}`");
@@ -280,7 +280,7 @@ fn start(cfg: &Config) -> Result<()> {
 fn stop(cfg: &Config) -> Result<()> {
     let mut stop = std::process::Command::new(&cfg.runtime);
     stop.args(["stop", &cfg.container]);
-    let output = run_cmd(stop, "podman stop")?;
+    let output = run_cmd(stop, &format!("{} stop", cfg.runtime))?;
     let msg = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !msg.is_empty() {
         eprintln!("container stopped: `{msg}`");
@@ -316,7 +316,7 @@ fn enter(cfg: &Config) -> Result<()> {
 }
 
 fn show_options(cfg: &Config) -> Result<()> {
-    for opt in cfg.podman_run_args() {
+    for opt in cfg.run_args() {
         println!("{opt}");
     }
     Ok(())

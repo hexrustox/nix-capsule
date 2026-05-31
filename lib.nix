@@ -53,7 +53,7 @@ in
       NCAP_CONTAINER = containerName;
       NCAP_IMAGE = image;
       NCAP_RUNTIME = runtime;
-      NCAP_PODMAN_OPTS = builtins.toJSON (
+      NCAP_RUN_OPTS = builtins.toJSON (
         [
           "--replace"
           "--name"

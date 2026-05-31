@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-`nix-capsule` provides explicit host commands that execute inside a long-lived Podman container, within a real Nix devshell already entered inside that container.
+`nix-capsule` provides explicit host commands that execute inside a long-lived container (Podman by default), within a real Nix devshell already entered inside that container.
 
 Example usage:
 
@@ -23,7 +23,7 @@ Goals:
 
 - **`ncap`**: Host CLI client. Connects to a Unix socket, sends execution requests, bridges stdio between the terminal and the server.
 - **`ncap-server`**: Long-lived server inside the container (PID 1). Listens on the Unix socket, spawns requested commands as child processes, bridges their stdio back to the client. Writes structured logs to timestamped files. Handles SIGTERM/SIGINT directly for graceful shutdown — notifies active clients before exiting.
-- **`ncap-ctl`**: Container lifecycle manager on the host. Subcommands: `init`, `start`, `stop`, `restart`, `enter`, `show-options`. Uses `nix print-dev-env` to cache the devshell environment, then manages the Podman container lifecycle.
+- **`ncap-ctl`**: Container lifecycle manager on the host. Subcommands: `init`, `start`, `stop`, `restart`, `enter`, `show-options`. Uses `nix print-dev-env` to cache the devshell environment, then manages the container lifecycle.
 - **`ncap-direnv`**: direnv integration binary. Compares Nix file modification times against a stored state to determine if the cached devshell environment is still valid. Outputs a shell script fragment for direnv to eval, defining a `use_flake()` function and setting the `NCAP_CACHE` environment variable.
 - **Nix library (`lib.mkShell`)**: Produces the host-facing devShell with environment variable configuration, wrapper commands, and a `shellHook` that triggers `ncap-ctl init`.
 
@@ -32,7 +32,7 @@ Goals:
 ### Startup Flow
 
 1. `ncap-ctl init` runs `nix print-dev-env --profile <profile> <devshell>`, caches the output to `.ncap-cache/<devshell>/env`. If the container is already running, it is restarted.
-2. `ncap-ctl start` launches a Podman container running `ncap-server` as the entrypoint (PID 1). The server sources the cached devshell environment and listens on the Unix socket. The container binds `/nix:/nix:ro`, the project root, and the socket directory.
+2. `ncap-ctl start` launches a container running `ncap-server` as the entrypoint (PID 1). The server sources the cached devshell environment and listens on the Unix socket. The container binds `/nix:/nix:ro`, the project root, and the socket directory.
 4. `ncap-server` remains alive, listening on a Unix socket.
 5. Each `ncap <cmd>` invocation opens a new connection to the socket, sends a request, and bridges stdio until the child exits.
 6. When the container stops, `ncap-server` receives SIGTERM/SIGINT directly and notifies active clients before exiting.
@@ -257,7 +257,7 @@ Subcommands:
 | `stop` | Stop the running container |
 | `restart` | Stop and restart the container |
 | `enter` | Enter an interactive shell inside the devshell container |
-| `show-options` | Print the expanded podman run arguments |
+| `show-options` | Print the expanded runtime arguments |
 
 All subcommands read configuration from environment variables set by `lib.mkShell`.
 
@@ -271,15 +271,15 @@ All subcommands read configuration from environment variables set by `lib.mkShel
 
 ### `start`
 
-1. Check if the container is already running via `podman inspect`. If running, do nothing.
+1. Check if the container is already running via `<runtime> inspect`. If running, do nothing.
 2. Verify the cached env file exists. If missing, error out.
 3. Warn if the socket directory is non-empty.
 4. Create the socket directory.
-5. Run `podman run -d [options] -- <image> <bash> -c "source <env> && exec <server_bin> --socket <socket>"`.
+5. Run `<runtime> run -d [options] -- <image> <bash> -c "source <env> && exec <server_bin> --socket <socket>"`.
 
 ### `stop`
 
-Run `podman stop <container>`. The `ncap-server` entrypoint (PID 1) receives SIGTERM and triggers graceful shutdown of all active connections.
+Run `<runtime> stop <container>`. The `ncap-server` entrypoint (PID 1) receives SIGTERM and triggers graceful shutdown of all active connections.
 
 ### `restart`
 
@@ -288,16 +288,16 @@ Run `stop` (failures are non-fatal) followed by `start`.
 ### `enter`
 
 1. Verify the cached env file exists. If missing, error out.
-2. Run `podman exec -it <container> <bash> -c "source <env>; exec <bash>"`.
+2. Run `<runtime> exec -it <container> <bash> -c "source <env>; exec <bash>"`.
 3. Forward the interactive shell's exit code.
 
 ### `show-options`
 
-Print each expanded podman run argument on its own line.
+Print each expanded runtime argument on its own line.
 
 ### Container Configuration
 
-Podman run options are passed as a JSON array via `NCAP_PODMAN_OPTS`:
+Runtime options are passed as a JSON array via `NCAP_RUN_OPTS`:
 
 - Mandatory options: `--replace`, `--name <container>`, bind mounts for `/nix:/nix:ro`, project root, and socket directory, `-w $PROJECT_ROOT`.
 - Optional hardening (when `harden=true`): `--cap-drop=all`, `--security-opt=no-new-privileges`.
@@ -356,9 +356,9 @@ mkShell {
   image          # Container image (required)
   devShell       # Nix devShell attribute path (e.g., "container" or ".#container")
   socketPath     # Unix socket path
-  containerName  # Podman container name
+  containerName  # Container name
   runtime        # Container runtime (default: "podman")
-  extraOptions   # Additional podman run options (default: [])
+  extraOptions   # Additional runtime options (default: [])
   harden         # Enable hardening flags (default: false)
   autoStart      # Run ncap-ctl init in shellHook (default: true)
   wrappers       # Commands to wrap with ncap (default: [])
@@ -389,14 +389,14 @@ Entries may be:
 | `NCAP_CONTAINER` | `containerName` |
 | `NCAP_IMAGE` | `image` |
 | `NCAP_RUNTIME` | `runtime` |
-| `NCAP_PODMAN_OPTS` | JSON array of podman run options |
+| `NCAP_RUN_OPTS` | JSON array of runtime run options |
 | `NCAP_SERVER` | Path to `ncap-server` binary |
 | `NCAP_NIX` | Path to `nix` binary |
 | `NCAP_BASH` | Path to `bash` binary |
 
-### Podman Options
+### Runtime Options
 
-The `NCAP_PODMAN_OPTS` JSON array includes:
+The `NCAP_RUN_OPTS` JSON array includes:
 
 - `--replace` and `--name <containerName>`
 - Bind mounts: `/nix:/nix:ro`, `$PROJECT_ROOT:$PROJECT_ROOT`, `$socketDir:$socketDir`
