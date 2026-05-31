@@ -10,7 +10,7 @@ pub enum FrameType {
     Stderr = 0x04,
     Exit = 0x05,
     Error = 0x06,
-    ServerStopping = 0x08,
+    ServerStopping = 0x07,
 }
 
 impl FrameType {
@@ -22,7 +22,7 @@ impl FrameType {
             0x04 => Some(Self::Stderr),
             0x05 => Some(Self::Exit),
             0x06 => Some(Self::Error),
-            0x08 => Some(Self::ServerStopping),
+            0x07 => Some(Self::ServerStopping),
             _ => None,
         }
     }

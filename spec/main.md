@@ -209,7 +209,7 @@ The server writes structured JSON logs to timestamped files in the log directory
 2. Listen on the Unix socket path.
 3. Accept connections in a loop.
 4. Each connection is handled in a separate `tokio::spawn` task — the server supports concurrent client connections.
-5. Upon receiving SIGTERM/SIGINT or a `RequestShutdown` frame, broadcast `ServerStopping` to all active connections, break the accept loop, and exit.
+5. Upon receiving SIGTERM/SIGINT, broadcast `ServerStopping` to all active connections, break the accept loop, and exit.
 
 ### Connection Handling
 
