@@ -12,10 +12,6 @@ name = "ncap-server"
 path = "src/server.rs"
 
 [[bin]]
-name = "ncap-init"
-path = "src/init.rs"
-
-[[bin]]
 name = "ncap-direnv"
 path = "src/direnv.rs"
 

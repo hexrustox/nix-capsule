@@ -22,8 +22,7 @@ Goals:
 ## 2. Components
 
 - **`ncap`**: Host CLI client. Connects to a Unix socket, sends execution requests, bridges stdio between the terminal and the server.
-- **`ncap-server`**: Long-lived server inside the container. Listens on the Unix socket, spawns requested commands as child processes, bridges their stdio back to the client. Writes structured logs to timestamped files. Supports graceful shutdown — notifies active clients before exiting.
-- **`ncap-init`**: Container entrypoint. Waits for SIGTERM or SIGINT, then sends a `RequestShutdown` frame to the server, triggering graceful shutdown.
+- **`ncap-server`**: Long-lived server inside the container (PID 1). Listens on the Unix socket, spawns requested commands as child processes, bridges their stdio back to the client. Writes structured logs to timestamped files. Handles SIGTERM/SIGINT directly for graceful shutdown — notifies active clients before exiting.
 - **`ncap-ctl`**: Container lifecycle manager on the host. Subcommands: `init`, `start`, `stop`, `restart`, `enter`, `show-options`. Uses `nix print-dev-env` to cache the devshell environment, then manages the Podman container lifecycle.
 - **`ncap-direnv`**: direnv integration binary. Compares Nix file modification times against a stored state to determine if the cached devshell environment is still valid. Outputs a shell script fragment for direnv to eval, defining a `use_flake()` function and setting the `NCAP_CACHE` environment variable.
 - **Nix library (`lib.mkShell`)**: Produces the host-facing devShell with environment variable configuration, wrapper commands, and a `shellHook` that triggers `ncap-ctl init`.
@@ -33,11 +32,10 @@ Goals:
 ### Startup Flow
 
 1. `ncap-ctl init` runs `nix print-dev-env --profile <profile> <devshell>`, caches the output to `.ncap-cache/<devshell>/env`. If the container is already running, it is restarted.
-2. `ncap-ctl start` launches a Podman container running `ncap-init` as the entrypoint. The container binds `/nix:/nix:ro`, the project root, and the socket directory.
-3. `ncap-ctl start` then uses `podman exec` to source the cached environment file inside the container and start `ncap-server` in the background.
+2. `ncap-ctl start` launches a Podman container running `ncap-server` as the entrypoint (PID 1). The server sources the cached devshell environment and listens on the Unix socket. The container binds `/nix:/nix:ro`, the project root, and the socket directory.
 4. `ncap-server` remains alive, listening on a Unix socket.
 5. Each `ncap <cmd>` invocation opens a new connection to the socket, sends a request, and bridges stdio until the child exits.
-6. When the container stops, `ncap-init` receives the signal, requests shutdown, and the server notifies active clients before exiting.
+6. When the container stops, `ncap-server` receives SIGTERM/SIGINT directly and notifies active clients before exiting.
 
 ### Cache Strategy
 
@@ -94,8 +92,7 @@ Each frame consists of:
 | Stderr | 0x04 | Raw bytes | Server → Client |
 | Exit | 0x05 | JSON (`Exit`) | Server → Client |
 | Error | 0x06 | JSON (`ErrorMessage`) | Server → Client |
-| RequestShutdown | 0x07 | Empty | Init → Server |
-| ServerStopping | 0x08 | JSON (`ServerStopping`) | Server → Client |
+| ServerStopping | 0x07 | JSON (`ServerStopping`) | Server → Client |
 
 ### Payload Schemas
 
@@ -126,15 +123,13 @@ Each frame consists of:
 ```
 `cause` is an optional string providing additional context (e.g., the command and working directory that failed).
 
-**ServerStopping** (0x08):
+**ServerStopping** (0x07):
 ```json
 {
   "reason": null
 }
 ```
 `reason` is an optional string.
-
-**RequestShutdown** (0x07): Empty payload (zero-length).
 
 ### Request Flow
 
@@ -150,13 +145,10 @@ Each frame consists of:
 
 ### Shutdown Flow
 
-1. `ncap-init` receives SIGTERM or SIGINT when the container stops.
-2. `ncap-init` connects to the Unix socket and sends a `RequestShutdown` frame.
-3. Server broadcasts a `ServerStopping` frame to all active client connections.
-4. Server stops accepting new connections and exits.
-5. Clients receiving `ServerStopping` print the reason if any and exit with code 143 (128 + SIGTERM).
-
-Note: `RequestShutdown` triggers graceful shutdown when received as the first frame on any connection, not only from `ncap-init`.
+1. `ncap-server` receives SIGTERM or SIGINT directly (as PID 1 when the container stops).
+2. Server broadcasts a `ServerStopping` frame to all active client connections.
+3. Server stops accepting new connections and exits.
+4. Clients receiving `ServerStopping` print the reason if any and exit with code 143 (128 + SIGTERM).
 
 ## 5. Client (`ncap`)
 
@@ -217,13 +209,13 @@ The server writes structured JSON logs to timestamped files in the log directory
 2. Listen on the Unix socket path.
 3. Accept connections in a loop.
 4. Each connection is handled in a separate `tokio::spawn` task — the server supports concurrent client connections.
-5. Upon receiving a `RequestShutdown` frame, broadcast `ServerStopping` to all active connections, break the accept loop, and exit.
+5. Upon receiving SIGTERM/SIGINT or a `RequestShutdown` frame, broadcast `ServerStopping` to all active connections, break the accept loop, and exit.
 
 ### Connection Handling
 
 For each accepted connection:
 
-1. Read the first frame. If it is a `RequestShutdown` frame, trigger graceful shutdown (broadcast on the shutdown channel, breaking the accept loop). If it is not a `RequestShutdown` or `Request` frame, close the connection.
+1. Read the first frame. If it is not a `Request` frame, close the connection.
 2. Parse the `Request` payload.
 3. Start the child process with:
    - The specified `command` and `args`.
@@ -248,27 +240,7 @@ The server must handle multiple concurrent client connections. Each connection i
 - The server must never replace itself with the child process (no `exec`).
 - Each child process runs with piped stdio (not a TTY).
 
-## 7. Init (`ncap-init`)
-
-### CLI Interface
-
-```
-ncap-init [OPTIONS]
-```
-
-Options:
-
-- `--socket <PATH>` / `-s <PATH>`: Unix socket path. Reads from `NCAP_SOCKET` env var if not provided.
-
-### Behavior
-
-1. Register signal handlers for SIGTERM and SIGINT.
-2. Wait for either signal.
-3. Connect to the Unix socket at `--socket`.
-4. Send a `RequestShutdown` frame with empty payload.
-5. Exit.
-
-## 8. Container Lifecycle (`ncap-ctl`)
+## 7. Container Lifecycle (`ncap-ctl`)
 
 ### CLI Interface
 
@@ -303,12 +275,11 @@ All subcommands read configuration from environment variables set by `lib.mkShel
 2. Verify the cached env file exists. If missing, error out.
 3. Warn if the socket directory is non-empty.
 4. Create the socket directory.
-5. Run `podman run -d [options] -- <image> <init_bin> --socket <socket>`.
-6. Run `podman exec -d <container> <bash> -c "source <env> && exec <server_bin> --socket <socket>"`.
+5. Run `podman run -d [options] -- <image> <bash> -c "source <env> && exec <server_bin> --socket <socket>"`.
 
 ### `stop`
 
-Run `podman stop <container>`. The container's `ncap-init` entrypoint receives SIGTERM and triggers graceful shutdown of the server and all active connections.
+Run `podman stop <container>`. The `ncap-server` entrypoint (PID 1) receives SIGTERM and triggers graceful shutdown of all active connections.
 
 ### `restart`
 
@@ -334,7 +305,7 @@ Podman run options are passed as a JSON array via `NCAP_PODMAN_OPTS`:
 
 Template variables in options (`$PROJECT_ROOT`, `${VAR}`) are expanded at runtime.
 
-## 9. direnv Integration (`ncap-direnv`)
+## 8. direnv Integration (`ncap-direnv`)
 
 ### CLI Interface
 
@@ -376,7 +347,7 @@ use_flake() {
 
 The `ncap-direnv` binary is configured as the default flake app (`apps.default`). In a direnv `.envrc` that calls `use flake`, direnv invokes `ncap-direnv` and evals its output. This sets `NCAP_CACHE` before `ncap-ctl init` runs (via `shellHook`), enabling the cache validity check.
 
-## 10. Nix Library (`lib.mkShell`)
+## 9. Nix Library (`lib.mkShell`)
 
 ### Function Signature
 
@@ -419,7 +390,6 @@ Entries may be:
 | `NCAP_IMAGE` | `image` |
 | `NCAP_RUNTIME` | `runtime` |
 | `NCAP_PODMAN_OPTS` | JSON array of podman run options |
-| `NCAP_INIT` | Path to `ncap-init` binary |
 | `NCAP_SERVER` | Path to `ncap-server` binary |
 | `NCAP_NIX` | Path to `nix` binary |
 | `NCAP_BASH` | Path to `bash` binary |
@@ -442,7 +412,7 @@ ${optionalString autoStart "ncap-ctl init"}
 ${postShellHook}
 ```
 
-## 11. Execution Semantics
+## 10. Execution Semantics
 
 ### What `ncap <command> [args...]` Preserves
 
@@ -463,4 +433,4 @@ Multiple `ncap` invocations may run simultaneously against the same server. Each
 
 ### Graceful Shutdown
 
-When the container stops, `ncap-init` signals the server. The server notifies all active clients via `ServerStopping` frames before exiting. Clients receiving the notification exit with code 143. This allows LSP servers and other long-lived processes to terminate cleanly during container shutdown.
+The server handles SIGTERM/SIGINT directly (as PID 1) and notifies all active clients via `ServerStopping` frames before exiting. Clients receiving the notification exit with code 143. This allows LSP servers and other long-lived processes to terminate cleanly during container shutdown.

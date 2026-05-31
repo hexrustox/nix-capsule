@@ -73,7 +73,6 @@ in
         ]
         ++ extraOptions
       );
-      NCAP_INIT = "${pkgs.ncap}/bin/ncap-init";
       NCAP_SERVER = "${pkgs.ncap}/bin/ncap-server";
       NCAP_NIX = "${pkgs.nix}/bin/nix";
       NCAP_BASH = "${pkgs.bash}/bin/bash";

@@ -7,6 +7,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::process::Command;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -78,15 +79,17 @@ async fn main() -> Result<()> {
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let mut accept_shutdown = shutdown_tx.subscribe();
 
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((stream, _)) => {
-                        let tx = shutdown_tx.clone();
                         let rx = shutdown_tx.subscribe();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, rx, tx).await {
+                            if let Err(e) = handle_connection(stream, rx).await {
                                 tracing::error!("{e}");
                             }
                         });
@@ -99,6 +102,16 @@ async fn main() -> Result<()> {
             _ = accept_shutdown.recv() => {
                 break;
             }
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM, shutting down");
+                let _ = shutdown_tx.send(());
+                break;
+            }
+            _ = sigint.recv() => {
+                tracing::info!("received SIGINT, shutting down");
+                let _ = shutdown_tx.send(());
+                break;
+            }
         }
     }
 
@@ -108,7 +121,6 @@ async fn main() -> Result<()> {
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     mut shutdown_rx: broadcast::Receiver<()>,
-    shutdown_tx: broadcast::Sender<()>,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
@@ -125,13 +137,6 @@ async fn handle_connection(
             return Ok(());
         }
     };
-
-    if first_frame.frame_type == FrameType::RequestShutdown {
-        tracing::info!("received shutdown request from init process");
-        tracing::info!("shutting down");
-        let _ = shutdown_tx.send(());
-        return Ok(());
-    }
 
     if first_frame.frame_type != FrameType::Request {
         return Ok(());

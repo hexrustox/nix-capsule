@@ -1,19 +1,13 @@
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
-use bytes::BytesMut;
-use nix_capsule::protocol::{Frame, FrameCodec, FrameType};
-use tokio_util::codec::Encoder;
-
 pub const NCAP: &str = env!("CARGO_BIN_EXE_ncap");
 pub const NCAP_SERVER: &str = env!("CARGO_BIN_EXE_ncap-server");
-pub const NCAP_INIT: &str = env!("CARGO_BIN_EXE_ncap-init");
 
 pub struct TestServer {
     pub socket: PathBuf,
@@ -52,6 +46,10 @@ impl TestServer {
         self.ncap_cmd().args(args).output().unwrap()
     }
 
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn kill(mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -77,13 +75,4 @@ pub fn write_line(stdin: &mut impl Write, input: &str) {
     stdin.flush().unwrap();
 }
 
-pub fn send_request_shutdown(socket: &std::path::Path) {
-    let frame = Frame {
-        frame_type: FrameType::RequestShutdown,
-        payload: vec![],
-    };
-    let mut buf = BytesMut::new();
-    FrameCodec.encode(frame, &mut buf).unwrap();
-    let mut stream = UnixStream::connect(socket).unwrap();
-    stream.write_all(&buf).unwrap();
-}
+

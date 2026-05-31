@@ -328,7 +328,11 @@ fn idle_connection() {
 fn server_refuses_after_shutdown() {
     let server = TestServer::start();
 
-    send_request_shutdown(&server.socket);
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(server.pid().to_string())
+        .output()
+        .unwrap();
 
     sleep(Duration::from_millis(200));
 
@@ -350,7 +354,11 @@ fn client_receives_server_stopping() {
 
     sleep(Duration::from_millis(100));
 
-    send_request_shutdown(&server.socket);
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(server.pid().to_string())
+        .output()
+        .unwrap();
 
     let output = client.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(143));

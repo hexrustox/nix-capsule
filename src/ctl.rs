@@ -44,7 +44,6 @@ struct Config {
     image: String,
     runtime: String,
     podman_opts: Vec<String>,
-    init_bin: String,
     server_bin: String,
     nix_bin: String,
     bash_bin: String,
@@ -96,7 +95,6 @@ impl Config {
             image: env("NCAP_IMAGE")?,
             runtime: env("NCAP_RUNTIME")?,
             podman_opts: json_env("NCAP_PODMAN_OPTS")?,
-            init_bin: env("NCAP_INIT")?,
             server_bin: env("NCAP_SERVER")?,
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
@@ -258,27 +256,23 @@ fn start(cfg: &Config) -> Result<()> {
     }
     std::fs::create_dir_all(&cfg.socket_dir)?;
 
-    let mut run = std::process::Command::new(&cfg.runtime);
-    run.args(["run", "-d"]);
-    for opt in cfg.podman_run_args() {
-        run.arg(opt);
-    }
-    run.args(["--", &cfg.image, &cfg.init_bin, "--socket", &cfg.socket]);
-    let output = run_cmd(run, "podman run")?;
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !id.is_empty() {
-        eprintln!("container started: `{id}`");
-    }
-
     let exec_cmd = format!(
         "source {} && exec {} --socket {}",
         cfg.cache_file.display(),
         cfg.server_bin,
         cfg.socket,
     );
-    let mut exec = std::process::Command::new(&cfg.runtime);
-    exec.args(["exec", "-d", &cfg.container, &cfg.bash_bin, "-c", &exec_cmd]);
-    run_cmd(exec, "podman exec")?;
+    let mut run = std::process::Command::new(&cfg.runtime);
+    run.args(["run", "-d"]);
+    for opt in cfg.podman_run_args() {
+        run.arg(opt);
+    }
+    run.args(["--", &cfg.image, &cfg.bash_bin, "-c", &exec_cmd]);
+    let output = run_cmd(run, "podman run")?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !id.is_empty() {
+        eprintln!("container started: `{id}`");
+    }
 
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rust project providing containerized dev tool execution via Unix socket protocol. Five binaries: `ncap` (client), `ncap-server`, `ncap-init`, `ncap-ctl` (lifecycle management), `ncap-direnv` (direnv integration).
+Rust project providing containerized dev tool execution via Unix socket protocol. Five binaries: `ncap` (client), `ncap-server`, `ncap-ctl` (lifecycle management), `ncap-direnv` (direnv integration).
 
 ## Build & Test Commands
 
@@ -36,7 +36,6 @@ Enter dev shell: `nix develop` or rely on direnv (auto-activates via `.envrc`).
 src/
   client.rs       ncap       — Host CLI client
   server.rs       ncap-server — Long-lived server inside the container
-  init.rs         ncap-init   — Container entrypoint (signal → shutdown)
   ctl.rs          ncap-ctl    — Container lifecycle management
   direnv.rs       ncap-direnv — direnv integration
   protocol.rs                 — Wire protocol framing & types
