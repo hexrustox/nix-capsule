@@ -47,7 +47,6 @@ struct Config {
     server_bin: String,
     nix_bin: String,
     bash_bin: String,
-    project_root: String,
     cache_file: PathBuf,
     nix_profile: PathBuf,
 }
@@ -71,13 +70,18 @@ fn main() -> Result<()> {
         Cmd::Restart => restart(&cfg),
         Cmd::Enter => enter(&cfg),
         Cmd::ShowOptions => show_options(&cfg),
-        _ => unreachable!()
+        _ => unreachable!(),
     }
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
         let project_root = project_root()?;
+        // SAFETY: single-threaded startup, no other code reads PROJECT_ROOT concurrently
+        unsafe {
+            std::env::set_var("PROJECT_ROOT", &project_root);
+        }
+
         let devshell = env("NCAP_DEVSHELL")?;
         let devshell_name = sanitize_name(&devshell);
         let cache_dir = path::devshell_cache_dir(&project_root, &devshell_name);
@@ -98,17 +102,13 @@ impl Config {
             server_bin: env("NCAP_SERVER")?,
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
-            project_root,
             cache_file: cache_dir.join(path::ENV_CACHE_FILE),
             nix_profile: cache_dir.join(path::NIX_PROFILE_FILE),
         })
     }
 
     fn run_args(&self) -> Vec<String> {
-        self.run_opts
-            .iter()
-            .map(|opt| expand(opt, &self.project_root))
-            .collect()
+        self.run_opts.iter().map(|opt| expand_env(opt)).collect()
     }
 }
 
@@ -151,11 +151,6 @@ fn sanitize_name(devshell: &str) -> String {
         }
     }
     result.trim_matches('-').to_owned()
-}
-
-fn expand(s: &str, project_root: &str) -> String {
-    let s = s.replace("$PROJECT_ROOT", project_root);
-    expand_env(&s)
 }
 
 fn expand_env(s: &str) -> String {
@@ -344,4 +339,37 @@ fn run_cmd(mut cmd: std::process::Command, label: &str) -> Result<std::process::
         color_eyre::eyre::bail!("`{label}` failed with exit code {}", output.status);
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_env;
+    use std::sync::LazyLock;
+    use test_case::test_case;
+
+    static SETUP: LazyLock<()> = LazyLock::new(|| {
+        // SAFETY: single-threaded test setup before any assertions
+        unsafe {
+            std::env::set_var("TEST_EXPAND_VAR", "world");
+            std::env::set_var("TEST_EXPAND_PATH", "/tmp/test");
+        }
+    });
+
+    #[test_case("" => String::new(); "empty")]
+    #[test_case("plain" => "plain".to_owned(); "passthrough")]
+    #[test_case("$TEST_EXPAND_VAR" => "world".to_owned(); "simple_var")]
+    #[test_case("${TEST_EXPAND_VAR}" => "world".to_owned(); "braced_var")]
+    #[test_case("$TEST_EXPAND_PATH" => "/tmp/test".to_owned(); "path_var")]
+    #[test_case("${TEST_EXPAND_PATH}" => "/tmp/test".to_owned(); "braced_path")]
+    #[test_case("prefix_${TEST_EXPAND_VAR}_suffix" => "prefix_world_suffix".to_owned(); "inline_braced")]
+    #[test_case("$UNDEFINED_VAR" => "$UNDEFINED_VAR".to_owned(); "undefined_simple")]
+    #[test_case("${UNDEFINED_VAR}" => "${UNDEFINED_VAR}".to_owned(); "undefined_braced")]
+    #[test_case("$$" => "$$".to_owned(); "double_dollar")]
+    #[test_case("$" => "$".to_owned(); "lone_dollar")]
+    #[test_case("${}" => "${}".to_owned(); "empty_braces")]
+    #[test_case("$123abc" => "$123abc".to_owned(); "var_starts_with_digit")]
+    fn test_expand_env(input: &str) -> String {
+        let _ = *SETUP;
+        expand_env(input)
+    }
 }
