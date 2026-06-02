@@ -27,7 +27,12 @@ impl TestServer {
             .spawn()
             .unwrap();
 
-        sleep(Duration::from_millis(100));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(10));
+        }
 
         Self {
             socket,
@@ -74,5 +79,3 @@ pub fn write_line(stdin: &mut impl Write, input: &str) {
     writeln!(stdin, "{input}").unwrap();
     stdin.flush().unwrap();
 }
-
-

@@ -242,7 +242,7 @@ fn server_crash_during_execution() {
         .spawn()
         .unwrap();
 
-    sleep(Duration::from_millis(200));
+    sleep(Duration::from_millis(100));
     server.kill();
 
     let output = child.wait_with_output().unwrap();
@@ -309,12 +309,12 @@ fn idle_connection() {
     write_line(&mut stdin, "first");
     assert_line(&mut reader, &mut line, "first");
 
-    sleep(Duration::from_secs(2));
+    sleep(Duration::from_secs(1));
 
     write_line(&mut stdin, "second");
     assert_line(&mut reader, &mut line, "second");
 
-    sleep(Duration::from_secs(2));
+    sleep(Duration::from_secs(1));
 
     write_line(&mut stdin, "third");
     assert_line(&mut reader, &mut line, "third");
@@ -334,7 +334,7 @@ fn server_refuses_after_shutdown() {
         .output()
         .unwrap();
 
-    sleep(Duration::from_millis(200));
+    sleep(Duration::from_millis(100));
 
     let output = server.run(&["--", "echo", "should fail"]);
     assert!(!output.status.success());

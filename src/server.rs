@@ -7,7 +7,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::process::Command;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -130,6 +130,8 @@ async fn main() -> Result<()> {
     .unwrap_or_else(|_| tracing::warn!("timed out waiting for connections to drain"));
     tracing::info!("server shut down");
 
+    let _ = std::fs::remove_file(&cli.socket);
+
     Ok(())
 }
 
@@ -178,7 +180,9 @@ async fn handle_connection(
                 &mut framed_write,
                 e.to_string(),
                 Some(&format!(
-                    "failed to run `{}` in `{}`", request.command_line(), request.cwd
+                    "failed to run `{}` in `{}`",
+                    request.command_line(),
+                    request.cwd
                 )),
             )
             .await;
@@ -243,7 +247,7 @@ async fn handle_connection(
 
             match result {
                 Ok(status) => {
-                    let exit_code = status.code().unwrap_or(1);
+                    let exit_code = status.code().unwrap_or(137);
                     tracing::info!("command finished with exit_code {:?}", exit_code);
 
                     let exit = Exit { exit_code };
