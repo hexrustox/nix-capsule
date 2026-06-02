@@ -47,6 +47,7 @@ struct Config {
     server_bin: String,
     nix_bin: String,
     bash_bin: String,
+    timeout: u64,
     cache_file: PathBuf,
     nix_profile: PathBuf,
 }
@@ -102,6 +103,7 @@ impl Config {
             server_bin: env("NCAP_SERVER")?,
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
+            timeout: env("NCAP_TIMEOUT")?.parse()?,
             cache_file: cache_dir.join(path::ENV_CACHE_FILE),
             nix_profile: cache_dir.join(path::NIX_PROFILE_FILE),
         })
@@ -252,10 +254,11 @@ fn start(cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.socket_dir)?;
 
     let exec_cmd = format!(
-        "source {} && exec {} --socket {}",
+        "source {} && exec {} --socket {} --timeout {}",
         cfg.cache_file.display(),
         cfg.server_bin,
         cfg.socket,
+        cfg.timeout,
     );
     let mut run = std::process::Command::new(&cfg.runtime);
     run.args(["run", "-d"]);

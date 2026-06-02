@@ -18,6 +18,7 @@ in
       extraOptions ? [ ],
       harden ? false,
       autoStart ? true,
+      timeout ? 10,
       wrappers ? [ ],
       preShellHook ? "",
       postShellHook ? "",
@@ -73,6 +74,7 @@ in
         ]
         ++ extraOptions
       );
+      NCAP_TIMEOUT = toString timeout;
       NCAP_SERVER = "${pkgs.ncap}/bin/ncap-server";
       NCAP_NIX = "${pkgs.nix}/bin/nix";
       NCAP_BASH = "${pkgs.bash}/bin/bash";

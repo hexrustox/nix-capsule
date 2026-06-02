@@ -28,6 +28,10 @@ struct Cli {
     /// Directory for log files (default: same directory as socket)
     #[arg(short, long, env = "NCAP_LOG_DIR")]
     log_dir: Option<String>,
+
+    /// Drain timeout in seconds for active connections on shutdown
+    #[arg(long, env = "NCAP_TIMEOUT", default_value_t = 10)]
+    timeout: u64,
 }
 
 fn init_logging(log_dir: &Path) -> WorkerGuard {
@@ -119,7 +123,7 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("waiting for active connections to drain");
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(cli.timeout), async {
         while let Some(result) = join_set.join_next().await {
             if let Err(e) = result {
                 tracing::error!("connection handler panicked: {e}");
