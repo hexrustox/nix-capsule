@@ -9,6 +9,7 @@ use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinSet;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -82,13 +83,15 @@ async fn main() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((stream, _)) => {
                         let rx = shutdown_tx.subscribe();
-                        tokio::spawn(async move {
+                        join_set.spawn(async move {
                             if let Err(e) = handle_connection(stream, rx).await {
                                 tracing::error!("{e}");
                             }
@@ -114,6 +117,18 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    tracing::info!("waiting for active connections to drain");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(result) = join_set.join_next().await {
+            if let Err(e) = result {
+                tracing::error!("connection handler panicked: {e}");
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| tracing::warn!("timed out waiting for connections to drain"));
+    tracing::info!("server shut down");
 
     Ok(())
 }
@@ -207,29 +222,16 @@ async fn handle_connection(
     });
 
     let writer_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                frame = rx.recv() => {
-                    match frame {
-                        Some(f) => {
-                            if framed_write.send(f).await.is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                _ = shutdown_rx.recv() => {
-                    let _ = send_server_stopping(&mut framed_write, None).await;
-                    break;
-                }
+        while let Some(frame) = rx.recv().await {
+            if framed_write.send(frame).await.is_err() {
+                break;
             }
         }
         framed_write
     });
 
-    match child.wait().await {
-        Ok(status) => {
+    tokio::select! {
+        result = child.wait() => {
             stdin_task.abort();
 
             let _ = stdout_task.await;
@@ -239,39 +241,47 @@ async fn handle_connection(
                 .await
                 .map_err(|e| anyhow!("writer task panicked: {e}"))?;
 
-            let exit_code = status.code().unwrap_or(1);
-            tracing::info!("command finished with exit_code {:?}", exit_code);
+            match result {
+                Ok(status) => {
+                    let exit_code = status.code().unwrap_or(1);
+                    tracing::info!("command finished with exit_code {:?}", exit_code);
 
-            let exit = Exit { exit_code };
-            let exit_payload =
-                serde_json::to_vec(&exit).map_err(|e| anyhow!("failed to serialize Exit: {e}"))?;
-            if let Err(e) = framed_write
-                .send(Frame {
-                    frame_type: FrameType::Exit,
-                    payload: exit_payload,
-                })
-                .await
-            {
-                tracing::error!("failed to send Exit: {e}");
+                    let exit = Exit { exit_code };
+                    let exit_payload = serde_json::to_vec(&exit)
+                        .map_err(|e| anyhow!("failed to serialize Exit: {e}"))?;
+                    if let Err(e) = framed_write
+                        .send(Frame {
+                            frame_type: FrameType::Exit,
+                            payload: exit_payload,
+                        })
+                        .await
+                    {
+                        tracing::error!("failed to send Exit: {e}");
+                    }
+                }
+                Err(e) => {
+                    send_error(
+                        &mut framed_write,
+                        e.to_string(),
+                        Some(&format!("failed to wait on `{}`", request.command_line())),
+                    )
+                    .await?;
+                }
             }
         }
-        Err(e) => {
+        _ = shutdown_rx.recv() => {
+            tracing::info!("server shutting down, terminating child");
             stdin_task.abort();
-            stdout_task.abort();
-            stderr_task.abort();
-
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             let mut framed_write = writer_task
                 .await
                 .map_err(|e| anyhow!("writer task panicked: {e}"))?;
-
-            send_error(
-                &mut framed_write,
-                e.to_string(),
-                Some(&format!("failed to wait on `{}`", request.command_line())),
-            )
-            .await?;
+            let _ = send_server_stopping(&mut framed_write, None).await;
         }
-    };
+    }
 
     Ok(())
 }
