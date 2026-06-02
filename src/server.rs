@@ -1,3 +1,4 @@
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -37,7 +38,7 @@ struct Cli {
 fn init_logging(log_dir: &Path) -> WorkerGuard {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
         .to_string();
     let log_filename = format!("ncap-server-{}.log", timestamp);
@@ -251,7 +252,7 @@ async fn handle_connection(
 
             match result {
                 Ok(status) => {
-                    let exit_code = status.code().unwrap_or(137);
+                    let exit_code = status.code().unwrap_or_else(|| status.signal().map_or(137, |s| 128 + s));
                     tracing::info!("command finished with exit_code {:?}", exit_code);
 
                     let exit = Exit { exit_code };
@@ -298,7 +299,7 @@ async fn forward_output(
     mut src: impl AsyncRead + Unpin,
     frame_type: FrameType,
     tx: mpsc::Sender<Frame>,
-    label: &'static str,
+    label: &str,
 ) {
     let mut buf = [0u8; 8192];
     loop {

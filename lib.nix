@@ -62,10 +62,6 @@ in
           "-v"
           "/nix:/nix:ro"
           "-v"
-          "$PROJECT_ROOT:$PROJECT_ROOT"
-          "-w"
-          "$PROJECT_ROOT"
-          "-v"
           "${socketDir}:${socketDir}"
         ]
         ++ optionals harden [

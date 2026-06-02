@@ -50,6 +50,7 @@ struct Config {
     timeout: u64,
     cache_file: PathBuf,
     nix_profile: PathBuf,
+    project_root: String,
 }
 
 fn main() -> Result<()> {
@@ -78,11 +79,6 @@ fn main() -> Result<()> {
 impl Config {
     fn from_env() -> Result<Self> {
         let project_root = project_root()?;
-        // SAFETY: single-threaded startup, no other code reads PROJECT_ROOT concurrently
-        unsafe {
-            std::env::set_var("PROJECT_ROOT", &project_root);
-        }
-
         let devshell = env("NCAP_DEVSHELL")?;
         let devshell_name = sanitize_name(&devshell);
         let cache_dir = path::devshell_cache_dir(&project_root, &devshell_name);
@@ -106,11 +102,17 @@ impl Config {
             timeout: env("NCAP_TIMEOUT")?.parse()?,
             cache_file: cache_dir.join(path::ENV_CACHE_FILE),
             nix_profile: cache_dir.join(path::NIX_PROFILE_FILE),
+            project_root,
         })
     }
 
     fn run_args(&self) -> Vec<String> {
-        self.run_opts.iter().map(|opt| expand_env(opt)).collect()
+        let mut opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
+        opts.push("-v".into());
+        opts.push(format!("{}:{}", self.project_root, self.project_root));
+        opts.push("-w".into());
+        opts.push(self.project_root.clone());
+        opts
     }
 }
 
@@ -152,7 +154,12 @@ fn sanitize_name(devshell: &str) -> String {
             last_dash = false;
         }
     }
-    result.trim_matches('-').to_owned()
+    result = result.trim_matches('-').to_owned();
+    if result.is_empty() {
+        "default".to_string()
+    } else {
+        result
+    }
 }
 
 fn expand_env(s: &str) -> String {
@@ -189,7 +196,8 @@ fn expand_env(s: &str) -> String {
                 if let Ok(val) = std::env::var(&name) {
                     result.push_str(&val);
                 } else {
-                    result.push_str(&format!("${name}"));
+                    result.push('$');
+                    result.push_str(&name);
                 }
             } else {
                 result.push('$');
@@ -247,7 +255,7 @@ fn start(cfg: &Config) -> Result<()> {
         && dir.next().is_some()
     {
         eprintln!(
-            "socket directory is not empty `{}`, skipping",
+            "socket directory `{}` is not empty",
             cfg.socket_dir.display(),
         );
     }
@@ -358,8 +366,8 @@ mod tests {
     #[test_case("github:owner/repo#devShell" => "github-owner-repo-devShell".to_owned(); "flake_uri")]
     #[test_case("a#b#c" => "a-b-c".to_owned(); "multiple_hashes")]
     #[test_case(".nix#dev" => "nix-dev".to_owned(); "leading_dot_hash")]
-    #[test_case("#" => "".to_owned(); "just_hash")]
-    #[test_case("" => "".to_owned(); "empty")]
+    #[test_case("#" => "default".to_owned(); "just_hash")]
+    #[test_case("" => "default".to_owned(); "empty")]
     fn test_sanitize_name(input: &str) -> String {
         sanitize_name(input)
     }
