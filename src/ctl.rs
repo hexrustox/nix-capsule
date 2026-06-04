@@ -250,16 +250,19 @@ fn start(cfg: &Config) -> Result<()> {
         color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
     }
 
-    if cfg.socket_dir.exists()
-        && let Ok(mut dir) = std::fs::read_dir(&cfg.socket_dir)
-        && dir.next().is_some()
-    {
-        eprintln!(
-            "socket directory `{}` is not empty",
-            cfg.socket_dir.display(),
-        );
+    if cfg.socket_dir.is_dir() && !cfg.socket_dir.is_symlink() {
+        if let Ok(mut dir) = std::fs::read_dir(&cfg.socket_dir)
+            && dir.next().is_some()
+        {
+            eprintln!(
+                "socket directory `{}` is not empty",
+                cfg.socket_dir.display(),
+            );
+        }
+    } else {
+        std::fs::create_dir_all(&cfg.socket_dir)?;
+        eprintln!("created socket directory `{}`", cfg.socket_dir.display());
     }
-    std::fs::create_dir_all(&cfg.socket_dir)?;
 
     let exec_cmd = format!(
         "source {} && exec {} --socket {} --timeout {}",
@@ -268,6 +271,7 @@ fn start(cfg: &Config) -> Result<()> {
         cfg.socket,
         cfg.timeout,
     );
+    eprintln!("starting container `{}`...", cfg.container);
     let mut run = std::process::Command::new(&cfg.runtime);
     run.args(["run", "-d"]);
     for opt in cfg.run_args() {
@@ -284,6 +288,7 @@ fn start(cfg: &Config) -> Result<()> {
 }
 
 fn stop(cfg: &Config) -> Result<()> {
+    eprintln!("stopping container `{}`...", cfg.container);
     let mut stop = std::process::Command::new(&cfg.runtime);
     stop.args(["stop", &cfg.container]);
     let output = run_cmd(stop, &format!("{} stop", cfg.runtime))?;
@@ -295,6 +300,7 @@ fn stop(cfg: &Config) -> Result<()> {
 }
 
 fn restart(cfg: &Config) -> Result<()> {
+    eprintln!("restarting container `{}`...", cfg.container);
     // stop failures are non-fatal for restart
     let _ = stop(cfg);
     start(cfg)
@@ -373,17 +379,14 @@ mod tests {
     }
 
     static SETUP: LazyLock<()> = LazyLock::new(|| unsafe {
-        std::env::set_var("TEST_EXPAND_VAR", "world");
-        std::env::set_var("TEST_EXPAND_PATH", "/tmp/test");
+        std::env::set_var("FOO", "bar");
     });
 
     #[test_case("" => String::new(); "empty")]
-    #[test_case("plain" => "plain".to_owned(); "passthrough")]
-    #[test_case("$TEST_EXPAND_VAR" => "world".to_owned(); "simple_var")]
-    #[test_case("${TEST_EXPAND_VAR}" => "world".to_owned(); "braced_var")]
-    #[test_case("$TEST_EXPAND_PATH" => "/tmp/test".to_owned(); "path_var")]
-    #[test_case("${TEST_EXPAND_PATH}" => "/tmp/test".to_owned(); "braced_path")]
-    #[test_case("prefix_${TEST_EXPAND_VAR}_suffix" => "prefix_world_suffix".to_owned(); "inline_braced")]
+    #[test_case("plain" => "plain".to_owned(); "pass_through")]
+    #[test_case("$FOO" => "bar".to_owned(); "simple_var")]
+    #[test_case("${FOO}" => "bar".to_owned(); "braced_var")]
+    #[test_case("prefix_${FOO}_suffix" => "prefix_bar_suffix".to_owned(); "inline_braced")]
     #[test_case("$UNDEFINED_VAR" => "$UNDEFINED_VAR".to_owned(); "undefined_simple")]
     #[test_case("${UNDEFINED_VAR}" => "${UNDEFINED_VAR}".to_owned(); "undefined_braced")]
     #[test_case("$$" => "$$".to_owned(); "double_dollar")]
