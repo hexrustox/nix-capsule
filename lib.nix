@@ -81,4 +81,12 @@ in
         ${postShellHook}
       '';
     };
+
+  app = {
+    type = "app";
+    program = "${pkgs.ncap}/bin/ncap-direnv";
+    meta = {
+      description = "Manage the nix-capsule container life-cycle";
+    };
+  };
 }

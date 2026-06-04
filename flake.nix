@@ -44,10 +44,7 @@
             ncap-release = pkgs.callPackage ./release.nix { inherit system; };
           };
 
-          apps.default = {
-            type = "app";
-            program = "${pkgs.ncap}/bin/ncap-direnv";
-          };
+          apps.default = capsule-lib.app;
 
           devShells = {
             default = capsule-lib.mkShell {
