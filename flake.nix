@@ -17,7 +17,9 @@
         lib = { pkgs }: import ./lib.nix { inherit pkgs; };
 
         overlays.default = final: prev: {
-          ncap = prev.callPackage ./package.nix { };
+          ncap = prev.callPackage ./release.nix {
+            system = prev.stdenv.targetPlatform.system;
+          };
         };
       };
 
@@ -37,7 +39,10 @@
           capsule-lib = inputs.self.lib { inherit pkgs; };
         in
         {
-          packages.ncap = pkgs.callPackage ./package.nix { };
+          packages = {
+            ncap = pkgs.callPackage ./package.nix { };
+            ncap-release = pkgs.callPackage ./release.nix { inherit system; };
+          };
 
           apps.default = {
             type = "app";
