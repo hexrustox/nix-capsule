@@ -94,6 +94,9 @@ fn save_state(path: &Path, current: &HashMap<String, i64>) -> Result<()> {
 }
 
 fn is_valid(stored: &HashMap<String, i64>, current: &HashMap<String, i64>) -> bool {
+    if stored.is_empty() && !current.is_empty() {
+        return false;
+    }
     current
         .iter()
         .all(|(path, mtime)| stored.get(path) == Some(mtime))
