@@ -12,6 +12,9 @@
 
   outputs =
     { flake-parts, ... }@inputs:
+    let
+      rustVersion = "1.95.0";
+    in
     flake-parts.lib.mkFlake { inherit inputs; } {
       flake = {
         lib = { pkgs }: import ./lib.nix { inherit pkgs; };
@@ -37,11 +40,16 @@
             ];
           };
           capsule-lib = inputs.self.lib { inherit pkgs; };
+          rust = pkgs.rust-bin.stable.${rustVersion}.default;
         in
         {
           packages = {
-            ncap = pkgs.callPackage ./package.nix { };
-            ncap-release = pkgs.callPackage ./release.nix { inherit system; };
+            ncap = pkgs.callPackage ./package.nix {
+              rustPlatform = pkgs.makeRustPlatform {
+                cargo = rust;
+                rustc = rust;
+              };
+            };
           };
 
           apps.default = capsule-lib.app;
@@ -78,7 +86,7 @@
             container =
               let
                 rust = (
-                  pkgs.rust-bin.stable."1.95.0".default.override {
+                  pkgs.rust-bin.stable.${rustVersion}.default.override {
                     extensions = [
                       "rust-src"
                       "rust-analyzer"

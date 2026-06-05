@@ -1,10 +1,11 @@
 {
   pkgs,
+  rustPlatform,
 }:
 let
   inherit (pkgs) lib;
 
-  cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+  cargoToml = fromTOML (builtins.readFile ./Cargo.toml);
   src = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
@@ -14,7 +15,7 @@ let
     ];
   };
 in
-pkgs.rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage {
   inherit src;
   pname = "ncap";
   version = cargoToml.package.version;
