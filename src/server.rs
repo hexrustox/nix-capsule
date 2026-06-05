@@ -23,15 +23,15 @@ use nix_capsule::protocol::{
 #[command(version, about = "Capsule container server")]
 struct Cli {
     /// Unix socket path to listen on
-    #[arg(short, long, env = "NCAP_SOCKET")]
+    #[arg(short, long)]
     socket: String,
 
     /// Directory for log files (default: same directory as socket)
-    #[arg(short, long, env = "NCAP_LOG_DIR")]
+    #[arg(short, long)]
     log_dir: Option<String>,
 
     /// Drain timeout in seconds for active connections on shutdown
-    #[arg(long, env = "NCAP_TIMEOUT", default_value_t = 10)]
+    #[arg(long)]
     timeout: u64,
 }
 

@@ -13,6 +13,7 @@ in
       image,
       devShell,
       socketPath,
+      logDir ? null,
       containerName,
       runtime ? "podman",
       extraOptions ? [ ],
@@ -50,6 +51,7 @@ in
       );
 
       NCAP_SOCKET = socketPath;
+      NCAP_LOG_DIR = if logDir then logDir else socketDir;
       NCAP_DEVSHELL = devShellPath;
       NCAP_CONTAINER = containerName;
       NCAP_IMAGE = image;

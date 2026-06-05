@@ -40,6 +40,7 @@ struct Config {
     devshell: String,
     socket: String,
     socket_dir: PathBuf,
+    log_dir: String,
     container: String,
     image: String,
     runtime: String,
@@ -92,6 +93,7 @@ impl Config {
             devshell,
             socket,
             socket_dir,
+            log_dir: env("NCAP_LOG_DIR")?,
             container: env("NCAP_CONTAINER")?,
             image: env("NCAP_IMAGE")?,
             runtime: env("NCAP_RUNTIME")?,
@@ -265,10 +267,11 @@ fn start(cfg: &Config) -> Result<()> {
     }
 
     let exec_cmd = format!(
-        "source {} && exec {} --socket {} --timeout {}",
+        "source {} && exec {} --socket {} --log-dir {} --timeout {}",
         cfg.cache_file.display(),
         cfg.server_bin,
         cfg.socket,
+        cfg.log_dir,
         cfg.timeout,
     );
     eprintln!("starting container `{}`...", cfg.container);

@@ -23,6 +23,8 @@ impl TestServer {
         let child = Command::new(NCAP_SERVER)
             .arg("--socket")
             .arg(&socket)
+            .arg("--timeout")
+            .arg("10")
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
