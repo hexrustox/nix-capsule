@@ -2,7 +2,7 @@
   description = "Containerized dev shells with transparent binary execution";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-26.05";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -77,7 +77,7 @@
             container =
               let
                 rust = (
-                  pkgs.rust-bin.stable."1.93.1".default.override {
+                  pkgs.rust-bin.stable."1.95.0".default.override {
                     extensions = [
                       "rust-src"
                       "rust-analyzer"
