@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -217,24 +218,26 @@ fn init(cfg: &Config) -> Result<()> {
     let valid = std::env::var("NCAP_CACHE").ok();
     if valid.is_none_or(|s| s != "1") || !cfg.cache_file.exists() {
         eprintln!("caching dev environment");
-        let mut cmd = std::process::Command::new(&cfg.nix_bin);
-        cmd.args([
+        let profile = cfg.nix_profile.to_string_lossy();
+        let mut nix_cmd = std::process::Command::new(&cfg.nix_bin);
+        nix_cmd.args([
             "print-dev-env",
             "--profile",
-            &cfg.nix_profile.to_string_lossy(),
+            &profile,
             &cfg.devshell,
         ]);
-        let output = run_cmd(cmd, "nix print-dev-env")?;
-        std::fs::write(&cfg.cache_file, &output.stdout)?;
+        let stdout = run_piped(nix_cmd, "nix print-dev-env")?;
+        std::fs::write(&cfg.cache_file, &stdout)?;
 
-        let mut cmd = std::process::Command::new(&cfg.nix_bin);
-        cmd.args([
-            "profile",
-            "wipe-history",
-            "--profile",
-            &cfg.nix_profile.to_string_lossy(),
-        ]);
-        let _ = run_cmd(cmd, "nix profile wipe-history");
+        std::process::Command::new(&cfg.nix_bin)
+            .args([
+                "profile",
+                "wipe-history",
+                "--profile",
+                &profile,
+            ])
+            .status()
+            .wrap_err("nix profile wipe-history")?;
 
         restart(cfg)
     } else {
@@ -281,8 +284,8 @@ fn start(cfg: &Config) -> Result<()> {
         run.arg(opt);
     }
     run.args(["--", &cfg.image, &cfg.bash_bin, "-c", &exec_cmd]);
-    let output = run_cmd(run, &format!("{} run", cfg.runtime))?;
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stdout = run_piped(run, &format!("{} run", cfg.runtime))?;
+    let id = String::from_utf8_lossy(&stdout).trim().to_owned();
     if !id.is_empty() {
         eprintln!("container started: `{id}`");
     }
@@ -294,8 +297,8 @@ fn stop(cfg: &Config) -> Result<()> {
     eprintln!("stopping container `{}`...", cfg.container);
     let mut stop = std::process::Command::new(&cfg.runtime);
     stop.args(["stop", &cfg.container]);
-    let output = run_cmd(stop, &format!("{} stop", cfg.runtime))?;
-    let msg = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stdout = run_piped(stop, &format!("{} stop", cfg.runtime))?;
+    let msg = String::from_utf8_lossy(&stdout).trim().to_owned();
     if !msg.is_empty() {
         eprintln!("container stopped: `{msg}`");
     }
@@ -347,18 +350,23 @@ fn is_running(runtime: &str, container: &str) -> bool {
     String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
-fn run_cmd(mut cmd: std::process::Command, label: &str) -> Result<std::process::Output> {
+fn run_piped(mut cmd: std::process::Command, label: &str) -> Result<Vec<u8>> {
     let label = label.to_owned();
-    let output = cmd.output().wrap_err(label.clone())?;
+    let output = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .wrap_err(label.clone())?
+        .wait_with_output()
+        .wrap_err(label.clone())?;
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stdout.is_empty() || !stderr.is_empty() {
-            eprint!("{stdout}{stderr}");
+        if !stdout.is_empty() {
+            eprint!("{stdout}");
         }
         color_eyre::eyre::bail!("`{label}` failed with exit code {}", output.status);
     }
-    Ok(output)
+    Ok(output.stdout)
 }
 
 #[cfg(test)]
