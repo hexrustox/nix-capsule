@@ -51,7 +51,7 @@ in
       );
 
       NCAP_SOCKET = socketPath;
-      NCAP_LOG_DIR = if logDir then logDir else socketDir;
+      NCAP_LOG_DIR = "${if !builtins.isNull logDir then logDir else socketDir}";
       NCAP_DEVSHELL = devShellPath;
       NCAP_CONTAINER = containerName;
       NCAP_IMAGE = image;
