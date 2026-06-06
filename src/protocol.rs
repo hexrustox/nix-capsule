@@ -67,8 +67,6 @@ pub struct ServerStopping {
     pub reason: Option<String>,
 }
 
-const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
-
 pub struct FrameCodec;
 
 impl Decoder for FrameCodec {
@@ -82,13 +80,6 @@ impl Decoder for FrameCodec {
 
         let frame_type_byte = src[0];
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
-
-        if length > MAX_FRAME_SIZE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("frame too large: {length} > {MAX_FRAME_SIZE}"),
-            ));
-        }
 
         if src.len() < 5 + length {
             return Ok(None);
