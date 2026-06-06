@@ -174,7 +174,7 @@ async fn handle_connection(
     let request: Request = serde_json::from_slice(&first_frame.payload)
         .map_err(|e| anyhow!("failed to parse request: {}", e))?;
 
-    tracing::debug!("received request: {:?} {:?}", request.command, request.args);
+    tracing::debug!("received request: `{}`", request.command_line());
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);
@@ -201,7 +201,7 @@ async fn handle_connection(
         }
     };
 
-    tracing::info!("executing: `{}` {:?}", request.command, request.args);
+    tracing::info!("executing `{}`", request.command_line());
 
     let mut child_stdin = child.stdin.take().expect("stdin configured as piped");
     let child_stdout = child.stdout.take().expect("stdout configured as piped");

@@ -162,7 +162,7 @@ fn env(name: &str) -> Result<String> {
 
 fn json_env(name: &str) -> Result<Vec<String>> {
     let val = env(name)?;
-    serde_json::from_str(&val).wrap_err("failed to parse `NCAP_RUN_OPTS` as json".to_string())
+    serde_json::from_str(&val).wrap_err("failed to parse `NCAP_RUN_OPTS` as json")
 }
 
 fn sanitize_name(devshell: &str) -> String {

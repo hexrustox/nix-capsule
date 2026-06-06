@@ -195,7 +195,7 @@ async fn run() -> Result<ExitCode> {
                 }
                 Some(Ok(frame)) => {
                     return Err(eyre!(
-                        "protocol error: unexpected frame `{:?}`",
+                        "protocol error: unexpected frame {:?}",
                         frame.frame_type
                     ));
                 }
