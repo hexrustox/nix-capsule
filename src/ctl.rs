@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -39,6 +40,7 @@ enum Cmd {
 
 struct Config {
     devshell: String,
+    devshell_name: OnceLock<String>,
     socket: String,
     socket_dir: PathBuf,
     log_dir: String,
@@ -50,9 +52,9 @@ struct Config {
     nix_bin: String,
     bash_bin: String,
     timeout: u64,
-    cache_file: PathBuf,
-    nix_profile: PathBuf,
-    project_root: String,
+    cache_file: OnceLock<PathBuf>,
+    nix_profile: OnceLock<PathBuf>,
+    project_root: OnceLock<String>,
 }
 
 fn main() -> Result<()> {
@@ -80,10 +82,7 @@ fn main() -> Result<()> {
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let project_root = project_root()?;
         let devshell = env("NCAP_DEVSHELL")?;
-        let devshell_name = sanitize_name(&devshell);
-        let cache_dir = path::devshell_cache_dir(&project_root, &devshell_name);
         let socket = env("NCAP_SOCKET")?;
         let socket_dir = Path::new(&socket)
             .parent()
@@ -92,6 +91,7 @@ impl Config {
 
         Ok(Self {
             devshell,
+            devshell_name: OnceLock::new(),
             socket,
             socket_dir,
             log_dir: env("NCAP_LOG_DIR")?,
@@ -103,18 +103,55 @@ impl Config {
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
             timeout: env("NCAP_TIMEOUT")?.parse()?,
-            cache_file: cache_dir.join(path::ENV_CACHE_FILE),
-            nix_profile: cache_dir.join(path::NIX_PROFILE_FILE),
-            project_root,
+            cache_file: OnceLock::new(),
+            nix_profile: OnceLock::new(),
+            project_root: OnceLock::new(),
+        })
+    }
+
+    fn devshell_name(&self) -> &str {
+        self.devshell_name
+            .get_or_init(|| sanitize_name(&self.devshell))
+    }
+
+    fn project_root(&self) -> &str {
+        self.project_root.get_or_init(|| {
+            if let Ok(output) = std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+                && output.status.success()
+            {
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        })
+    }
+
+    fn cache_file(&self) -> &PathBuf {
+        self.cache_file.get_or_init(|| {
+            let dir = path::devshell_cache_dir(self.project_root(), self.devshell_name());
+            dir.join(path::ENV_CACHE_FILE)
+        })
+    }
+
+    fn nix_profile(&self) -> &PathBuf {
+        self.nix_profile.get_or_init(|| {
+            let dir = path::devshell_cache_dir(self.project_root(), self.devshell_name());
+            dir.join(path::NIX_PROFILE_FILE)
         })
     }
 
     fn run_args(&self) -> Vec<String> {
+        let pr = self.project_root();
         let mut opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
         opts.push("-v".into());
-        opts.push(format!("{}:{}", self.project_root, self.project_root));
+        opts.push(format!("{pr}:{pr}"));
         opts.push("-w".into());
-        opts.push(self.project_root.clone());
+        opts.push(pr.to_owned());
         opts
     }
 }
@@ -126,17 +163,6 @@ fn env(name: &str) -> Result<String> {
 fn json_env(name: &str) -> Result<Vec<String>> {
     let val = env(name)?;
     serde_json::from_str(&val).wrap_err("failed to parse `NCAP_RUN_OPTS` as json".to_string())
-}
-
-fn project_root() -> Result<String> {
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        && output.status.success()
-    {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-    }
-    Ok(std::env::current_dir()?.to_string_lossy().into_owned())
 }
 
 fn sanitize_name(devshell: &str) -> String {
@@ -213,29 +239,19 @@ fn expand_env(s: &str) -> String {
 }
 
 fn init(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(cfg.cache_file.parent().unwrap())?;
+    std::fs::create_dir_all(cfg.cache_file().parent().unwrap())?;
 
     let valid = std::env::var("NCAP_CACHE").ok();
-    if valid.is_none_or(|s| s != "1") || !cfg.cache_file.exists() {
+    if valid.is_none_or(|s| s != "1") || !cfg.cache_file().exists() {
         eprintln!("caching dev environment");
-        let profile = cfg.nix_profile.to_string_lossy();
+        let profile = cfg.nix_profile().to_string_lossy();
         let mut nix_cmd = std::process::Command::new(&cfg.nix_bin);
-        nix_cmd.args([
-            "print-dev-env",
-            "--profile",
-            &profile,
-            &cfg.devshell,
-        ]);
+        nix_cmd.args(["print-dev-env", "--profile", &profile, &cfg.devshell]);
         let stdout = run_piped(nix_cmd, "nix print-dev-env")?;
-        std::fs::write(&cfg.cache_file, &stdout)?;
+        std::fs::write(cfg.cache_file(), &stdout)?;
 
         std::process::Command::new(&cfg.nix_bin)
-            .args([
-                "profile",
-                "wipe-history",
-                "--profile",
-                &profile,
-            ])
+            .args(["profile", "wipe-history", "--profile", &profile])
             .status()
             .wrap_err("nix profile wipe-history")?;
 
@@ -251,7 +267,7 @@ fn start(cfg: &Config) -> Result<()> {
         return Ok(());
     }
 
-    if !cfg.cache_file.exists() {
+    if !cfg.cache_file().exists() {
         color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
     }
 
@@ -271,7 +287,7 @@ fn start(cfg: &Config) -> Result<()> {
 
     let exec_cmd = format!(
         "source {} && exec {} --socket {} --log-dir {} --timeout {}",
-        cfg.cache_file.display(),
+        cfg.cache_file().display(),
         cfg.server_bin,
         cfg.socket,
         cfg.log_dir,
@@ -313,11 +329,15 @@ fn restart(cfg: &Config) -> Result<()> {
 }
 
 fn enter(cfg: &Config) -> Result<()> {
-    if !cfg.cache_file.exists() {
+    if !cfg.cache_file().exists() {
         color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
     }
 
-    let shell_cmd = format!("source {}; exec {}", cfg.cache_file.display(), cfg.bash_bin,);
+    let shell_cmd = format!(
+        "source {} && exec {}",
+        cfg.cache_file().display(),
+        cfg.bash_bin,
+    );
     let status = std::process::Command::new(&cfg.runtime)
         .args([
             "exec",
