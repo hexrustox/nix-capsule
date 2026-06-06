@@ -156,11 +156,21 @@ async fn handle_connection(
                 .ok_or_else(|| anyhow!("connection closed before request"))?
         }
         _ = shutdown_rx.recv() => {
+            let _ = send_server_stopping(&mut framed_write, None).await;
             return Ok(());
         }
     };
 
     if first_frame.frame_type != FrameType::Request {
+        let _ = send_error(
+            &mut framed_write,
+            format!(
+                "expected Request frame, got {:?}",
+                first_frame.frame_type
+            ),
+            Some("protocol violation"),
+        )
+        .await;
         return Ok(());
     }
 
