@@ -164,10 +164,7 @@ async fn handle_connection(
     if first_frame.frame_type != FrameType::Request {
         let _ = send_error(
             &mut framed_write,
-            format!(
-                "expected Request frame, got {:?}",
-                first_frame.frame_type
-            ),
+            format!("expected Request frame, got {:?}", first_frame.frame_type),
             Some("protocol violation"),
         )
         .await;
@@ -262,8 +259,15 @@ async fn handle_connection(
 
             match result {
                 Ok(status) => {
-                    let exit_code = status.code().unwrap_or_else(|| status.signal().map_or(137, |s| 128 + s));
-                    tracing::info!("command finished with exit_code {:?}", exit_code);
+                    let exit_code = match (status.code(), status.signal()) {
+                        (Some(code), _) => code,
+                        (None, Some(signal)) => 128 + signal,
+                        (None, None) => {
+                            tracing::warn!("process exited with no exit code and no signal — using 1");
+                            1
+                        }
+                    };
+                    tracing::info!("command finished with exit_code {}", exit_code);
 
                     let exit = Exit { exit_code };
                     let exit_payload = serde_json::to_vec(&exit)
