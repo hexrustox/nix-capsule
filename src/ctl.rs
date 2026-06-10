@@ -4,13 +4,14 @@ use std::sync::OnceLock;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use color_eyre::eyre::{Context, Result, eyre};
+use color_eyre::{Section, eyre::{Context, Result, eyre}};
 use nix_capsule::path::{self, CACHE_DIR};
 
 #[derive(Parser)]
 #[command(
     name = "ncap-ctl",
-    about = "Manage the nix-capsule container life-cycle"
+    about = "Manage the nix-capsule container life-cycle",
+    version
 )]
 struct Cli {
     #[command(subcommand)]
@@ -271,7 +272,8 @@ fn start(cfg: &Config) -> Result<()> {
     }
 
     if !cfg.cache_file().exists() {
-        color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
+        return Err(eyre!("no cached dev environment found"))
+            .suggestion("run `ncap-ctl init` first");
     }
 
     if cfg.socket_dir.is_dir() && !cfg.socket_dir.is_symlink() {
@@ -333,7 +335,8 @@ fn restart(cfg: &Config) -> Result<()> {
 
 fn enter(cfg: &Config) -> Result<()> {
     if !cfg.cache_file().exists() {
-        color_eyre::eyre::bail!("no cached dev environment found — run `ncap-ctl init` first");
+        return Err(eyre!("no cached dev environment found"))
+            .suggestion("run `ncap-ctl init` first");
     }
 
     let shell_cmd = format!(
@@ -351,7 +354,8 @@ fn enter(cfg: &Config) -> Result<()> {
             &shell_cmd,
         ])
         .status()
-        .wrap_err("failed to enter container")?;
+        .wrap_err("failed to enter container")
+        .suggestion("check that the container is running (`ncap-ctl start`)")?;
 
     std::process::exit(status.code().unwrap_or(1));
 }

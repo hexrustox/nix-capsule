@@ -96,7 +96,8 @@ async fn run() -> Result<ExitCode> {
             payload: request_payload,
         })
         .await
-        .wrap_err("failed to send request")?;
+        .wrap_err("failed to send request")
+        .suggestion("check that the server is still running")?;
 
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
@@ -199,7 +200,11 @@ async fn run() -> Result<ExitCode> {
                         frame.frame_type
                     ));
                 }
-                Some(Err(e)) => return Err(Report::from(e)).wrap_err("failed to read from socket"),
+                Some(Err(e)) => {
+                    return Err(Report::from(e))
+                        .wrap_err("failed to read from socket")
+                        .suggestion("the server may have disconnected");
+                }
                 None => {
                     return Ok((143, Some(eyre!("server disconnected"))));
                 }
