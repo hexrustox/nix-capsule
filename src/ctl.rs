@@ -4,7 +4,10 @@ use std::sync::OnceLock;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use color_eyre::{Section, eyre::{Context, Result, eyre}};
+use color_eyre::{
+    Section,
+    eyre::{Context, Result, eyre},
+};
 use nix_capsule::path::{self, CACHE_DIR};
 
 #[derive(Parser)]
@@ -34,6 +37,10 @@ enum Cmd {
     ShowOptions,
     /// Remove all cached dev environments and nix profiles, including the current one
     Clean,
+    /// Show container status
+    Status,
+    /// Show the server log (latest log file)
+    Log,
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -80,6 +87,8 @@ fn main() -> Result<()> {
         Cmd::Enter => enter(&cfg),
         Cmd::ShowOptions => show_options(&cfg),
         Cmd::Clean => clean(&cfg),
+        Cmd::Status => status(&cfg),
+        Cmd::Log => log(&cfg),
         _ => unreachable!(),
     }
 }
@@ -376,6 +385,68 @@ fn clean(cfg: &Config) -> Result<()> {
             .wrap_err_with(|| format!("failed to remove `{}`", cache_base.display()))?;
         eprintln!("removed `{}`", cache_base.display());
     }
+    Ok(())
+}
+
+fn status(cfg: &Config) -> Result<()> {
+    if is_running(&cfg.runtime, &cfg.container) {
+        let output = std::process::Command::new(&cfg.runtime)
+            .args(["inspect", "-f", "{{.Id}}", &cfg.container])
+            .output()
+            .wrap_err("failed to inspect container")?;
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        println!("container is running");
+        println!("  id:      {id}");
+        println!("  name:    {}", cfg.container);
+        println!("  runtime: {}", cfg.runtime);
+        println!("  socket:  {}", cfg.socket);
+    } else {
+        println!("container is not running");
+        if cfg.cache_file().exists() {
+            println!("  (cached environment exists — run `ncap-ctl start`)");
+        } else {
+            println!("  (no cached environment — run `ncap-ctl init`)");
+        }
+    }
+    Ok(())
+}
+
+fn log(cfg: &Config) -> Result<()> {
+    let log_dir = Path::new(&cfg.log_dir);
+    if !log_dir.exists() {
+        return Err(eyre!(
+            "log directory does not exist: `{}`",
+            log_dir.display()
+        ));
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(log_dir)
+        .wrap_err_with(|| format!("failed to read log directory `{}`", log_dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("ncap-server-") && name.ends_with(".log")
+        })
+        .collect();
+
+    entries.sort_by_key(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        name.strip_prefix("ncap-server-")
+            .and_then(|s| s.strip_suffix(".log"))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    });
+
+    let latest = entries
+        .into_iter()
+        .last()
+        .ok_or_else(|| eyre!("no log files found in `{}`", log_dir.display()))?;
+
+    let content = std::fs::read_to_string(latest.path())
+        .wrap_err_with(|| format!("failed to read `{}`", latest.path().display()))?;
+
+    print!("{content}");
     Ok(())
 }
 
