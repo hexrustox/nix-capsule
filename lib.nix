@@ -72,6 +72,7 @@ in
 
       shellHook = ''
         ${preShellHook}
+        export PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
         ${optionalString autoStart "ncap-ctl init"}
         ${postShellHook}
       '';

@@ -64,7 +64,7 @@ struct Config {
     timeout: u64,
     cache_file: OnceLock<PathBuf>,
     nix_profile: OnceLock<PathBuf>,
-    project_root: OnceLock<String>,
+    project_root: String,
 }
 
 fn main() -> Result<()> {
@@ -118,7 +118,7 @@ impl Config {
             timeout: env("NCAP_TIMEOUT")?.parse()?,
             cache_file: OnceLock::new(),
             nix_profile: OnceLock::new(),
-            project_root: OnceLock::new(),
+            project_root: env("PROJECT_ROOT")?,
         })
     }
 
@@ -127,40 +127,23 @@ impl Config {
             .get_or_init(|| sanitize_name(&self.devshell))
     }
 
-    fn project_root(&self) -> &str {
-        self.project_root.get_or_init(|| {
-            if let Ok(output) = std::process::Command::new("git")
-                .args(["rev-parse", "--show-toplevel"])
-                .output()
-                && output.status.success()
-            {
-                String::from_utf8_lossy(&output.stdout).trim().to_owned()
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        })
-    }
-
     fn cache_file(&self) -> &PathBuf {
         self.cache_file.get_or_init(|| {
-            let dir = path::devshell_cache_dir(self.project_root(), self.devshell_name());
+            let dir = path::devshell_cache_dir(&self.project_root, self.devshell_name());
             dir.join(path::ENV_CACHE_FILE)
         })
     }
 
     fn nix_profile(&self) -> &PathBuf {
         self.nix_profile.get_or_init(|| {
-            let dir = path::devshell_cache_dir(self.project_root(), self.devshell_name());
+            let dir = path::devshell_cache_dir(&self.project_root, self.devshell_name());
             dir.join(path::NIX_PROFILE_FILE)
         })
     }
 
     fn run_args(&self) -> Vec<String> {
-        let pr = self.project_root();
-        let mut opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
+        let pr = &self.project_root;
+        let opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
         let mut defaults = vec![
             "--replace".into(),
             "--name".into(),
@@ -168,7 +151,11 @@ impl Config {
             "-v".into(),
             "/nix:/nix:ro".into(),
             "-v".into(),
-            format!("{}:{}", self.socket_dir.display(), self.socket_dir.display()),
+            format!(
+                "{}:{}",
+                self.socket_dir.display(),
+                self.socket_dir.display()
+            ),
             "-v".into(),
             format!("{pr}:{pr}"),
             "-w".into(),
@@ -395,7 +382,7 @@ fn show_options(cfg: &Config) -> Result<()> {
 fn clean(cfg: &Config) -> Result<()> {
     eprintln!("cleaning all cached dev environments...");
     let _ = stop(cfg);
-    let cache_base = PathBuf::from(format!("{}/{}", cfg.project_root(), CACHE_DIR));
+    let cache_base = PathBuf::from(format!("{}/{}", cfg.project_root, CACHE_DIR));
     if cache_base.exists() {
         std::fs::remove_dir_all(&cache_base)
             .wrap_err_with(|| format!("failed to remove `{}`", cache_base.display()))?;
