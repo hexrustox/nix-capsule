@@ -161,11 +161,27 @@ impl Config {
     fn run_args(&self) -> Vec<String> {
         let pr = self.project_root();
         let mut opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
-        opts.push("-v".into());
-        opts.push(format!("{pr}:{pr}"));
-        opts.push("-w".into());
-        opts.push(pr.to_owned());
-        opts
+        let mut defaults = vec![
+            "--replace".into(),
+            "--name".into(),
+            self.container.clone(),
+            "-v".into(),
+            "/nix:/nix:ro".into(),
+            "-v".into(),
+            format!("{}:{}", self.socket_dir.display(), self.socket_dir.display()),
+            "-v".into(),
+            format!("{pr}:{pr}"),
+            "-w".into(),
+            pr.to_owned(),
+            "-v".into(),
+            format!("{pr}/.ncap-cache:{pr}/.ncap-cache:ro"),
+        ];
+        if Path::new(&format!("{pr}/.git")).is_dir() {
+            defaults.push("-v".into());
+            defaults.push(format!("{pr}/.git:{pr}/.git:ro"));
+        }
+        defaults.extend(opts);
+        defaults
     }
 }
 

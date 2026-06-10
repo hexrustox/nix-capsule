@@ -59,16 +59,7 @@ in
       NCAP_IMAGE = image;
       NCAP_RUNTIME = runtime;
       NCAP_RUN_OPTS = builtins.toJSON (
-        [
-          "--replace"
-          "--name"
-          containerName
-          "-v"
-          "/nix:/nix:ro"
-          "-v"
-          "${socketDir}:${socketDir}"
-        ]
-        ++ optionals harden [
+        optionals harden [
           "--cap-drop=all"
           "--security-opt=no-new-privileges"
         ]

@@ -29,6 +29,8 @@ All communication occurs over a Unix socket in the exclusive socket directory. N
 | `/nix:/nix` | `ro` | Container cannot modify host nix store |
 | `$PROJECT_ROOT:$PROJECT_ROOT` | `rw` | Container has write access to project files |
 | `$socketDir:$socketDir` | `rw` | Required for socket communication |
+| `$PROJECT_ROOT/.ncap-cache:$PROJECT_ROOT/.ncap-cache` | `ro` | Prevents compromised container from poisoning cached env |
+| `$PROJECT_ROOT/.git:$PROJECT_ROOT/.git` | `ro` | Prevents tampering with git history (only if `.git/` exists) |
 
 ## Host Environment
 
@@ -40,7 +42,7 @@ All communication occurs over a Unix socket in the exclusive socket directory. N
 
 `.ncap-cache/<devshell>/env` is the output of `nix print-dev-env` — it captures the evaluated devshell environment, including any secrets that exist in the flake or devshell definition. That exposure is inherent to where secrets are defined, not specific to the cache.
 
-The primary threat is that `.ncap-cache/` lives inside `$PROJECT_ROOT`, which is bind-mounted `rw` into the container. A compromised container process can overwrite `.ncap-cache/<devshell>/env` with arbitrary content. When `ncap-ctl init` next runs (e.g. on the next shell session), it sources this file in the host shell, granting code execution on the host.
+The primary threat was that `.ncap-cache/` lived inside `$PROJECT_ROOT`, which was bind-mounted `rw` into the container — a compromised container process could overwrite `.ncap-cache/<devshell>/env` with arbitrary content. When `ncap-ctl init` next ran, sourcing that file on the host granted code execution. This is now mitigated by mounting `.ncap-cache` as `ro`.
 
 ## Threat Scenarios
 
@@ -50,7 +52,7 @@ The primary threat is that `.ncap-cache/` lives inside `$PROJECT_ROOT`, which is
 | Container escape | Relies on the container runtime; `harden` mode reduces attack surface |
 | Host nix store modified by container | Mounted `ro` — container cannot write to host `/nix` |
 | Container modifies project files | Bind-mounted `rw` — accepted risk for development workflow |
-| Container writes to cached env | `.ncap-cache` is `rw` inside the container; a compromised container can gain host code execution |
+| Container writes to cached env | `.ncap-cache` is `ro` — a compromised container can no longer poison the cached env for host code execution |
 | Command lines exposed in logs | Logs contain executed commands; log dir is on the host filesystem |
 
 ## Assumptions

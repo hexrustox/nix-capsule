@@ -186,11 +186,25 @@ Each entry in `wrappers` creates a `writeShellScriptBin` in the devShell's `pack
 | `NCAP_NIX` | Path to `nix` |
 | `NCAP_BASH` | Path to `bash` |
 
-### Runtime Options (`NCAP_RUN_OPTS`)
+### Runtime Configuration
 
-- `--replace`, `--name <containerName>`
-- Bind mounts: `/nix:/nix:ro`, `$PROJECT_ROOT:$PROJECT_ROOT`, `$socketDir:$socketDir`
-- Working directory: `-w $PROJECT_ROOT`
+#### Hardcoded Defaults
+
+`ncap-ctl` applies these container arguments (before user-supplied options):
+
+| Argument | Purpose |
+|----------|---------|
+| `--replace` | Replace existing container with same name |
+| `--name <containerName>` | Container name |
+| `-v /nix:/nix:ro` | Nix store (read-only) |
+| `-v $socketDir:$socketDir` | Socket directory (read-write) |
+| `-v $PROJECT_ROOT:$PROJECT_ROOT` | Project root (read-write) |
+| `-w $PROJECT_ROOT` | Working directory |
+| `-v $PROJECT_ROOT/.ncap-cache:$PROJECT_ROOT/.ncap-cache:ro` | Devshell cache (read-only) |
+| `-v $PROJECT_ROOT/.git:$PROJECT_ROOT/.git:ro` | Git metadata (read-only, only if `.git/` exists) |
+
+#### User Options (`NCAP_RUN_OPTS`)
+
 - When `harden=true`: `--cap-drop=all`, `--security-opt=no-new-privileges`
 - Any `extraOptions` appended
 
