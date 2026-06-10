@@ -17,6 +17,7 @@ in
       containerName,
       runtime ? "podman",
       extraOptions ? [ ],
+      extraPackages ? [ ],
       harden ? false,
       autoStart ? true,
       timeout ? 10,
@@ -25,7 +26,7 @@ in
       postShellHook ? "",
     }:
     let
-      socketDir = builtins.dirOf socketPath;
+      socketDir = dirOf socketPath;
 
       devShellPath =
         if hasPrefix "." devShell || hasPrefix "/" devShell then devShell else ".#${devShell}";
@@ -48,10 +49,11 @@ in
       ]
       ++ map ({ name, value }: pkgs.writeShellScriptBin name ''exec ncap ${value} "$@"'') (
         map mkWrapperScript wrappers
-      );
+      )
+      ++ extraPackages;
 
       NCAP_SOCKET = socketPath;
-      NCAP_LOG_DIR = "${if !builtins.isNull logDir then logDir else socketDir}";
+      NCAP_LOG_DIR = "${if !isNull logDir then logDir else socketDir}";
       NCAP_DEVSHELL = devShellPath;
       NCAP_CONTAINER = containerName;
       NCAP_IMAGE = image;
