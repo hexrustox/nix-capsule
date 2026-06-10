@@ -443,8 +443,36 @@ fn log(cfg: &Config) -> Result<()> {
         .last()
         .ok_or_else(|| eyre!("no log files found in `{}`", log_dir.display()))?;
 
-    let content = std::fs::read_to_string(latest.path())
-        .wrap_err_with(|| format!("failed to read `{}`", latest.path().display()))?;
+    let path = latest.path();
+
+    let pager = std::env::var("PAGER")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .or_else(|| {
+            std::process::Command::new("less")
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|_| "less -R".to_string())
+        });
+
+    if let Some(ref pager) = pager {
+        let parts: Vec<&str> = pager.split_whitespace().collect();
+        let (cmd, args) = parts.split_first().unwrap();
+        std::process::Command::new(cmd)
+            .args(args)
+            .arg(&path)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .wrap_err_with(|| format!("failed to run pager `{pager}`"))?;
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .wrap_err_with(|| format!("failed to read `{}`", path.display()))?;
 
     print!("{content}");
     Ok(())
