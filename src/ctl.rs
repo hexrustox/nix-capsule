@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use color_eyre::eyre::{Context, Result, eyre};
-use nix_capsule::path;
+use nix_capsule::path::{self, CACHE_DIR};
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +31,8 @@ enum Cmd {
     Enter,
     /// Print the expanded runtime arguments
     ShowOptions,
+    /// Remove all cached dev environments and nix profiles, including the current one
+    Clean,
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
         Cmd::Restart => restart(&cfg),
         Cmd::Enter => enter(&cfg),
         Cmd::ShowOptions => show_options(&cfg),
+        Cmd::Clean => clean(&cfg),
         _ => unreachable!(),
     }
 }
@@ -356,6 +359,18 @@ fn enter(cfg: &Config) -> Result<()> {
 fn show_options(cfg: &Config) -> Result<()> {
     for opt in cfg.run_args() {
         println!("{opt}");
+    }
+    Ok(())
+}
+
+fn clean(cfg: &Config) -> Result<()> {
+    eprintln!("cleaning all cached dev environments...");
+    let _ = stop(cfg);
+    let cache_base = PathBuf::from(format!("{}/{}", cfg.project_root(), CACHE_DIR));
+    if cache_base.exists() {
+        std::fs::remove_dir_all(&cache_base)
+            .wrap_err_with(|| format!("failed to remove `{}`", cache_base.display()))?;
+        eprintln!("removed `{}`", cache_base.display());
     }
     Ok(())
 }
