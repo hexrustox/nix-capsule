@@ -16,7 +16,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use nix_capsule::protocol::{
-    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping,
+    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping, VersionMsg,
 };
 
 #[derive(Parser)]
@@ -175,6 +175,33 @@ async fn handle_connection(
         .map_err(|e| anyhow!("failed to parse request: {}", e))?;
 
     tracing::debug!("received request: `{}`", request.command_line());
+
+    framed_write
+        .send(Frame {
+            frame_type: FrameType::Version,
+            payload: serde_json::to_vec(&VersionMsg {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            })
+            .map_err(|e| anyhow!("failed to serialize version frame: {e}"))?,
+        })
+        .await
+        .map_err(|e| anyhow!("failed to send version frame: {e}"))?;
+
+    match &request.version {
+        Some(client_ver) if client_ver != env!("CARGO_PKG_VERSION") => {
+            tracing::warn!(
+                "client/server version mismatch: client={client_ver}, server={}",
+                env!("CARGO_PKG_VERSION"),
+            );
+        }
+        None => {
+            tracing::warn!(
+                "client did not send version (server={})",
+                env!("CARGO_PKG_VERSION"),
+            );
+        }
+        _ => {}
+    }
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);

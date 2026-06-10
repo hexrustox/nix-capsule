@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use nix_capsule::protocol::{
-    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping,
+    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping, VersionMsg,
 };
 
 #[derive(Parser)]
@@ -77,6 +77,7 @@ async fn run() -> Result<ExitCode> {
         args: args.to_vec(),
         cwd,
         env: resolved_env,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
 
     let stream = UnixStream::connect(&cli.socket)
@@ -137,6 +138,7 @@ async fn run() -> Result<ExitCode> {
 
     let response_task = tokio::spawn(async move {
         let exit_code: u8;
+        let mut version_received = false;
         loop {
             let frame = framed_read.next().await;
             match frame {
@@ -159,6 +161,21 @@ async fn run() -> Result<ExitCode> {
                         .await
                         .wrap_err("failed to write stderr")?;
                     stderr.flush().await.wrap_err("failed to flush stderr")?;
+                }
+                Some(Ok(Frame {
+                    frame_type: FrameType::Version,
+                    payload,
+                })) => {
+                    let msg: VersionMsg =
+                        from_slice(&payload).wrap_err("failed to parse version frame")?;
+                    version_received = true;
+                    if msg.version != env!("CARGO_PKG_VERSION") {
+                        eprintln!(
+                            "warning: client/server version mismatch (client={}, server={})",
+                            env!("CARGO_PKG_VERSION"),
+                            msg.version,
+                        );
+                    }
                 }
                 Some(Ok(Frame {
                     frame_type: FrameType::Exit,
@@ -209,6 +226,12 @@ async fn run() -> Result<ExitCode> {
                     return Ok((143, Some(eyre!("server disconnected"))));
                 }
             }
+        }
+        if !version_received {
+            eprintln!(
+                "warning: server did not send version (client={})",
+                env!("CARGO_PKG_VERSION"),
+            );
         }
         Ok((exit_code, None))
     });

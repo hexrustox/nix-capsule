@@ -11,6 +11,7 @@ pub enum FrameType {
     Exit = 0x05,
     Error = 0x06,
     ServerStopping = 0x07,
+    Version = 0x08,
 }
 
 impl FrameType {
@@ -23,6 +24,7 @@ impl FrameType {
             0x05 => Some(Self::Exit),
             0x06 => Some(Self::Error),
             0x07 => Some(Self::ServerStopping),
+            0x08 => Some(Self::Version),
             _ => None,
         }
     }
@@ -40,6 +42,8 @@ pub struct Request {
     pub args: Vec<String>,
     pub cwd: String,
     pub env: Vec<String>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 impl Request {
@@ -65,6 +69,11 @@ pub struct ErrorMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerStopping {
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionMsg {
+    pub version: String,
 }
 
 pub struct FrameCodec;
