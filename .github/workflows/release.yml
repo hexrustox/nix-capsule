@@ -1,0 +1,30 @@
+name: Release
+on:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build for ${{ matrix.system }}
+        run: |
+          nix build ".#packages.${{ matrix.system }}.ncap" \
+            --no-link --print-out-paths \
+            --extra-experimental-features nix-command \
+            ... > store-path
+          mkdir -p releases
+          tar czf "releases/${{ matrix.system }}.tar.gz" \
+            -C "$(cat store-path)" bin share
+          rm store-path
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: releases/*.tar.gz
