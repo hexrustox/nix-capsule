@@ -5,19 +5,19 @@
   system,
   pkgs,
   rustPlatform ? pkgs.rustPlatform,
+  useCache ? true,
 }:
 let
   version = (fromTOML (builtins.readFile ./Cargo.toml)).package.version;
-  maybeRemote = builtins.tryEval (fetchurl {
-    url = "https://github.com/hexrustox/nix-capsule/releases/download/${version}/${system}.tar.gz";
-    hash = "sha256-ftsOswc9wKPmeSvMF3qOVD8dpX2HqFf011nh1B8k4/M=";
-  });
 in
-if maybeRemote.success then
+if useCache then
   stdenv.mkDerivation {
     pname = "ncap";
     inherit version;
-    src = maybeRemote.value;
+    src = fetchurl {
+      url = "https://github.com/hexrustox/nix-capsule/releases/download/v${version}/${system}.tar.gz";
+      hash = "sha256-ftsOswc9wKPmeSvMF3qOVD8dpX2HqFf011nh1B8k4/M=";
+    };
     sourceRoot = ".";
     nativeBuildInputs = [ autoPatchelfHook ];
     buildInputs = [ stdenv.cc.cc.lib ];
