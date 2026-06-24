@@ -77,8 +77,6 @@
                 "rust-analyzer"
                 "nixd"
                 "taplo"
-
-                "bash-language-server"
               ];
               preShellHook = ''
                 export CARGO_HOME=''${CARGO_HOME:-$HOME/.cargo}
@@ -109,8 +107,6 @@
                   nixfmt
                   rust
                   taplo
-
-                  bash-language-server
                 ];
               };
           };
