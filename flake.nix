@@ -69,7 +69,8 @@
                 "CARGO_HOME"
                 "-v"
                 "$CARGO_HOME:$CARGO_HOME"
-                "--pid=host"
+                "-v"
+                "$HOME/.cache/pnpm:/root/.cache/pnpm"
               ];
               wrappers = [
                 "cargo"
@@ -107,6 +108,10 @@
                   nixfmt
                   rust
                   taplo
+
+                  nodejs-slim
+                  pnpm
+                  git
                 ];
               };
           };
