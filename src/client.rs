@@ -7,14 +7,13 @@ use color_eyre::{
     eyre::{Context, Report, eyre},
 };
 use futures::{SinkExt, StreamExt};
-use serde_json::from_slice;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use nix_capsule::protocol::{
-    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping, VersionMsg,
+    CURRENT_VERSION, FrameCodec, Message, Request, Role, SIGTERM_EXIT, VersionCheck,
 };
 
 #[derive(Parser)]
@@ -77,7 +76,7 @@ async fn run() -> Result<ExitCode> {
         args: args.to_vec(),
         cwd,
         env: resolved_env,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        version: Some(CURRENT_VERSION.to_string()),
     };
 
     let stream = UnixStream::connect(&cli.socket)
@@ -89,13 +88,12 @@ async fn run() -> Result<ExitCode> {
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
     let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
-    let request_payload = serde_json::to_vec(&request).wrap_err("failed to serialize request")?;
-
     framed_write
-        .send(Frame {
-            frame_type: FrameType::Request,
-            payload: request_payload,
-        })
+        .send(
+            Message::Request(request)
+                .into_frame()
+                .wrap_err("failed to serialize request")?,
+        )
         .await
         .wrap_err("failed to send request")
         .suggestion("check that the server is still running")?;
@@ -123,14 +121,8 @@ async fn run() -> Result<ExitCode> {
     tokio::spawn(async move {
         let mut framed_write = framed_write;
         while let Some(data) = stdin_rx.recv().await {
-            if framed_write
-                .send(Frame {
-                    frame_type: FrameType::Stdin,
-                    payload: data,
-                })
-                .await
-                .is_err()
-            {
+            let frame = Message::Stdin(data).into_frame().expect("Stdin encode");
+            if framed_write.send(frame).await.is_err() {
                 break;
             }
         }
@@ -142,80 +134,59 @@ async fn run() -> Result<ExitCode> {
         loop {
             let frame = framed_read.next().await;
             match frame {
-                Some(Ok(Frame {
-                    frame_type: FrameType::Stdout,
-                    payload,
-                })) => {
-                    stdout
-                        .write_all(&payload)
-                        .await
-                        .wrap_err("failed to write stdout")?;
-                    stdout.flush().await.wrap_err("failed to flush stdout")?;
-                }
-                Some(Ok(Frame {
-                    frame_type: FrameType::Stderr,
-                    payload,
-                })) => {
-                    stderr
-                        .write_all(&payload)
-                        .await
-                        .wrap_err("failed to write stderr")?;
-                    stderr.flush().await.wrap_err("failed to flush stderr")?;
-                }
-                Some(Ok(Frame {
-                    frame_type: FrameType::Version,
-                    payload,
-                })) => {
-                    let msg: VersionMsg =
-                        from_slice(&payload).wrap_err("failed to parse version frame")?;
-                    version_received = true;
-                    if msg.version != env!("CARGO_PKG_VERSION") {
-                        eprintln!(
-                            "warning: client/server version mismatch (client={}, server={})",
-                            env!("CARGO_PKG_VERSION"),
-                            msg.version,
-                        );
-                    }
-                }
-                Some(Ok(Frame {
-                    frame_type: FrameType::Exit,
-                    payload,
-                })) => {
-                    let exit: Exit =
-                        serde_json::from_slice(&payload).wrap_err("failed to parse exit frame")?;
-                    exit_code = exit.exit_code as u8;
-                    break;
-                }
-                Some(Ok(Frame {
-                    frame_type: FrameType::Error,
-                    payload,
-                })) => {
-                    let msg: ErrorMessage =
-                        from_slice(&payload).wrap_err("failed to parse error frame")?;
-                    return Err(if let Some(cause) = msg.cause {
-                        eyre!("{cause}: {}", msg.error)
-                    } else {
-                        eyre!("{}", msg.error)
-                    });
-                }
-                Some(Ok(Frame {
-                    frame_type: FrameType::ServerStopping,
-                    payload,
-                })) => {
-                    let msg: ServerStopping =
-                        from_slice(&payload).wrap_err("failed to parse server shutdown frame")?;
-                    let err = if let Some(reason) = msg.reason {
-                        eyre!("server is shutting down: {reason}")
-                    } else {
-                        eyre!("server is shutting down")
-                    };
-                    return Ok((143, Some(err)));
-                }
                 Some(Ok(frame)) => {
-                    return Err(eyre!(
-                        "protocol error: unexpected frame {:?}",
-                        frame.frame_type
-                    ));
+                    let msg = Message::from_frame(frame)
+                        .map_err(|e| Report::from(std::io::Error::other(e.to_string())))
+                        .wrap_err("failed to decode frame")?;
+                    match msg {
+                        Message::Stdout(payload) => {
+                            stdout
+                                .write_all(&payload)
+                                .await
+                                .wrap_err("failed to write stdout")?;
+                            stdout.flush().await.wrap_err("failed to flush stdout")?;
+                        }
+                        Message::Stderr(payload) => {
+                            stderr
+                                .write_all(&payload)
+                                .await
+                                .wrap_err("failed to write stderr")?;
+                            stderr.flush().await.wrap_err("failed to flush stderr")?;
+                        }
+                        Message::Version(v) => {
+                            version_received = true;
+                            report_version_check(VersionCheck::from(
+                                Some(&v),
+                                CURRENT_VERSION,
+                                Role::Client,
+                            ));
+                        }
+                        Message::Exit(exit) => {
+                            exit_code = exit.exit_code as u8;
+                            break;
+                        }
+                        Message::Error(em) => {
+                            return Err(if let Some(cause) = em.cause {
+                                eyre!("{cause}: {}", em.error)
+                            } else {
+                                eyre!("{}", em.error)
+                            });
+                        }
+                        Message::ServerStopping(s) => {
+                            let err = if let Some(reason) = s.reason {
+                                eyre!("server is shutting down: {reason}")
+                            } else {
+                                eyre!("server is shutting down")
+                            };
+                            return Ok((SIGTERM_EXIT, Some(err)));
+                        }
+                        other => {
+                            return Err(eyre!(
+                                "protocol error: unexpected frame {:?}",
+                                other.frame_type()
+                            ));
+                        }
+                    }
                 }
                 Some(Err(e)) => {
                     return Err(Report::from(e))
@@ -223,15 +194,12 @@ async fn run() -> Result<ExitCode> {
                         .suggestion("the server may have disconnected");
                 }
                 None => {
-                    return Ok((143, Some(eyre!("server disconnected"))));
+                    return Ok((SIGTERM_EXIT, Some(eyre!("server disconnected"))));
                 }
             }
         }
         if !version_received {
-            eprintln!(
-                "warning: server did not send version (client={})",
-                env!("CARGO_PKG_VERSION"),
-            );
+            report_version_check(VersionCheck::from(None, CURRENT_VERSION, Role::Client));
         }
         Ok((exit_code, None))
     });
@@ -243,4 +211,19 @@ async fn run() -> Result<ExitCode> {
     }
 
     Ok(ExitCode::from(exit_code))
+}
+
+fn report_version_check(check: VersionCheck) {
+    match check {
+        VersionCheck::Match => {}
+        VersionCheck::Mismatch { client, server } => {
+            eprintln!("warning: client/server version mismatch (client={client}, server={server})");
+        }
+        VersionCheck::ServerMissing { client } => {
+            eprintln!("warning: server did not send version (client={client})");
+        }
+        VersionCheck::ClientMissing { server } => {
+            eprintln!("warning: client did not send version (server={server})");
+        }
+    }
 }

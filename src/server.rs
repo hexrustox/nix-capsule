@@ -1,4 +1,3 @@
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -16,7 +15,8 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use nix_capsule::protocol::{
-    ErrorMessage, Exit, Frame, FrameCodec, FrameType, Request, ServerStopping, VersionMsg,
+    CURRENT_VERSION, ErrorMessage, Exit, Frame, FrameCodec, FrameType, Message, Request, Role,
+    ServerStopping, VersionCheck, VersionMsg, exit_code_from,
 };
 
 #[derive(Parser)]
@@ -171,37 +171,34 @@ async fn handle_connection(
         return Ok(());
     }
 
-    let request: Request = serde_json::from_slice(&first_frame.payload)
-        .map_err(|e| anyhow!("failed to parse request: {}", e))?;
+    let request: Request = match Message::from_frame(first_frame) {
+        Ok(Message::Request(r)) => r,
+        Err(e) => return Err(anyhow!("failed to parse request: {}", e)),
+        _ => unreachable!("frame_type checked above"),
+    };
 
     tracing::debug!("received request: `{}`", request.command_line());
 
     framed_write
-        .send(Frame {
-            frame_type: FrameType::Version,
-            payload: serde_json::to_vec(&VersionMsg {
-                version: env!("CARGO_PKG_VERSION").to_string(),
+        .send(
+            Message::Version(VersionMsg {
+                version: CURRENT_VERSION.to_string(),
             })
+            .into_frame()
             .map_err(|e| anyhow!("failed to serialize version frame: {e}"))?,
-        })
+        )
         .await
         .map_err(|e| anyhow!("failed to send version frame: {e}"))?;
 
-    match &request.version {
-        Some(client_ver) if client_ver != env!("CARGO_PKG_VERSION") => {
-            tracing::warn!(
-                "client/server version mismatch: client={client_ver}, server={}",
-                env!("CARGO_PKG_VERSION"),
-            );
-        }
-        None => {
-            tracing::warn!(
-                "client did not send version (server={})",
-                env!("CARGO_PKG_VERSION"),
-            );
-        }
-        _ => {}
-    }
+    let client_version_msg = request
+        .version
+        .as_ref()
+        .map(|v| VersionMsg { version: v.clone() });
+    report_version_check(VersionCheck::from(
+        client_version_msg.as_ref(),
+        CURRENT_VERSION,
+        Role::Server,
+    ));
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);
@@ -286,24 +283,12 @@ async fn handle_connection(
 
             match result {
                 Ok(status) => {
-                    let exit_code = match (status.code(), status.signal()) {
-                        (Some(code), _) => code,
-                        (None, Some(signal)) => 128 + signal,
-                        (None, None) => {
-                            tracing::warn!("process exited with no exit code and no signal — using 1");
-                            1
-                        }
-                    };
+                    let exit_code = exit_code_from(&status);
                     tracing::info!("command finished with exit_code {}", exit_code);
 
                     let exit = Exit { exit_code };
-                    let exit_payload = serde_json::to_vec(&exit)
-                        .map_err(|e| anyhow!("failed to serialize Exit: {e}"))?;
                     if let Err(e) = framed_write
-                        .send(Frame {
-                            frame_type: FrameType::Exit,
-                            payload: exit_payload,
-                        })
+                        .send(Message::Exit(exit).into_frame().expect("Exit encode"))
                         .await
                     {
                         tracing::error!("failed to send Exit: {e}");
@@ -368,18 +353,16 @@ where
     S: SinkExt<Frame> + Unpin,
     S::Error: std::fmt::Display,
 {
-    let error = ErrorMessage {
+    let msg = ErrorMessage {
         error,
         cause: context.map(|s| s.to_string()),
     };
-    let payload =
-        serde_json::to_vec(&error).map_err(|e| anyhow!("failed to serialize ErrorMessage: {e}"))?;
-    sink.send(Frame {
-        frame_type: FrameType::Error,
-        payload,
-    })
-    .await
-    .map_err(|e| anyhow!("failed to send ErrorMessage: {e}"))?;
+    let frame = Message::Error(msg)
+        .into_frame()
+        .map_err(|e| anyhow!("failed to encode ErrorMessage: {e}"))?;
+    sink.send(frame)
+        .await
+        .map_err(|e| anyhow!("failed to send ErrorMessage: {e}"))?;
     Ok(())
 }
 
@@ -391,13 +374,26 @@ where
     let msg = ServerStopping {
         reason: reason.map(|s| s.to_string()),
     };
-    let payload =
-        serde_json::to_vec(&msg).map_err(|e| anyhow!("failed to serialize ServerStopping: {e}"))?;
-    sink.send(Frame {
-        frame_type: FrameType::ServerStopping,
-        payload,
-    })
-    .await
-    .map_err(|e| anyhow!("failed to send ServerStopping: {e}"))?;
+    let frame = Message::ServerStopping(msg)
+        .into_frame()
+        .map_err(|e| anyhow!("failed to encode ServerStopping: {e}"))?;
+    sink.send(frame)
+        .await
+        .map_err(|e| anyhow!("failed to send ServerStopping: {e}"))?;
     Ok(())
+}
+
+fn report_version_check(check: VersionCheck) {
+    match check {
+        VersionCheck::Match => {}
+        VersionCheck::Mismatch { client, server } => {
+            tracing::warn!("client/server version mismatch: client={client}, server={server}");
+        }
+        VersionCheck::ClientMissing { server } => {
+            tracing::warn!("client did not send version (server={server})");
+        }
+        VersionCheck::ServerMissing { client } => {
+            tracing::warn!("server did not send version (client={client})");
+        }
+    }
 }
