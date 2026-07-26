@@ -8,7 +8,7 @@ use color_eyre::{
     Section,
     eyre::{Context, Result, eyre},
 };
-use nix_capsule::path::{self, CACHE_DIR};
+use nix_capsule::path;
 
 #[derive(Parser)]
 #[command(
@@ -62,8 +62,6 @@ struct Config {
     nix_bin: String,
     bash_bin: String,
     timeout: u64,
-    cache_file: OnceLock<PathBuf>,
-    nix_profile: OnceLock<PathBuf>,
     project_root: String,
 }
 
@@ -116,8 +114,6 @@ impl Config {
             nix_bin: env("NCAP_NIX")?,
             bash_bin: env("NCAP_BASH")?,
             timeout: env("NCAP_TIMEOUT")?.parse()?,
-            cache_file: OnceLock::new(),
-            nix_profile: OnceLock::new(),
             project_root: env("PROJECT_ROOT")?,
         })
     }
@@ -127,23 +123,24 @@ impl Config {
             .get_or_init(|| sanitize_name(&self.devshell))
     }
 
-    fn cache_file(&self) -> &PathBuf {
-        self.cache_file.get_or_init(|| {
-            let dir = path::devshell_cache_dir(&self.project_root, self.devshell_name());
-            dir.join(path::ENV_CACHE_FILE)
-        })
+    fn cache_file(&self) -> PathBuf {
+        path::env_file(
+            Path::new(&self.project_root),
+            self.devshell_name(),
+        )
     }
 
-    fn nix_profile(&self) -> &PathBuf {
-        self.nix_profile.get_or_init(|| {
-            let dir = path::devshell_cache_dir(&self.project_root, self.devshell_name());
-            dir.join(path::NIX_PROFILE_FILE)
-        })
+    fn nix_profile(&self) -> PathBuf {
+        path::nix_profile(
+            Path::new(&self.project_root),
+            self.devshell_name(),
+        )
     }
 
     fn run_args(&self) -> Vec<String> {
         let pr = &self.project_root;
         let opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
+        let cache_root = path::cache_root(Path::new(pr));
         let mut defaults = vec![
             "--replace".into(),
             "--name".into(),
@@ -161,7 +158,7 @@ impl Config {
             "-w".into(),
             pr.to_owned(),
             "-v".into(),
-            format!("{pr}/.ncap-cache:{pr}/.ncap-cache:ro"),
+            format!("{}:{}:ro", cache_root.display(), cache_root.display()),
         ];
         if Path::new(&format!("{pr}/.git")).is_dir() {
             defaults.push("-v".into());
@@ -173,7 +170,7 @@ impl Config {
 }
 
 fn env(name: &str) -> Result<String> {
-    std::env::var(name).wrap_err(format!("NCAP_* env var not set: `{name}`"))
+    std::env::var(name).wrap_err(format!("env var not set: `{name}`"))
 }
 
 fn json_env(name: &str) -> Result<Vec<String>> {
@@ -255,19 +252,22 @@ fn expand_env(s: &str) -> String {
 }
 
 fn init(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(cfg.cache_file().parent().unwrap())?;
+    std::fs::create_dir_all(path::devshell_dir(
+        Path::new(&cfg.project_root),
+        cfg.devshell_name(),
+    ))?;
 
     let valid = std::env::var("NCAP_CACHE").ok();
     if valid.is_none_or(|s| s != "1") || !cfg.cache_file().exists() {
         eprintln!("caching dev environment");
-        let profile = cfg.nix_profile().to_string_lossy();
+        let profile = cfg.nix_profile();
         let mut nix_cmd = std::process::Command::new(&cfg.nix_bin);
-        nix_cmd.args(["print-dev-env", "--profile", &profile, &cfg.devshell]);
+        nix_cmd.args(["print-dev-env", "--profile", &profile.to_string_lossy(), &cfg.devshell]);
         let stdout = run_piped(nix_cmd, "nix print-dev-env")?;
         std::fs::write(cfg.cache_file(), &stdout)?;
 
         std::process::Command::new(&cfg.nix_bin)
-            .args(["profile", "wipe-history", "--profile", &profile])
+            .args(["profile", "wipe-history", "--profile", &profile.to_string_lossy()])
             .status()
             .wrap_err("nix profile wipe-history")?;
 
@@ -382,7 +382,7 @@ fn show_options(cfg: &Config) -> Result<()> {
 fn clean(cfg: &Config) -> Result<()> {
     eprintln!("cleaning all cached dev environments...");
     let _ = stop(cfg);
-    let cache_base = PathBuf::from(format!("{}/{}", cfg.project_root, CACHE_DIR));
+    let cache_base = path::cache_root(Path::new(&cfg.project_root));
     if cache_base.exists() {
         std::fs::remove_dir_all(&cache_base)
             .wrap_err_with(|| format!("failed to remove `{}`", cache_base.display()))?;
@@ -426,19 +426,11 @@ fn log(cfg: &Config) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(log_dir)
         .wrap_err_with(|| format!("failed to read log directory `{}`", log_dir.display()))?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("ncap-server-") && name.ends_with(".log")
-        })
+        .filter(|e| path::parse_log_filename(&e.file_name().to_string_lossy()).is_some())
         .collect();
 
     entries.sort_by_key(|e| {
-        let name = e.file_name().to_string_lossy().to_string();
-        name.strip_prefix("ncap-server-")
-            .and_then(|s| s.strip_suffix(".log"))
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
+        path::parse_log_filename(&e.file_name().to_string_lossy()).unwrap_or(0)
     });
 
     let latest = entries

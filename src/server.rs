@@ -36,12 +36,11 @@ struct Cli {
 }
 
 fn init_logging(log_dir: &Path) -> WorkerGuard {
-    let timestamp = std::time::SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .to_string();
-    let log_filename = format!("ncap-server-{}.log", timestamp);
+        .as_secs();
+    let log_filename = nix_capsule::path::log_filename(secs);
 
     let file_appender = tracing_appender::rolling::never(log_dir, log_filename);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);

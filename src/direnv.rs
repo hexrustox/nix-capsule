@@ -19,8 +19,8 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     let project_root = std::env::current_dir().wrap_err("failed to get current directory")?;
-    let cache_dir = project_root.join(path::CACHE_DIR);
-    let state_path = cache_dir.join(path::DIRENV_MTIMES_FILE);
+    let cache_dir = path::cache_root(&project_root);
+    let state_path = path::direnv_mtimes_file(&project_root);
 
     let current = direnv_show_dump(&project_root)?;
 
@@ -34,7 +34,8 @@ fn main() -> Result<()> {
 
     let script = USE_FLAKE_TEMPLATE
         .replace("__NCAP_CACHE__", &cache_valid.to_string())
-        .replace("__CACHE_DIR__", &cache_dir.to_string_lossy());
+        .replace("__CACHE_DIR__", &cache_dir.to_string_lossy())
+        .replace("__ENV_FILE__", path::ENV_CACHE_FILE);
     print!("{script}");
 
     Ok(())
