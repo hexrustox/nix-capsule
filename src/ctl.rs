@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -56,10 +56,10 @@ struct Config {
     log_dir: String,
     container: String,
     image: String,
-    runtime: String,
+    runtime: Runtime,
     run_opts: Vec<String>,
     server_bin: String,
-    nix_bin: String,
+    nix: NixInvoker,
     bash_bin: String,
     timeout: u64,
     project_root: String,
@@ -108,10 +108,10 @@ impl Config {
             log_dir: env("NCAP_LOG_DIR")?,
             container: env("NCAP_CONTAINER")?,
             image: env("NCAP_IMAGE")?,
-            runtime: env("NCAP_RUNTIME")?,
+            runtime: Runtime::new(env("NCAP_RUNTIME")?),
             run_opts: json_env("NCAP_RUN_OPTS")?,
             server_bin: env("NCAP_SERVER")?,
-            nix_bin: env("NCAP_NIX")?,
+            nix: NixInvoker::new(env("NCAP_NIX")?),
             bash_bin: env("NCAP_BASH")?,
             timeout: env("NCAP_TIMEOUT")?.parse()?,
             project_root: env("PROJECT_ROOT")?,
@@ -124,17 +124,11 @@ impl Config {
     }
 
     fn cache_file(&self) -> PathBuf {
-        path::env_file(
-            Path::new(&self.project_root),
-            self.devshell_name(),
-        )
+        path::env_file(Path::new(&self.project_root), self.devshell_name())
     }
 
     fn nix_profile(&self) -> PathBuf {
-        path::nix_profile(
-            Path::new(&self.project_root),
-            self.devshell_name(),
-        )
+        path::nix_profile(Path::new(&self.project_root), self.devshell_name())
     }
 
     fn run_args(&self) -> Vec<String> {
@@ -261,15 +255,12 @@ fn init(cfg: &Config) -> Result<()> {
     if valid.is_none_or(|s| s != "1") || !cfg.cache_file().exists() {
         eprintln!("caching dev environment");
         let profile = cfg.nix_profile();
-        let mut nix_cmd = std::process::Command::new(&cfg.nix_bin);
-        nix_cmd.args(["print-dev-env", "--profile", &profile.to_string_lossy(), &cfg.devshell]);
-        let stdout = run_piped(nix_cmd, "nix print-dev-env")?;
+        let stdout = cfg
+            .nix
+            .print_dev_env(&profile.to_string_lossy(), &cfg.devshell)?;
         std::fs::write(cfg.cache_file(), &stdout)?;
 
-        std::process::Command::new(&cfg.nix_bin)
-            .args(["profile", "wipe-history", "--profile", &profile.to_string_lossy()])
-            .status()
-            .wrap_err("nix profile wipe-history")?;
+        cfg.nix.wipe_history(&profile.to_string_lossy())?;
 
         restart(cfg)
     } else {
@@ -278,7 +269,7 @@ fn init(cfg: &Config) -> Result<()> {
 }
 
 fn start(cfg: &Config) -> Result<()> {
-    if is_running(&cfg.runtime, &cfg.container) {
+    if cfg.runtime.is_running(&cfg.container) {
         eprintln!("container `{}` is already running", cfg.container);
         return Ok(());
     }
@@ -311,14 +302,9 @@ fn start(cfg: &Config) -> Result<()> {
         cfg.timeout,
     );
     eprintln!("starting container `{}`...", cfg.container);
-    let mut run = std::process::Command::new(&cfg.runtime);
-    run.args(["run", "-d"]);
-    for opt in cfg.run_args() {
-        run.arg(opt);
-    }
-    run.args(["--", &cfg.image, &cfg.bash_bin, "-c", &exec_cmd]);
-    let stdout = run_piped(run, &format!("{} run", cfg.runtime))?;
-    let id = String::from_utf8_lossy(&stdout).trim().to_owned();
+    let id = cfg
+        .runtime
+        .run(cfg.run_args(), &cfg.image, &cfg.bash_bin, &exec_cmd)?;
     if !id.is_empty() {
         eprintln!("container started: `{id}`");
     }
@@ -328,10 +314,7 @@ fn start(cfg: &Config) -> Result<()> {
 
 fn stop(cfg: &Config) -> Result<()> {
     eprintln!("stopping container `{}`...", cfg.container);
-    let mut stop = std::process::Command::new(&cfg.runtime);
-    stop.args(["stop", &cfg.container]);
-    let stdout = run_piped(stop, &format!("{} stop", cfg.runtime))?;
-    let msg = String::from_utf8_lossy(&stdout).trim().to_owned();
+    let msg = cfg.runtime.stop(&cfg.container)?;
     if !msg.is_empty() {
         eprintln!("container stopped: `{msg}`");
     }
@@ -356,18 +339,9 @@ fn enter(cfg: &Config) -> Result<()> {
         cfg.cache_file().display(),
         cfg.bash_bin,
     );
-    let status = std::process::Command::new(&cfg.runtime)
-        .args([
-            "exec",
-            "-it",
-            &cfg.container,
-            &cfg.bash_bin,
-            "-c",
-            &shell_cmd,
-        ])
-        .status()
-        .wrap_err("failed to enter container")
-        .suggestion("check that the container is running (`ncap-ctl start`)")?;
+    let status = cfg
+        .runtime
+        .exec_interactive(&cfg.container, &cfg.bash_bin, &shell_cmd)?;
 
     std::process::exit(status.code().unwrap_or(1));
 }
@@ -392,16 +366,12 @@ fn clean(cfg: &Config) -> Result<()> {
 }
 
 fn status(cfg: &Config) -> Result<()> {
-    if is_running(&cfg.runtime, &cfg.container) {
-        let output = std::process::Command::new(&cfg.runtime)
-            .args(["inspect", "-f", "{{.Id}}", &cfg.container])
-            .output()
-            .wrap_err("failed to inspect container")?;
-        let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if cfg.runtime.is_running(&cfg.container) {
+        let id = cfg.runtime.container_id(&cfg.container)?;
         println!("container is running");
         println!("  id:      {id}");
         println!("  name:    {}", cfg.container);
-        println!("  runtime: {}", cfg.runtime);
+        println!("  runtime: {}", cfg.runtime.bin());
         println!("  socket:  {}", cfg.socket);
     } else {
         println!("container is not running");
@@ -429,9 +399,8 @@ fn log(cfg: &Config) -> Result<()> {
         .filter(|e| path::parse_log_filename(&e.file_name().to_string_lossy()).is_some())
         .collect();
 
-    entries.sort_by_key(|e| {
-        path::parse_log_filename(&e.file_name().to_string_lossy()).unwrap_or(0)
-    });
+    entries
+        .sort_by_key(|e| path::parse_log_filename(&e.file_name().to_string_lossy()).unwrap_or(0));
 
     let latest = entries
         .into_iter()
@@ -473,17 +442,115 @@ fn log(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn is_running(runtime: &str, container: &str) -> bool {
-    let Ok(output) = std::process::Command::new(runtime)
-        .args(["inspect", "-f", "{{.State.Running}}", container])
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&output.stdout).trim() == "true"
+/// Container runtime adapter (podman/docker). Owns the Go-template format
+/// strings and the stdio-mode decision per operation.
+pub struct Runtime {
+    bin: String,
 }
 
-fn run_piped(mut cmd: std::process::Command, label: &str) -> Result<Vec<u8>> {
+impl Runtime {
+    pub fn new(bin: String) -> Self {
+        Self { bin }
+    }
+
+    pub fn bin(&self) -> &str {
+        &self.bin
+    }
+
+    /// `run -d` a container with the given volume/workdir args, image, and
+    /// `bash -c` exec command. Returns the container id printed on stdout.
+    pub fn run(
+        &self,
+        container_args: Vec<String>,
+        image: &str,
+        bash_bin: &str,
+        exec_cmd: &str,
+    ) -> Result<String> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["run", "-d"])
+            .args(container_args)
+            .args(["--", image, bash_bin, "-c", exec_cmd]);
+        let stdout = run_piped(cmd, &format!("{} run", self.bin))?;
+        Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+    }
+
+    /// `stop` the named container. Returns the runtime's stdout message.
+    pub fn stop(&self, container: &str) -> Result<String> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["stop", container]);
+        let stdout = run_piped(cmd, &format!("{} stop", self.bin))?;
+        Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+    }
+
+    /// `exec -it` an interactive shell into the container. Inherits stdio
+    /// and returns the child's exit status (caller decides whether to exit).
+    pub fn exec_interactive(
+        &self,
+        container: &str,
+        bash_bin: &str,
+        shell_cmd: &str,
+    ) -> Result<ExitStatus> {
+        let status = Command::new(&self.bin)
+            .args(["exec", "-it", container, bash_bin, "-c", shell_cmd])
+            .status()
+            .wrap_err("failed to enter container")
+            .suggestion("check that the container is running (`ncap-ctl start`)")?;
+        Ok(status)
+    }
+
+    /// `inspect -f {{.State.Running}}`. Returns false on any spawn/parse
+    /// failure (the container is treated as not-running).
+    pub fn is_running(&self, container: &str) -> bool {
+        let Ok(output) = Command::new(&self.bin)
+            .args(["inspect", "-f", "{{.State.Running}}", container])
+            .output()
+        else {
+            return false;
+        };
+        String::from_utf8_lossy(&output.stdout).trim() == "true"
+    }
+
+    /// `inspect -f {{.Id}}`. Returns the container id.
+    pub fn container_id(&self, container: &str) -> Result<String> {
+        let output = Command::new(&self.bin)
+            .args(["inspect", "-f", "{{.Id}}", container])
+            .output()
+            .wrap_err("failed to inspect container")?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+}
+
+/// `nix` adapter for `print-dev-env` and `profile wipe-history`.
+pub struct NixInvoker {
+    bin: String,
+}
+
+impl NixInvoker {
+    pub fn new(bin: String) -> Self {
+        Self { bin }
+    }
+
+    /// `nix print-dev-env --profile <profile> <devshell>` — captured stdout
+    /// (the devshell activation script).
+    pub fn print_dev_env(&self, profile: &str, devshell: &str) -> Result<Vec<u8>> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["print-dev-env", "--profile", profile, devshell]);
+        run_piped(cmd, "nix print-dev-env")
+    }
+
+    /// `nix profile wipe-history --profile <profile>` — status inherit.
+    pub fn wipe_history(&self, profile: &str) -> Result<()> {
+        Command::new(&self.bin)
+            .args(["profile", "wipe-history", "--profile", profile])
+            .status()
+            .wrap_err("nix profile wipe-history")?;
+        Ok(())
+    }
+}
+
+/// Capture stdout, inherit stderr, bail with a labelled error on non-zero
+/// exit. Shared by both adapters for the "capture-and-fail" spawning pattern.
+fn run_piped(mut cmd: Command, label: &str) -> Result<Vec<u8>> {
     let label = label.to_owned();
     let output = cmd
         .stdout(Stdio::piped())
