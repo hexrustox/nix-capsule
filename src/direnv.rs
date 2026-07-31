@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
+use clap::Parser;
 use color_eyre::eyre::{Context, Result};
 use nix_capsule::path;
 use serde::Deserialize;
@@ -15,8 +16,20 @@ struct WatchEntry {
     path: String,
 }
 
+#[derive(Parser)]
+#[command(
+    name = "ncap-direnv",
+    about = "direnv integration for nix-capsule cache validation",
+    version
+)]
+struct Cli;
+
 fn main() -> Result<()> {
     color_eyre::install()?;
+
+    // Parse to provide --help and --version while remaining backward-compatible
+    // with `eval "$(ncap-direnv)"` usage.
+    let _cli = Cli::parse();
 
     let project_root = std::env::current_dir().wrap_err("failed to get current directory")?;
     let cache_dir = path::cache_root(&project_root);
@@ -30,6 +43,8 @@ fn main() -> Result<()> {
 
     save_state(&state_path, &current)?;
 
+    // Emit NCAP_CACHE as a transient signal for ncap-ctl init: 1 means the
+    // direnv watched inputs are unchanged and the cache can be reused.
     let cache_valid = if valid { 1 } else { 0 };
 
     let script = USE_FLAKE_TEMPLATE

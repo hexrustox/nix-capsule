@@ -20,7 +20,7 @@ use nix_capsule::protocol::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Capsule container server")]
+#[command(version, about = "Server for the nix-capsule")]
 struct Cli {
     /// Unix socket path to listen on
     #[arg(short, long)]

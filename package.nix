@@ -31,13 +31,19 @@ rustPlatform.buildRustPackage {
     mkdir -p $out/share/bash-completion/completions
     $out/bin/ncap-ctl completions bash \
       > $out/share/bash-completion/completions/ncap-ctl
+    $out/bin/ncap completions bash \
+      > $out/share/bash-completion/completions/ncap
 
     mkdir -p $out/share/zsh/site-functions
     $out/bin/ncap-ctl completions zsh \
       > $out/share/zsh/site-functions/_ncap-ctl
+    $out/bin/ncap completions zsh \
+      > $out/share/zsh/site-functions/_ncap
 
     mkdir -p $out/share/fish/vendor_completions.d
     $out/bin/ncap-ctl completions fish \
       > $out/share/fish/vendor_completions.d/ncap-ctl.fish
+    $out/bin/ncap completions fish \
+      > $out/share/fish/vendor_completions.d/ncap.fish
   '';
 }

@@ -26,6 +26,8 @@ Containerized dev shells with transparent binary execution.
 
 ## Quick start
 
+The canonical source is on [GitLab](https://gitlab.com/codnixus/nix-capsule); the [GitHub repository](https://github.com/hexrustox/nix-capsule) is a mirror used for CI releases.
+
 Add this to `flake.nix`:
 
 ```nix
@@ -89,8 +91,8 @@ The `ncap` package provides four binaries:
 | Binary | Description |
 |--------|-------------|
 | `ncap` | Host CLI client — connects to the server and bridges I/O |
-| `ncap-server` | Long-lived server inside the container |
-| `ncap-ctl` | Container lifecycle management (`init`, `start`, `stop`, `restart`, `enter`, `status`, `log`, `clean`) |
+| `ncap-server` | Long-lived server inside the capsule container |
+| `ncap-ctl` | Capsule container lifecycle management (`init`, `start`, `stop`, `restart`, `enter`, `status`, `log`, `clean`) |
 | `ncap-direnv` | direnv integration for cache validation |
 
 ## Configuration

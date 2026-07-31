@@ -13,10 +13,18 @@ use nix_capsule::path;
 #[derive(Parser)]
 #[command(
     name = "ncap-ctl",
-    about = "Manage the nix-capsule container life-cycle",
+    about = "Manage the nix-capsule container lifecycle",
     version
 )]
 struct Cli {
+    /// Unix socket path
+    #[arg(short, long, env = "NCAP_SOCKET")]
+    socket: String,
+
+    /// Server log directory
+    #[arg(short, long, env = "NCAP_LOG_DIR")]
+    log_dir: String,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -31,7 +39,7 @@ enum Cmd {
     Stop,
     /// Stop and restart the container
     Restart,
-    /// Enter an interactive shell inside the devshell container
+    /// Enter an interactive shell inside the container
     Enter,
     /// Print the expanded runtime arguments
     ShowOptions,
@@ -40,7 +48,11 @@ enum Cmd {
     /// Show container status
     Status,
     /// Show the server log (latest log file)
-    Log,
+    Log {
+        /// Disable pager and print the log to stdout
+        #[arg(long)]
+        no_pager: bool,
+    },
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -76,7 +88,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cfg = Config::from_env()?;
+    let cfg = Config::from_cli(&cli)?;
     match cli.command {
         Cmd::Init => init(&cfg),
         Cmd::Start => start(&cfg),
@@ -86,26 +98,28 @@ fn main() -> Result<()> {
         Cmd::ShowOptions => show_options(&cfg),
         Cmd::Clean => clean(&cfg),
         Cmd::Status => status(&cfg),
-        Cmd::Log => log(&cfg),
+        Cmd::Log { no_pager } => log(&cfg, no_pager),
         _ => unreachable!(),
     }
 }
 
 impl Config {
-    fn from_env() -> Result<Self> {
+    fn from_cli(cli: &Cli) -> Result<Self> {
         let devshell = env("NCAP_DEVSHELL")?;
-        let socket = env("NCAP_SOCKET")?;
+        let socket = cli.socket.clone();
         let socket_dir = Path::new(&socket)
             .parent()
             .map(|p| p.to_owned())
             .ok_or_else(|| eyre!("socket path has no parent directory `{socket}`"))?;
+
+        let log_dir = cli.log_dir.clone();
 
         Ok(Self {
             devshell,
             devshell_name: OnceLock::new(),
             socket,
             socket_dir,
-            log_dir: env("NCAP_LOG_DIR")?,
+            log_dir,
             container: env("NCAP_CONTAINER")?,
             image: env("NCAP_IMAGE")?,
             runtime: Runtime::new(env("NCAP_RUNTIME")?),
@@ -125,6 +139,14 @@ impl Config {
 
     fn cache_file(&self) -> PathBuf {
         path::env_file(Path::new(&self.project_root), self.devshell_name())
+    }
+
+    /// True when the direnv signal says watched inputs are unchanged *and*
+    /// the cached activation script exists. NCAP_CACHE is a transient signal
+    /// from ncap-direnv; it is not a user-configurable path or toggle.
+    fn cache_is_usable(&self) -> bool {
+        std::env::var("NCAP_CACHE").ok().is_some_and(|s| s == "1")
+            && self.cache_file().exists()
     }
 
     fn nix_profile(&self) -> PathBuf {
@@ -251,14 +273,19 @@ fn init(cfg: &Config) -> Result<()> {
         cfg.devshell_name(),
     ))?;
 
-    let valid = std::env::var("NCAP_CACHE").ok();
-    if valid.is_none_or(|s| s != "1") || !cfg.cache_file().exists() {
-        eprintln!("caching dev environment");
+    if !cfg.cache_is_usable() {
+        eprintln!(
+            "evaluating devshell `{}` with nix print-dev-env...",
+            cfg.devshell
+        );
         let profile = cfg.nix_profile();
         let stdout = cfg
             .nix
-            .print_dev_env(&profile.to_string_lossy(), &cfg.devshell)?;
+            .print_dev_env(&profile.to_string_lossy(), &cfg.devshell)
+            .wrap_err_with(|| format!("failed to evaluate devshell `{}`", cfg.devshell))
+            .suggestion("check that the flake attribute exists and Nix can evaluate it")?;
         std::fs::write(cfg.cache_file(), &stdout)?;
+        eprintln!("devshell cached");
 
         cfg.nix.wipe_history(&profile.to_string_lossy())?;
 
@@ -366,6 +393,8 @@ fn clean(cfg: &Config) -> Result<()> {
 }
 
 fn status(cfg: &Config) -> Result<()> {
+    let cache_exists = cfg.cache_file().exists();
+
     if cfg.runtime.is_running(&cfg.container) {
         let id = cfg.runtime.container_id(&cfg.container)?;
         println!("container is running");
@@ -375,16 +404,25 @@ fn status(cfg: &Config) -> Result<()> {
         println!("  socket:  {}", cfg.socket);
     } else {
         println!("container is not running");
-        if cfg.cache_file().exists() {
+        if cache_exists {
             println!("  (cached environment exists — run `ncap-ctl start`)");
         } else {
             println!("  (no cached environment — run `ncap-ctl init`)");
         }
     }
+
+    if cfg.cache_is_usable() {
+        println!("  cache:   valid (direnv inputs unchanged)");
+    } else if cache_exists {
+        println!("  cache:   stale (will re-evaluate on init)");
+    } else {
+        println!("  cache:   none");
+    }
+
     Ok(())
 }
 
-fn log(cfg: &Config) -> Result<()> {
+fn log(cfg: &Config, no_pager: bool) -> Result<()> {
     let log_dir = Path::new(&cfg.log_dir);
     if !log_dir.exists() {
         return Err(eyre!(
@@ -409,30 +447,32 @@ fn log(cfg: &Config) -> Result<()> {
 
     let path = latest.path();
 
-    let pager = std::env::var("PAGER")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .or_else(|| {
-            std::process::Command::new("less")
-                .arg("--version")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|_| "less -R".to_string())
-        });
+    if !no_pager {
+        let pager = std::env::var("PAGER")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                std::process::Command::new("less")
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|_| "less -R".to_string())
+            });
 
-    if let Some(ref pager) = pager {
-        let parts: Vec<&str> = pager.split_whitespace().collect();
-        let (cmd, args) = parts.split_first().unwrap();
-        std::process::Command::new(cmd)
-            .args(args)
-            .arg(&path)
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .wrap_err_with(|| format!("failed to run pager `{pager}`"))?;
-        return Ok(());
+        if let Some(ref pager) = pager {
+            let parts: Vec<&str> = pager.split_whitespace().collect();
+            let (cmd, args) = parts.split_first().unwrap();
+            std::process::Command::new(cmd)
+                .args(args)
+                .arg(&path)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .wrap_err_with(|| format!("failed to run pager `{pager}`"))?;
+            return Ok(());
+        }
     }
 
     let content = std::fs::read_to_string(&path)

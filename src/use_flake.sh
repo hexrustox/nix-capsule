@@ -1,3 +1,6 @@
+# NCAP_CACHE is a transient signal set by ncap-direnv: 1 means the direnv
+# watched inputs are unchanged, so the existing cache can be sourced as-is.
+# It is not a user-configurable path or toggle.
 export NCAP_CACHE=__NCAP_CACHE__
 
 use_flake() {

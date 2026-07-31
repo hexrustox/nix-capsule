@@ -1,7 +1,8 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use color_eyre::{
     Result, Section,
     eyre::{Context, Report, eyre},
@@ -17,7 +18,7 @@ use nix_capsule::protocol::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Execute commands inside a capsule container")]
+#[command(version, about = "Execute commands inside a capsule")]
 struct Cli {
     /// Unix socket path
     #[arg(short, long, env = "NCAP_SOCKET")]
@@ -32,8 +33,21 @@ struct Cli {
     cwd: Option<String>,
 
     /// Command and its arguments
-    #[arg(trailing_var_arg = true, required = true)]
+    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
+
+    /// Generate shell completions
+    #[command(subcommand)]
+    completions: Option<CompletionCmd>,
+}
+
+#[derive(Subcommand)]
+enum CompletionCmd {
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
 }
 
 #[tokio::main]
@@ -45,6 +59,17 @@ async fn main() -> Result<ExitCode> {
 
 async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+
+    if let Some(CompletionCmd::Completions { shell }) = cli.completions {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if cli.command.is_empty() {
+        return Err(eyre!("no command specified")).suggestion("run `ncap --help` for usage");
+    }
 
     let cwd = match cli.cwd {
         Some(c) => c,
