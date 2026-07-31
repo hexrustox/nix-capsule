@@ -146,7 +146,6 @@ impl Config {
     /// from ncap-direnv; it is not a user-configurable path or toggle.
     fn cache_is_usable(&self) -> bool {
         std::env::var("NCAP_CACHE").ok().is_some_and(|s| s == "1")
-            && self.cache_file().exists()
     }
 
     fn nix_profile(&self) -> PathBuf {
@@ -268,12 +267,16 @@ fn expand_env(s: &str) -> String {
 }
 
 fn init(cfg: &Config) -> Result<()> {
+    cfg.runtime.check().suggestion(
+        "install Podman or Docker, or set NCAP_RUNTIME to the full path of the binary",
+    )?;
+
     std::fs::create_dir_all(path::devshell_dir(
         Path::new(&cfg.project_root),
         cfg.devshell_name(),
     ))?;
 
-    if !cfg.cache_is_usable() {
+    if !cfg.cache_is_usable() || !cfg.cache_file().exists() {
         eprintln!(
             "evaluating devshell `{}` with nix print-dev-env...",
             cfg.devshell
@@ -393,8 +396,6 @@ fn clean(cfg: &Config) -> Result<()> {
 }
 
 fn status(cfg: &Config) -> Result<()> {
-    let cache_exists = cfg.cache_file().exists();
-
     if cfg.runtime.is_running(&cfg.container) {
         let id = cfg.runtime.container_id(&cfg.container)?;
         println!("container is running");
@@ -404,17 +405,12 @@ fn status(cfg: &Config) -> Result<()> {
         println!("  socket:  {}", cfg.socket);
     } else {
         println!("container is not running");
-        if cache_exists {
-            println!("  (cached environment exists — run `ncap-ctl start`)");
-        } else {
-            println!("  (no cached environment — run `ncap-ctl init`)");
-        }
     }
 
     if cfg.cache_is_usable() {
-        println!("  cache:   valid (direnv inputs unchanged)");
-    } else if cache_exists {
-        println!("  cache:   stale (will re-evaluate on init)");
+        println!("  cache:   valid");
+    } else if cfg.cache_file().exists() {
+        println!("  cache:   stale");
     } else {
         println!("  cache:   none");
     }
@@ -536,6 +532,40 @@ impl Runtime {
             .wrap_err("failed to enter container")
             .suggestion("check that the container is running (`ncap-ctl start`)")?;
         Ok(status)
+    }
+
+    /// Verify the runtime executable exists and is executable.
+    pub fn check(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |mode: u32| mode & 0o111 != 0;
+        let bin = if self.bin.contains('/') {
+            PathBuf::from(&self.bin)
+        } else {
+            std::env::var_os("PATH")
+                .and_then(|path_var| {
+                    std::env::split_paths(&path_var)
+                        .map(|p| p.join(&self.bin))
+                        .find(|candidate| {
+                            candidate
+                                .metadata()
+                                .is_ok_and(|m| mode(m.permissions().mode()))
+                        })
+                })
+                .unwrap_or_else(|| PathBuf::from(&self.bin))
+        };
+
+        let meta = bin
+            .metadata()
+            .wrap_err_with(|| format!("runtime not found: `{}`", bin.display()))?;
+
+        if !meta.is_file() {
+            return Err(eyre!("runtime is not a file: `{}`", bin.display()));
+        }
+        if !mode(meta.permissions().mode()) {
+            return Err(eyre!("runtime is not executable: `{}`", bin.display()));
+        }
+
+        Ok(())
     }
 
     /// `inspect -f {{.State.Running}}`. Returns false on any spawn/parse
