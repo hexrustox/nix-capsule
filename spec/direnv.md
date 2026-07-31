@@ -17,18 +17,21 @@ No arguments. Reads `DIRENV_WATCHES` from the environment.
 3. Load stored mtimes from `.ncap-cache/direnv-mtimes.json`.
 4. Cache is valid when:
    - Stored state is non-empty.
-   - Every stored path has an identical mtime in the current state.
+   - Every current watched path has an identical mtime in the stored state.
+
+   In other words, the cache is invalid if a previously unwatched Nix input now appears with a different mtime. Extra stored entries for files that are no longer watched are ignored.
 5. Save current mtimes to `.ncap-cache/direnv-mtimes.json`.
 6. Print a shell script to stdout.
 
 ## Output
 
-The script is generated from [`src/use_flake.sh`](../src/use_flake.sh) with two template substitutions:
+The script is generated from [`src/use_flake.sh`](../src/use_flake.sh) with three template substitutions:
 
 | Placeholder | Replacement |
 |---|---|
 | `__NCAP_CACHE__` | `1` if cache valid, `0` otherwise |
 | `__CACHE_DIR__` | `.ncap-cache` directory path |
+| `__ENV_FILE__` | Name of the cached devshell activation script (`env`) |
 
 ```sh
 export NCAP_CACHE=1
