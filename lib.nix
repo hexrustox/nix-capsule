@@ -82,7 +82,7 @@ in
     type = "app";
     program = "${pkgs.ncap}/bin/ncap-direnv";
     meta = {
-      description = "Manage the nix-capsule container lifecycle";
+      description = "direnv integration for nix-capsule cache validation";
     };
   };
 }

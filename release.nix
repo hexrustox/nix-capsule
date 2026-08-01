@@ -9,8 +9,11 @@
 }:
 let
   version = (fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+  cachedSystems = [
+    "x86_64-linux"
+  ];
 in
-if useCache then
+if useCache && (builtins.elem system cachedSystems) then
   stdenv.mkDerivation {
     pname = "ncap";
     inherit version;
