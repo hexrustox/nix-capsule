@@ -22,7 +22,7 @@ use nix_capsule::protocol::{
 struct Cli {
     /// Unix socket path
     #[arg(short, long, env = "NCAP_SOCKET")]
-    socket: String,
+    socket: Option<String>,
 
     /// Environment overrides (KEY=VALUE or KEY to pass through from host)
     #[arg(short, long, value_name = "KEY[=VALUE]")]
@@ -104,9 +104,10 @@ async fn run() -> Result<ExitCode> {
         version: Some(CURRENT_VERSION.to_string()),
     };
 
-    let stream = UnixStream::connect(&cli.socket)
+    let socket = cli.socket.unwrap_or_default();
+    let stream = UnixStream::connect(&socket)
         .await
-        .wrap_err(format!("failed to connect to socket: `{}`", cli.socket))
+        .wrap_err(format!("failed to connect to socket: `{}`", socket))
         .suggestion("make sure `ncap-server` is running")?;
 
     let (read_half, write_half) = stream.into_split();

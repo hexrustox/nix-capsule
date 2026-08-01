@@ -19,11 +19,11 @@ use nix_capsule::path;
 struct Cli {
     /// Unix socket path
     #[arg(short, long, env = "NCAP_SOCKET")]
-    socket: String,
+    socket: Option<String>,
 
     /// Server log directory
     #[arg(short, long, env = "NCAP_LOG_DIR")]
-    log_dir: String,
+    log_dir: Option<String>,
 
     #[command(subcommand)]
     command: Cmd,
@@ -106,13 +106,13 @@ fn main() -> Result<()> {
 impl Config {
     fn from_cli(cli: &Cli) -> Result<Self> {
         let devshell = env("NCAP_DEVSHELL")?;
-        let socket = cli.socket.clone();
+        let socket = cli.socket.clone().unwrap_or_default();
         let socket_dir = Path::new(&socket)
             .parent()
             .map(|p| p.to_owned())
             .ok_or_else(|| eyre!("socket path has no parent directory `{socket}`"))?;
 
-        let log_dir = cli.log_dir.clone();
+        let log_dir = cli.log_dir.clone().unwrap_or_default();
 
         Ok(Self {
             devshell,
