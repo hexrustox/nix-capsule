@@ -69,8 +69,6 @@
                 "CARGO_HOME"
                 "-v"
                 "$CARGO_HOME:$CARGO_HOME"
-                "-v"
-                "$HOME/.cache/pnpm:/root/.cache/pnpm"
               ];
               wrappers = [
                 "cargo"
@@ -109,8 +107,7 @@
                   rust
                   taplo
 
-                  nodejs-slim
-                  pnpm
+                  skills
                   git
                 ];
               };
