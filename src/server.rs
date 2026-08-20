@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use anyhow::{Result, anyhow};
+use color_eyre::eyre::{Result, eyre};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -71,6 +71,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let log_dir = get_log_dir(&cli.socket, cli.log_dir.as_deref());
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        tracing::error!("failed to create log directory `{}`: {}", log_dir.display(), e);
+    }
     let _guard = init_logging(&log_dir);
 
     let _ = std::fs::remove_file(&cli.socket);
@@ -151,8 +154,8 @@ async fn handle_connection(
         frame = framed_read.next() => {
             frame
                 .transpose()
-                .map_err(|e| anyhow!("failed to read first frame: {}", e))?
-                .ok_or_else(|| anyhow!("connection closed before request"))?
+                .map_err(|e| eyre!("failed to read first frame: {}", e))?
+                .ok_or_else(|| eyre!("connection closed before request"))?
         }
         _ = shutdown_rx.recv() => {
             let _ = send_server_stopping(&mut framed_write, None).await;
@@ -172,8 +175,13 @@ async fn handle_connection(
 
     let request: Request = match Message::from_frame(first_frame) {
         Ok(Message::Request(r)) => r,
-        Err(e) => return Err(anyhow!("failed to parse request: {}", e)),
-        _ => unreachable!("frame_type checked above"),
+        Ok(other) => {
+            return Err(eyre!(
+                "expected Request frame, got {:?}",
+                other.frame_type()
+            ))
+        }
+        Err(e) => return Err(eyre!("failed to parse request: {}", e)),
     };
 
     tracing::debug!("received request: `{}`", request.command_line());
@@ -184,20 +192,24 @@ async fn handle_connection(
                 version: CURRENT_VERSION.to_string(),
             })
             .into_frame()
-            .map_err(|e| anyhow!("failed to serialize version frame: {e}"))?,
+            .map_err(|e| eyre!("failed to serialize version frame: {e}"))?,
         )
         .await
-        .map_err(|e| anyhow!("failed to send version frame: {e}"))?;
+        .map_err(|e| eyre!("failed to send version frame: {e}"))?;
 
     let client_version_msg = request
         .version
         .as_ref()
         .map(|v| VersionMsg { version: v.clone() });
-    report_version_check(VersionCheck::from(
+    if let Some(msg) = VersionCheck::from(
         client_version_msg.as_ref(),
         CURRENT_VERSION,
         Role::Server,
-    ));
+    )
+    .warning_message()
+    {
+        tracing::warn!("{msg}");
+    }
 
     let mut cmd = Command::new(&request.command);
     cmd.args(&request.args);
@@ -278,7 +290,7 @@ async fn handle_connection(
 
             let mut framed_write = writer_task
                 .await
-                .map_err(|e| anyhow!("writer task panicked: {e}"))?;
+                .map_err(|e| eyre!("writer task panicked: {e}"))?;
 
             match result {
                 Ok(status) => {
@@ -286,10 +298,10 @@ async fn handle_connection(
                     tracing::info!("command finished with exit_code {}", exit_code);
 
                     let exit = Exit { exit_code };
-                    if let Err(e) = framed_write
-                        .send(Message::Exit(exit).into_frame().expect("Exit encode"))
-                        .await
-                    {
+                    let frame = Message::Exit(exit)
+                        .into_frame()
+                        .map_err(|e| eyre!("failed to encode Exit: {e}"))?;
+                    if let Err(e) = framed_write.send(frame).await {
                         tracing::error!("failed to send Exit: {e}");
                     }
                 }
@@ -312,7 +324,7 @@ async fn handle_connection(
             let _ = stderr_task.await;
             let mut framed_write = writer_task
                 .await
-                .map_err(|e| anyhow!("writer task panicked: {e}"))?;
+                .map_err(|e| eyre!("writer task panicked: {e}"))?;
             let _ = send_server_stopping(&mut framed_write, None).await;
         }
     }
@@ -358,10 +370,10 @@ where
     };
     let frame = Message::Error(msg)
         .into_frame()
-        .map_err(|e| anyhow!("failed to encode ErrorMessage: {e}"))?;
+        .map_err(|e| eyre!("failed to encode ErrorMessage: {e}"))?;
     sink.send(frame)
         .await
-        .map_err(|e| anyhow!("failed to send ErrorMessage: {e}"))?;
+        .map_err(|e| eyre!("failed to send ErrorMessage: {e}"))?;
     Ok(())
 }
 
@@ -375,24 +387,9 @@ where
     };
     let frame = Message::ServerStopping(msg)
         .into_frame()
-        .map_err(|e| anyhow!("failed to encode ServerStopping: {e}"))?;
+        .map_err(|e| eyre!("failed to encode ServerStopping: {e}"))?;
     sink.send(frame)
         .await
-        .map_err(|e| anyhow!("failed to send ServerStopping: {e}"))?;
+        .map_err(|e| eyre!("failed to send ServerStopping: {e}"))?;
     Ok(())
-}
-
-fn report_version_check(check: VersionCheck) {
-    match check {
-        VersionCheck::Match => {}
-        VersionCheck::Mismatch { client, server } => {
-            tracing::warn!("client/server version mismatch: client={client}, server={server}");
-        }
-        VersionCheck::ClientMissing { server } => {
-            tracing::warn!("client did not send version (server={server})");
-        }
-        VersionCheck::ServerMissing { client } => {
-            tracing::warn!("server did not send version (client={client})");
-        }
-    }
 }

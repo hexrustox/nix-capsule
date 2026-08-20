@@ -1,12 +1,15 @@
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use tokio_util::codec::{Decoder, Encoder};
 
+/// Current protocol version, embedded from `CARGO_PKG_VERSION` at build time.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Exit code the client surfaces when the server shuts down its connection
+/// (shell-visible code for SIGTERM: `128 + 15`).
 pub const SIGTERM_EXIT: u8 = 143;
 
+/// Wire frame type tag. Each byte value is part of the on-disk protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
     Request = 0x01,
@@ -41,21 +44,30 @@ impl FrameType {
 
 #[derive(Debug)]
 pub struct Frame {
+    /// Frame type tag.
     pub frame_type: FrameType,
+    /// Raw payload bytes (JSON for struct variants, raw bytes for stdio frames).
     pub payload: Vec<u8>,
 }
 
+/// Client → server: the command to run inside the container.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
+    /// Executable to run.
     pub command: String,
+    /// Arguments passed to the executable.
     pub args: Vec<String>,
+    /// Working directory for the command.
     pub cwd: String,
+    /// `KEY=VALUE` environment overrides in insertion order.
     pub env: Vec<String>,
+    /// Optional protocol version, sent for version negotiation.
     #[serde(default)]
     pub version: Option<String>,
 }
 
 impl Request {
+    /// One-line human-readable rendering of the command and its arguments.
     pub fn command_line(&self) -> String {
         std::iter::once(self.command.as_str())
             .chain(self.args.iter().map(|s| s.as_str()))
@@ -64,33 +76,48 @@ impl Request {
     }
 }
 
+/// Server → client: the executed command's final exit status.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Exit {
+    /// Process exit code.
     pub exit_code: i32,
 }
 
+/// Server → client: the command could not be run, or failed in a way that has
+/// no exit code.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorMessage {
+    /// The error message.
     pub error: String,
+    /// Optional underlying cause.
     pub cause: Option<String>,
 }
 
+/// Server → client: the server is shutting down and is terminating the child.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerStopping {
+    /// Optional reason for the shutdown.
     pub reason: Option<String>,
 }
 
+/// Either side → the other: the sender's protocol version.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionMsg {
+    /// Protocol version string.
     pub version: String,
 }
 
+/// Which side of the connection is comparing versions, used to label
+/// warnings from the correct perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    /// The `ncap` client.
     Client,
+    /// The `ncap-server` daemon.
     Server,
 }
 
+/// Result of comparing our protocol version against the peer's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionCheck {
     Match,
@@ -100,6 +127,8 @@ pub enum VersionCheck {
 }
 
 impl VersionCheck {
+    /// Compare an observed peer version against ours from the given side's
+    /// perspective.
     pub fn from(observed: Option<&VersionMsg>, our_version: &str, role: Role) -> Self {
         match (observed, role) {
             (Some(msg), Role::Client) => {
@@ -130,8 +159,27 @@ impl VersionCheck {
             },
         }
     }
+
+    /// Render a human-readable warning for a non-matching check, or `None`
+    /// when both sides agree.
+    pub fn warning_message(&self) -> Option<String> {
+        match self {
+            Self::Match => None,
+            Self::Mismatch { client, server } => Some(format!(
+                "client/server version mismatch (client={client}, server={server})"
+            )),
+            Self::ServerMissing { client } => {
+                Some(format!("server did not send version (client={client})"))
+            }
+            Self::ClientMissing { server } => {
+                Some(format!("client did not send version (server={server})"))
+            }
+        }
+    }
 }
 
+/// Convert an [`std::process::ExitStatus`] to the code the shell would observe:
+/// the exit code if set, otherwise `128 + signal` when killed by a signal.
 pub fn exit_code_from(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     match (status.code(), status.signal()) {
@@ -141,15 +189,24 @@ pub fn exit_code_from(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
+/// A typed message carried by a [`Frame`].
 #[derive(Debug)]
 pub enum Message {
+    /// Client → server: the request to run a command.
     Request(Request),
+    /// Client → server: raw stdin bytes for the child.
     Stdin(Vec<u8>),
+    /// Server → client: raw stdout bytes from the child.
     Stdout(Vec<u8>),
+    /// Server → client: raw stderr bytes from the child.
     Stderr(Vec<u8>),
+    /// Server → client: the child exited with a final code.
     Exit(Exit),
+    /// Server → client: the command failed without an exit code.
     Error(ErrorMessage),
+    /// Server → client: the server is shutting down.
     ServerStopping(ServerStopping),
+    /// Either side → the other: version handshake.
     Version(VersionMsg),
 }
 
@@ -201,36 +258,19 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
+/// Error decoding a frame payload.
+#[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
+    /// The frame type byte is not a recognized variant.
+    #[error("unknown frame type: `{0:#x}`")]
     UnknownFrameType(u8),
-    Json(serde_json::Error),
+    /// A JSON-encoded variant failed to parse/encode.
+    #[error("frame payload parse error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownFrameType(b) => write!(f, "unknown frame type: `{b:#x}`"),
-            Self::Json(e) => write!(f, "frame payload parse error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Json(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<serde_json::Error> for DecodeError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::Json(e)
-    }
-}
-
+/// Five-byte framed encoding: one tag byte, a big-endian length, then the
+/// payload. Shared by the codecs on both ends of the socket.
 pub struct FrameCodec;
 
 impl Decoder for FrameCodec {
@@ -266,6 +306,7 @@ impl Decoder for FrameCodec {
     }
 }
 
+/// Encoder half of [`FrameCodec`]: write tag, length, then payload bytes.
 impl Encoder<Frame> for FrameCodec {
     type Error = std::io::Error;
 

@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         Cmd::Clean => clean(&cfg),
         Cmd::Status => status(&cfg),
         Cmd::Log { no_pager } => log(&cfg, no_pager),
-        _ => unreachable!(),
+        Cmd::Completions { .. } => Err(eyre!("unexpected completions command after early return")),
     }
 }
 
@@ -154,7 +154,6 @@ impl Config {
 
     fn run_args(&self) -> Vec<String> {
         let pr = &self.project_root;
-        let opts: Vec<String> = self.run_opts.iter().map(|opt| expand_env(opt)).collect();
         let cache_root = path::cache_root(Path::new(pr));
         let mut defaults = vec![
             "--replace".into(),
@@ -175,11 +174,11 @@ impl Config {
             "-v".into(),
             format!("{}:{}:ro", cache_root.display(), cache_root.display()),
         ];
-        if Path::new(&format!("{pr}/.git")).is_dir() {
+        if Path::new(pr).join(".git").is_dir() {
             defaults.push("-v".into());
             defaults.push(format!("{pr}/.git:{pr}/.git:ro"));
         }
-        defaults.extend(opts);
+        defaults.extend(self.run_opts.iter().map(|opt| expand_env(opt)));
         defaults
     }
 }
@@ -373,7 +372,7 @@ fn enter(cfg: &Config) -> Result<()> {
         .runtime
         .exec_interactive(&cfg.container, &cfg.bash_bin, &shell_cmd)?;
 
-    std::process::exit(status.code().unwrap_or(1));
+    std::process::exit(nix_capsule::protocol::exit_code_from(&status));
 }
 
 fn show_options(cfg: &Config) -> Result<()> {
@@ -457,10 +456,12 @@ fn log(cfg: &Config, no_pager: bool) -> Result<()> {
             });
 
         if let Some(ref pager) = pager {
-            let parts: Vec<&str> = pager.split_whitespace().collect();
-            let (cmd, args) = parts.split_first().unwrap();
+            let mut parts = pager.split_whitespace();
+            let cmd = parts
+                .next()
+                .ok_or_else(|| eyre!("pager command is empty: `{pager}`"))?;
             std::process::Command::new(cmd)
-                .args(args)
+                .args(parts)
                 .arg(&path)
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())

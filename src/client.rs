@@ -82,12 +82,12 @@ async fn run() -> Result<ExitCode> {
     let (command, args) = cli
         .command
         .split_first()
-        .expect("clap ensures at least one argument");
+        .ok_or_else(|| eyre!("no command specified"))?;
 
     let resolved_env: Vec<String> = cli
         .env
         .iter()
-        .filter_map(|e| match e.find('=') {
+        .filter_map(|e| match e.split_once('=') {
             Some(_) => Some(e.clone()),
             None => match std::env::var(e) {
                 Ok(val) => Some(format!("{e}={val}")),
@@ -107,7 +107,7 @@ async fn run() -> Result<ExitCode> {
     let socket = cli.socket.unwrap_or_default();
     let stream = UnixStream::connect(&socket)
         .await
-        .wrap_err(format!("failed to connect to socket: `{}`", socket))
+        .wrap_err_with(|| format!("failed to connect to socket: `{}`", socket))
         .suggestion("make sure `ncap-server` is running")?;
 
     let (read_half, write_half) = stream.into_split();
@@ -147,7 +147,9 @@ async fn run() -> Result<ExitCode> {
     tokio::spawn(async move {
         let mut framed_write = framed_write;
         while let Some(data) = stdin_rx.recv().await {
-            let frame = Message::Stdin(data).into_frame().expect("Stdin encode");
+            let Ok(frame) = Message::Stdin(data).into_frame() else {
+                break;
+            };
             if framed_write.send(frame).await.is_err() {
                 break;
             }
@@ -181,11 +183,15 @@ async fn run() -> Result<ExitCode> {
                         }
                         Message::Version(v) => {
                             version_received = true;
-                            report_version_check(VersionCheck::from(
+                            if let Some(msg) = VersionCheck::from(
                                 Some(&v),
                                 CURRENT_VERSION,
                                 Role::Client,
-                            ));
+                            )
+                            .warning_message()
+                            {
+                                eprintln!("warning: {msg}");
+                            }
                         }
                         Message::Exit(exit) => {
                             exit_code = exit.exit_code as u8;
@@ -225,7 +231,11 @@ async fn run() -> Result<ExitCode> {
             }
         }
         if !version_received {
-            report_version_check(VersionCheck::from(None, CURRENT_VERSION, Role::Client));
+            if let Some(msg) =
+                VersionCheck::from(None, CURRENT_VERSION, Role::Client).warning_message()
+            {
+                eprintln!("warning: {msg}");
+            }
         }
         Ok((exit_code, None))
     });
@@ -237,19 +247,4 @@ async fn run() -> Result<ExitCode> {
     }
 
     Ok(ExitCode::from(exit_code))
-}
-
-fn report_version_check(check: VersionCheck) {
-    match check {
-        VersionCheck::Match => {}
-        VersionCheck::Mismatch { client, server } => {
-            eprintln!("warning: client/server version mismatch (client={client}, server={server})");
-        }
-        VersionCheck::ServerMissing { client } => {
-            eprintln!("warning: server did not send version (client={client})");
-        }
-        VersionCheck::ClientMissing { server } => {
-            eprintln!("warning: client did not send version (server={server})");
-        }
-    }
 }

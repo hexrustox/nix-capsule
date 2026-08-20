@@ -478,7 +478,6 @@ dependencies = [
 name = "nix-capsule"
 version = "0.8.0"
 dependencies = [
- "anyhow",
  "bytes",
  "clap",
  "clap_complete",
@@ -488,6 +487,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-case",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
