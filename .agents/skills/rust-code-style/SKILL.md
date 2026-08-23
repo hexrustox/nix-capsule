@@ -1,6 +1,6 @@
 ---
 name: rust-code-style
-description: "Apply Rust code style — cosmetic rules that change how the code reads, never what it computes — covering comments and doc comments, naming (types, methods, bindings, and test names — plain `#[test]` fns and `test-case`/`rstest` cases), imports and full paths, visibility and `pub` scope, type annotations, and struct-literal shorthand. Use when writing, editing, or reviewing Rust code: commenting or documenting, naming or renaming (including renaming tests), choosing `use` vs a qualified path, tidying imports, choosing visibility (`pub`, `pub(crate)`, `pub(super)`), annotating types, or simplifying struct literals."
+description: "Apply Rust code style — cosmetic rules that change how code reads, never what it computes. Use when writing, editing, or reviewing Rust code: commenting, naming or renaming, choosing `use` vs a qualified path, tidying imports, choosing visibility, annotating types, simplifying struct literals, or ordering items from high-level to concrete."
 ---
 
 # Rust code style
@@ -36,6 +36,10 @@ When two crates offer the same name, alias on import (`use legacy::Result as Leg
 ## Publicity
 
 Keep every item as private as it can be — visibility is a promise to other modules that the item stays, so grant only the reach the item actually earns. Private (the default) covers one module and its children. `pub(super)` covers the parent and its other children. `pub(crate)` covers the whole crate. `pub` covers other crates — the crate's public interface, nothing else. Measure each existing `pub` against what truly reaches it: a `pub` no outside crate consumes is `pub(crate)`; a `pub(crate)` only one module needs is private.
+
+## Ordering
+
+Rust lets items sit in any order — the compiler resolves them all regardless of position — but the reader gets only the order on disk, so make that order a descent: most abstract at the top, most concrete at the bottom. A module file opens with its `mod` declarations, then its `use`s, then its items ranked by level: the entry point or public interface first, the mid-level code driving it next, the small private helpers last, each defined below its first caller. A type precedes its `impl` blocks, inherent before trait; constants serving one type live inside those blocks rather than floating at file scope. Read top-down, the file answers *what* before *how*: stop at any line and the shape above still explains the detail below. Tests close the file — `#[cfg(test)] mod tests` pins what everything above established. The descent orders items, not statements: rearranging statements inside a body changes evaluation order, which leaves cosmetics behind.
 
 ## Type annotations
 

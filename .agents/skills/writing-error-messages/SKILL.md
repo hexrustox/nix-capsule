@@ -1,6 +1,6 @@
 ---
 name: writing-error-messages
-description: "Write one-voice error messages — the message states what is wrong, one sentence, tokens backticked, advice carried as its own piece outside the message text. Use when writing, editing, reviewing, or context-wrapping (chaining) error text in any language: messages, exception strings, diagnostics, CLI errors. Examples in Rust with color-eyre; the rules are language-agnostic."
+description: "Write one-voice error messages — the message states what is wrong, one sentence, tokens backticked, advice carried as its own piece outside the message text. Use when writing, editing, reviewing, or context-wrapping (chaining) error text in any language: messages, exception strings, diagnostics, CLI errors."
 ---
 
 # Error messages
@@ -29,14 +29,13 @@ specs. Run them over every message you write or touch.
 
 3. **One sentence states the subject and the facts.**
    Name the subject the error is about and the facts needed to act, in one
-   sentence. To add context, chain it — in Rust, wrap the error with a context
-   message (`color-eyre` `.wrap_err`) — never a colon-joined clause.
+   sentence. To add context, chain it as a context message hanging off the
+   failing operation — never a colon-joined clause:
 
-   ```rust
-   use color_eyre::eyre::{Result, WrapErr};
-
-   fs::write(path, content)
-       .wrap_err(format!("cannot write `{}`", path.display()))?;
+   ```text
+   you write:      context   "cannot write `out.yaml`"
+   library adds:   "destination directory does not exist"   (the underlying cause)
+   rendered:       cannot write `out.yaml`: destination directory does not exist
    ```
 
    - bad: `cannot write `out.yaml`: destination directory does not exist`
@@ -60,9 +59,10 @@ specs. Run them over every message you write or touch.
    stays clear of both.
 
 6. **Rendering.**
-   Errors go to stderr; the fancy report renders once at the top-level error
-   handler (a `main` returning `Result`), and color/unicode decorations turn
-   off when stderr is not a terminal.
+   Errors go to stderr; one top-level handler at the program's entry point
+   renders the report once (errors return up the stack; nothing prints
+   mid-task), and color/unicode decorations turn off when stderr is not a
+   terminal.
 
 7. **Internal errors.**
    The message still states only what is wrong. If the error may be an
@@ -77,12 +77,5 @@ specs. Run them over every message you write or touch.
 | --- | --- |
 | `` cannot open `conf.yaml` `` | `The configuration file could not be opened.` |
 | `` missing `name` field `` | `The name field was not provided.` |
-| `` destination directory does not exist `` + `wrap_err("cannot write `out.yaml`")` | `cannot write `out.yaml`: destination directory does not exist` |
+| `` destination directory does not exist `` + chained context `` cannot write `out.yaml` `` | `cannot write `out.yaml`: destination directory does not exist` |
 | message: `list index 3 out of range` (data unquoted) | `error: you must use a valid index` (prescribes, states no facts) |
-
-## Rust implementation
-
-In Rust, carry each piece on the structure that renders it: the message is the
-`#[error]` fragment, chained context is `.wrap_err()`, the positioned note is
-`#[label]`, and advice is `help` — see `rust-miette-crate` for the `miette`
-mechanics.

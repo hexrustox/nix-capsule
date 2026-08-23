@@ -100,8 +100,26 @@
     "rust-code-style": {
       "source": "hexrustox/skills",
       "sourceType": "github",
-      "skillPath": "skills/rust-code-style/SKILL.md",
-      "computedHash": "fc27ef4528d6abff075066e33717a65f5d071904a88427d78593417a29e15a9e"
+      "skillPath": "skills/rust/rust-code-style/SKILL.md",
+      "computedHash": "db55638b6615b60184c65a872196ff57607ac2b79c61a5217c8ae1c32d1461a6"
+    },
+    "rust-dependencies": {
+      "source": "hexrustox/skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust/rust-dependencies/SKILL.md",
+      "computedHash": "fb87659c12afbd5e8a4fdb9d691f7fc9bda28d30c92e3c6c0122215670ead898"
+    },
+    "rust-proptest-crate": {
+      "source": "hexrustox/skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust/rust-proptest-crate/SKILL.md",
+      "computedHash": "539c4a3b1f2cfe18780234707da743a82933991c0ee3dd067b41b2658cec1f0b"
+    },
+    "rust-test-case-crate": {
+      "source": "hexrustox/skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust/rust-test-case-crate/SKILL.md",
+      "computedHash": "3e0835fd3ae7120996a895f9a185b9d2d3d1d3e31b99b47fea158b48ef4fd33d"
     },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",
@@ -166,8 +184,8 @@
     "writing-error-messages": {
       "source": "hexrustox/skills",
       "sourceType": "github",
-      "skillPath": "skills/writing-error-messages/SKILL.md",
-      "computedHash": "fefed6b73c8da0988dbe7ef3dac42675562492e5d113235e15f563aaccdb913d"
+      "skillPath": "skills/general/writing-error-messages/SKILL.md",
+      "computedHash": "9beb587b4f47f8ca49a74707fd8d53c4b5b93158618f893debd34d3d0711eff9"
     },
     "writing-for-agents": {
       "source": "mattpocock/skills",
@@ -180,6 +198,12 @@
       "sourceType": "github",
       "skillPath": "skills/productivity/writing-great-skills/SKILL.md",
       "computedHash": "4deb21855fb4deeeb1b8217b041faff003fd0c915d24a22f636851c520bc9c5c"
+    },
+    "writing-test-cases": {
+      "source": "hexrustox/skills",
+      "sourceType": "github",
+      "skillPath": "skills/general/writing-test-cases/SKILL.md",
+      "computedHash": "b55b06ed48d164de202713988b46e1dc0a9987a4278070a5f2b2d7ff96eeda7a"
     }
   }
 }
