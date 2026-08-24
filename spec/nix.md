@@ -37,14 +37,14 @@ The capsule exposes two things to a consuming flake:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `project` | string | `basename $PROJECT_ROOT`, sanitized | Namespace for socket, container, cache, and logs. |
+| `project` | string | `basename <project root>`, sanitized | Namespace for socket, container, cache, and logs. |
 | `image` | string | `"alpine:latest"` | OCI image; provides only the kernel/userland sandbox. |
 | `devShell` | string | `"container"` | Flake URI of the container shell. Bare names get `.#` prefixed; full URIs pass through. |
 | `watchFiles` | list of paths | `[ "flake.nix" "flake.lock" ]` | Inputs hashed for staleness detection; also emitted as direnv `watch_file` calls. |
 | `envForward` | list of strings | `[ ]` | Env var names the client resolves from the host env, per request. |
 | `wrappers` | list | `[ ]` | Host PATH shims routing tool names through the client (schema below). |
 | `extraOptions` | list of strings | `[ ]` | Extra runtime args (mounts, env passes), appended after the default mounts; `$VAR`/`${VAR}` expanded at launch. |
-| `harden` | bool | `false` | Add `--cap-drop=all --security-opt=no-new-privileges`. |
+| `harden` | bool | `false` | Add `--cap-drop=all --security-opt=no-new-privileges` and bind-mounts every `watchFiles` entry read-only (if present). |
 | `timeout` | seconds | `10` | Grace period for draining connections when the container stops. |
 | `socketPath` | path | derived | Override the Unix socket path. |
 | `containerName` | string | derived | Override the container name. |
@@ -58,7 +58,7 @@ What `mkShell` produces:
 - all configuration exported as `NCAP_*` env vars (contract in `ctl.md`),
 - a shellHook that:
   1. runs `preShellHook`,
-  2. exports `PROJECT_ROOT` (git toplevel, falling back to `pwd`),
+  2. exports `NCAP_PROJECT_ROOT` (git toplevel, falling back to `pwd`),
   3. emits a guarded `watch_file <f>` for every `watchFiles` entry (no-op outside direnv),
   4. runs `ncap-ctl init` when `autoStart`,
   5. runs `postShellHook`.
@@ -76,9 +76,9 @@ All capsule state lives outside the project tree, keyed by `project`:
 
 If `XDG_RUNTIME_DIR` is unset, the socket falls back to `$TMPDIR/nix-capsule-<uid>/nix-capsule/<project>/` (dir `0700`).
 
-`project` defaults to the sanitized basename of `PROJECT_ROOT` (non-alphanumeric runs collapse to `-`). `socketPath` and `containerName` override their derived values; everything else derives from `project`.
+`project` defaults to the sanitized basename of the project root (non-alphanumeric runs collapse to `-`). `socketPath` and `containerName` override their derived values; everything else derives from `project`.
 
-**Collision guard:** the cache holds a stamp file recording the absolute `PROJECT_ROOT` that created it. If `ncap-ctl` finds the same project name owned by a different checkout, it errors with a hint to set `project` — two checkouts of one repo must never share a socket/container/cache.
+**Collision guard:** the cache holds a stamp file recording the absolute project-root path that created it. If `ncap-ctl` finds the same project name owned by a different checkout, it errors with a hint to set `project` — two checkouts of one repo must never share a socket/container/cache.
 
 Cache contents:
 
@@ -87,7 +87,7 @@ Cache contents:
 | `env` | the `nix print-dev-env` dump of the container shell |
 | `hash` | xxhash64 of `watchFiles`, hex |
 | `profile` | the nix profile `print-dev-env` writes; history pruned after each eval |
-| `project` | the stamp file (absolute `PROJECT_ROOT`) |
+| `project` | the stamp file (absolute project-root path) |
 
 ## Staleness
 
@@ -100,7 +100,7 @@ Consequences, all deliberate:
 
 - direnv's `watch_file` is mtime-based: touching a watched file with identical content still triggers a reload, but the hash matches, so the cost is one hash pass — no evaluation, no restart.
 - Any `flake.nix` edit — even host-shell-only options like `wrappers` or `envForward` — trips the hash and restarts the container. Correct, occasionally heavier than needed.
-- Files not in `watchFiles` (e.g. locally imported `.nix` files) don't participate in staleness — add them to `watchFiles`.
+- Files not in `watchFiles` (e.g. locally imported `.nix` files) don't participate in staleness — add them to `watchFiles` (under `harden`, this also grants them write protection inside the container).
 
 direnv integration needs nothing beyond a standard `.envrc`:
 

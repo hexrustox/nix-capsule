@@ -21,6 +21,8 @@ Split the devshell in two:
 
 No Nix evaluation, daemon, or image content is needed inside the container — the image only provides a kernel and userland sandbox.
 
+The **project root** is the workspace directory nix-capsule operates on: the git toplevel of the consumer's checkout, falling back to the current directory outside a git repo. It anchors everything else — the project name (sanitized basename), the workspace mount inside the container, and the workdir of executed commands. It is not itself an environment variable; `ncap-ctl` receives it via `NCAP_PROJECT_ROOT` (`ctl.md`).
+
 ```
 ┌─ host ────────────────────────────────────┐   ┌─ container (ncap-<project>) ──────────┐
 │ $ nix develop .#                          │   │                                       │
@@ -31,7 +33,7 @@ No Nix evaluation, daemon, or image content is needed inside the container — t
 │                                           │   │                                       │
 │ ~/.cache/nix-capsule/<p>/env ─────────────┼───┼─▶ mounted ro                          │
 │ /nix ─────────────────────────────────────┼───┼─▶ mounted ro                          │
-│ $PROJECT_ROOT ────────────────────────────┼───┼─▶ mounted rw, is the workdir          │
+│ project root ─────────────────────────────┼───┼─▶ mounted rw, is the workdir          │
 └───────────────────────────────────────────┘   └───────────────────────────────────────┘
 ```
 
@@ -69,6 +71,6 @@ Shell names used in examples (`default`, `container`) are placeholders — the c
 ## Trust model
 
 - The socket directory is per-user and mode `0700`, under `$XDG_RUNTIME_DIR` (tmpfs by default — it disappears at logout/reboot, so stale sockets don't accumulate). **Anyone who can connect to the socket can execute arbitrary code inside the container**; directory permissions are the only boundary. Accepted: the threat model is accidental host damage, not malicious local users.
-- The cache directory is mounted into the container **read-only**: the container must never be able to modify a file the host will later `source` (poisoning).
+- The cache directory is mounted into the container **read-only**: the container must never be able to modify a file the host will later `source` (poisoning). Under `harden`, the same invariant extends to every `watchFiles` entry — each is bind-mounted read-only over the read-write project root so a contained process cannot rewrite eval inputs whose change triggers `nix print-dev-env` on the host.
 - The project root is mounted read-write — writing the workspace is the tool's purpose.
-- OCI hardening (`--cap-drop=all`, `no-new-privileges`) is available but opt-in.
+- OCI hardening (`--cap-drop=all`, `no-new-privileges`) is available but opt-in (see above for the additional `watchFiles` mounts under `harden`).

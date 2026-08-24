@@ -44,13 +44,14 @@ Defaults first; `extraOptions` args are appended after, with `$VAR`/`${VAR}` exp
 | --- | --- | --- |
 | `/nix:/nix` | ro | Host store: bash, `ncap-server`, every devshell tool. |
 | socket dir → same path | rw | Shared Unix socket at the identical path. |
-| `$PROJECT_ROOT` → same path | rw | Workspace at the identical path. |
-| `-w $PROJECT_ROOT` | — | Container working directory. |
+| `<project root>` → same path | rw | Workspace at the identical path. |
+| `-w <project root>` | — | Container working directory. |
 | cache dir → same path | ro | Env dump the server sources — **read-only so the container can't poison files the host will later source**. |
 | log dir → same path | rw | Server writes its JSON logs there. |
-| `$PROJECT_ROOT/.git` → same path | ro, if it exists | Read-only git metadata for tools that read it. |
+| `<project root>/.git` → same path | ro, if it exists | Read-only git metadata for tools that read it. |
+| `<project root>/<watchFiles entries>` → same path | ro, if present and `harden = true` | Keeps eval inputs immutable from inside the container (see `harden` below). |
 
-`harden = true` prepends `--cap-drop=all --security-opt=no-new-privileges` (opt-in: capability drops occasionally break dev tooling).
+`harden = true` prepends `--cap-drop=all --security-opt=no-new-privileges` and bind-mounts every `watchFiles` entry read-only (when present) over the read-write project-root mount — a more-specific mount wins in podman/docker, so the files stay immutable even though the parent directory is writable. This prevents a contained process from rewriting files whose change triggers host-side re-evaluation (`nix print-dev-env` on the host, `shellHook` included) and re-sourcing inside the container. `flake.lock` edits and `nix flake update` must then happen on the host; accepted tradeoff, like `.git` being read-only. Capability drops occasionally break dev tooling, so hardening stays opt-in.
 
 ## Runtime adapter
 
@@ -75,8 +76,8 @@ Set by `mkShell`; consumed by `ncap-ctl` (and `NCAP_SOCKET` by `ncap`):
 | `NCAP_NIX` | store path of `nix` |
 | `NCAP_BASH` | store path of devshell bash |
 | `NCAP_TIMEOUT` | drain grace, seconds |
-| `PROJECT_ROOT` | workspace root |
+| `NCAP_PROJECT_ROOT` | project root |
 
 ## Stamp guard
 
-The first thing `init`/`start`/`restart` do with the cache: read `<cache>/project`. Present and different from `$PROJECT_ROOT` ⇒ error — "project name `<name>` is held by another checkout; set `project`". Absent ⇒ write it. `clean` deletes the whole project-keyed cache and state dirs, stamp included.
+The first thing `init`/`start`/`restart` do with the cache: read `<cache>/project`. Present and different from the current project root ⇒ error — "project name `<name>` is held by another checkout; set `project`". Absent ⇒ write it. `clean` deletes the whole project-keyed cache and state dirs, stamp included.
