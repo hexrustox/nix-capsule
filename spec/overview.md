@@ -41,7 +41,7 @@ Tool invocation on the host (`ncap cargo build`) sends a request over the shared
 
 ## Goals
 
-- Host-side UX: wrappers make container tools feel local; direnv keeps working with a standard `.envrc`.
+- Host-side UX: wrappers make container tools feel local; the host devshell's shellHook is the entry point — plain `nix develop` works with no direnv installed, and direnv keeps working with a standard `.envrc`.
 - Namespaced, collision-free state per project and per user.
 - Env forwarding that captures ad-hoc host variables without wholesale leakage.
 - Cheap staleness detection: a fresh shell entry or direnv reload costs a hash check, not a Nix evaluation.

@@ -91,16 +91,22 @@ Cache contents:
 
 ## Staleness
 
-Entering the host shell (or a direnv reload) runs `ncap-ctl init`, which hashes `watchFiles` with **xxhash64** and compares against the cached `hash`:
+Entering the host shell runs `ncap-ctl init` — `nix develop` and a direnv reload are two interchangeable triggers for the same shellHook; direnv is optional. `init` hashes `watchFiles` with **xxhash64** and compares against the cached `hash`:
 
-- **Match** → start the container if it isn't running. No Nix evaluation.
+- **Match** → start the container if it isn't running. No `nix print-dev-env` evaluation.
 - **Mismatch** → re-run `nix print-dev-env` into the cache (on the host), then restart the container so it picks up the new environment.
+
+Eval-cost split: shell entry always pays the host-shell evaluation (`nix develop`'s own cost; direnv's `use flake` likewise). The hash check governs only the container env dump — fresh means no `nix print-dev-env`, stale means re-eval + restart.
+
+Sessions never auto-refresh: a user sitting in a long-lived `nix develop` session gets no container refresh after a flake edit — edits take effect on the next shell entry (or direnv reload). Identical to upstream `nix develop` behavior; a host-side file watcher is deliberately out of scope.
 
 Consequences, all deliberate:
 
 - direnv's `watch_file` is mtime-based: touching a watched file with identical content still triggers a reload, but the hash matches, so the cost is one hash pass — no evaluation, no restart.
 - Any `flake.nix` edit — even host-shell-only options like `wrappers` or `envForward` — trips the hash and restarts the container. Correct, occasionally heavier than needed.
 - Files not in `watchFiles` (e.g. locally imported `.nix` files) don't participate in staleness — add them to `watchFiles` (under `harden`, this also grants them write protection inside the container).
+
+### direnv users (optional)
 
 direnv integration needs nothing beyond a standard `.envrc`:
 
@@ -109,7 +115,7 @@ watch_file flake.nix flake.lock
 use flake .
 ```
 
-The shellHook's guarded `watch_file` emission adds configured entries to direnv's watch set automatically.
+The shellHook's guarded `watch_file` emission adds configured entries to direnv's watch set automatically. The emission is inert without direnv and additive with it — there is no opt-out knob. Not wanting the direnv integration means not using direnv; full manual control is `autoStart = false`.
 
 ## Wrappers
 

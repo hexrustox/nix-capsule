@@ -45,11 +45,13 @@ Full design lives in `spec/` at the repo root: `overview.md`, `nix.md`, `protoco
 24. As an editor user, I want my wrapped LSP to stream bidirectionally over one long-lived connection, so that editor integration works through the capsule.
 25. As a multi-user machine user, I want the socket in a per-user `0700` runtime dir, so that other users can't reach my container.
 26. As a developer, I want no Nix evaluation inside the container, so that container start is fast and independent of the Nix daemon.
+27. As a developer without direnv, I want plain `nix develop` to set up and refresh the capsule, so that direnv is optional.
 
 ## Implementation Decisions
 
 - **Model:** host shell (`ncap`, `ncap-ctl`, wrappers) + container shell (real toolchain); container = kernel sandbox with `/nix` mounted ro; devshell env pre-evaluated on the host into a cached dump; `ncap-server` is PID 1 after `bash -c "source <env> && exec ncap-server …"`. Image is an option (default `alpine:latest`); the executed binary is always nix-store bash, so the image stays dumb.
 - **Flake-facing surface:** `mkShell` (wrapping `mkShellNoCC`) + overlay. Options: `project`, `image`, `devShell`, `watchFiles` (default `["flake.nix" "flake.lock"]`), `envForward`, `wrappers`, `extraOptions`, `harden` (default false, also mounts every `watchFiles` entry read-only), `timeout` (default 10 s), `socketPath`, `containerName`, `preShellHook`/`postShellHook`, `autoStart` (default true). Shell names and consuming-repo file layout are explicitly not part of the contract.
+- **Entry contract:** the host devshell's shellHook is the single entry point; `nix develop` and direnv `use flake` are interchangeable triggers and non-direnv use is first-class. The shellHook's guarded `watch_file` emission stays unconditional (inert without direnv, additive with it — no opt-out knob). Without direnv, flake edits take effect on the next shell entry; long-lived sessions never auto-refresh. The client's connect-failure error names the socket path and suggests `ncap-ctl init`.
 - **Three binaries:** `ncap` (client), `ncap-server`, `ncap-ctl`.
 - **Namespacing:** everything keyed by `project` (default: sanitized basename of the project root). Socket `$XDG_RUNTIME_DIR/nix-capsule/<project>/ncap.sock` (dir 0700, tmpfs ⇒ no stale state across reboots), container `ncap-<project>`, cache `$XDG_CACHE_HOME/nix-capsule/<project>/`, logs `$XDG_STATE_HOME/nix-capsule/<project>/logs/`. `socketPath`/`containerName` override. Cache holds `env`, `hash`, `profile`, `project` (stamp).
 - **Stamp guard:** cache records the project root that created it; same project name + different checkout ⇒ hard error with a "set `project`" hint.
