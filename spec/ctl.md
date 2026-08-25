@@ -1,26 +1,26 @@
 # nix-capsule — lifecycle (`ncap-ctl`)
 
-`ncap-ctl` runs on the host, inside the host devshell — all configuration arrives as `NCAP_*` env vars (contract below); it refuses to run without them.
+`ncap-ctl` runs on the host, inside the host devshell — configuration arrives as `NCAP_*` env vars (contract below). Refusal is per command: a command demands exactly the vars it uses and errors naming the missing one. `completions` demands nothing; `show-options` only `NCAP_RUN_OPTS`.
 
 ## Commands
 
 | Command | Behavior |
 | --- | --- |
 | `init` | Entry point from the shellHook. Probe, hash-check, then start or re-eval + restart (flow below). |
-| `start` | Probe: connectable ⇒ no-op ("already running"). Stale socket file ⇒ remove it. Then run the container detached. |
-| `stop` | `<runtime> stop <name>` — SIGTERM to PID 1, graceful drain. |
+| `start` | Probe `<runtime> inspect`: running ⇒ done ("already running"). Not running ⇒ run the container detached, then await `State.Running`. |
+| `stop` | `<runtime> stop <name>` — SIGTERM to PID 1, graceful drain. Idempotent: not running ⇒ success. |
 | `restart` | Non-fatal `stop`, then `init` (which re-ensures the cache before starting). |
-| `enter` | `<runtime> exec -it <name> <nix-bash> -c "source <cache>/env && exec <nix-bash>"` — interactive escape hatch, outside the protocol. |
+| `enter` | `<runtime> exec -it <name> <nix-bash> -c "source <cache>/env && exec <nix-bash>"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Container running? Socket connectable? Cache fresh/stale/missing? |
 | `log` | Open the newest server log in `$PAGER` (fallback `less -R`). |
-| `clean` | Stop the container, delete this project's cache and state dirs. |
+| `clean` | Stop the container, delete this project's cache, state, and runtime dirs. |
 | `completions <shell>` | Shell completions. |
-| `show-options` | Print the fully expanded runtime invocation, one arg per line. |
+| `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
 
 ### `init` flow
 
 1. Read the stamp guard (below).
-2. Probe the socket.
+2. Probe liveness: `<runtime> inspect` → `State.Running`. The server is PID 1, so a running container is a live server — no socket polling needed.
    - Running and hash fresh ⇒ done.
    - Running and hash stale ⇒ re-eval, restart.
    - Not running ⇒ ensure cache (eval if hash stale or missing), start.
@@ -36,9 +36,11 @@ The container invocation:
 
 Detached; the server becomes PID 1 via `exec`.
 
+Readiness: after launch, poll `inspect` until `State.Running` (deadline: `timeout`). Losing a concurrent-start race ("name in use"): re-inspect — running ⇒ success; dead ⇒ `rm` the container and start once more. Never reaching `Running` ⇒ fail loudly with the `inspect` state and the tail of the newest server log.
+
 ## Mounts
 
-Defaults first; `extraOptions` args are appended after, with `$VAR`/`${VAR}` expanded at launch (so `$CARGO_HOME`-style mounts work).
+Defaults first; `extraOptions` args are appended after, with `$VAR`/`${VAR}` expanded at launch (so `$CARGO_HOME`-style mounts work). Expansion happens in `ncap-ctl`, against its own environment; no word-splitting afterwards; a referenced unset variable is a launch error naming it.
 
 | Mount | Mode | Purpose |
 | --- | --- | --- |
@@ -59,7 +61,7 @@ Defaults first; `extraOptions` args are appended after, with `$VAR`/`${VAR}` exp
 
 ## `NCAP_*` contract
 
-Set by `mkShell`; consumed by `ncap-ctl` (and `NCAP_SOCKET` by `ncap`):
+Set by `mkShell`; consumed by `ncap-ctl` (and `NCAP_SOCKET`, `NCAP_ENV_FORWARD` by `ncap`):
 
 | Var | Contents |
 | --- | --- |
@@ -80,4 +82,4 @@ Set by `mkShell`; consumed by `ncap-ctl` (and `NCAP_SOCKET` by `ncap`):
 
 ## Stamp guard
 
-The first thing `init`/`start`/`restart` do with the cache: read `<cache>/project`. Present and different from the current project root ⇒ error — "project name `<name>` is held by another checkout; set `project`". Absent ⇒ write it. `clean` deletes the whole project-keyed cache and state dirs, stamp included.
+The first thing `init`/`start`/`restart` do with the cache: read `<cache>/project`. Present and different from the current project root ⇒ error — "project name `<name>` is already keyed to root `<path>`; set `project`". Absent ⇒ write it. `clean` deletes the whole project-keyed cache and state dirs, stamp included.

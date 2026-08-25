@@ -40,7 +40,7 @@ The capsule exposes two things to a consuming flake:
 | `project` | string | `basename <project root>`, sanitized | Namespace for socket, container, cache, and logs. |
 | `image` | string | `"alpine:latest"` | OCI image; provides only the kernel/userland sandbox. |
 | `devShell` | string | `"container"` | Flake URI of the container shell. Bare names get `.#` prefixed; full URIs pass through. |
-| `watchFiles` | list of paths | `[ "flake.nix" "flake.lock" ]` | Inputs hashed for staleness detection; also emitted as direnv `watch_file` calls. |
+| `watchFiles` | list of strings | `[ "flake.nix" "flake.lock" ]` | Project-root-relative inputs hashed for staleness detection; also emitted as direnv `watch_file` calls. Plain strings — a Nix `path` would be copied into the store. Entries that are absolute or contain `..` are rejected when `mkShell` evaluates. |
 | `envForward` | list of strings | `[ ]` | Env var names the client resolves from the host env, per request. |
 | `wrappers` | list | `[ ]` | Host PATH shims routing tool names through the client (schema below). |
 | `extraOptions` | list of strings | `[ ]` | Extra runtime args (mounts, env passes), appended after the default mounts; `$VAR`/`${VAR}` expanded at launch. |
@@ -59,9 +59,11 @@ What `mkShell` produces:
 - a shellHook that:
   1. runs `preShellHook`,
   2. exports `NCAP_PROJECT_ROOT` (git toplevel, falling back to `pwd`),
-  3. emits a guarded `watch_file <f>` for every `watchFiles` entry (no-op outside direnv),
+  3. emits a guarded `watch_file <f>` for every `watchFiles` entry (guard: `${DIRENV_DIR:-}` non-empty — inert outside direnv),
   4. runs `ncap-ctl init` when `autoStart`,
   5. runs `postShellHook`.
+
+A failing `ncap-ctl init` prints a warning on stderr and does not abort shell entry — wrapped commands surface the failure later through the client's connect-error hint.
 
 ## Derived names and paths
 
@@ -76,7 +78,7 @@ All capsule state lives outside the project tree, keyed by `project`:
 
 If `XDG_RUNTIME_DIR` is unset, the socket falls back to `$TMPDIR/nix-capsule-<uid>/nix-capsule/<project>/` (dir `0700`).
 
-`project` defaults to the sanitized basename of the project root (non-alphanumeric runs collapse to `-`). `socketPath` and `containerName` override their derived values; everything else derives from `project`.
+`project` defaults to the sanitized basename of the project root: non-alphanumeric runs collapse to a single `-`, leading and trailing `-` stripped; an empty result is a hard error telling you to set `project`. `socketPath` and `containerName` override their derived values; everything else derives from `project`.
 
 **Collision guard:** the cache holds a stamp file recording the absolute project-root path that created it. If `ncap-ctl` finds the same project name owned by a different checkout, it errors with a hint to set `project` — two checkouts of one repo must never share a socket/container/cache.
 
@@ -95,6 +97,8 @@ Entering the host shell runs `ncap-ctl init` — `nix develop` and a direnv relo
 
 - **Match** → start the container if it isn't running. No `nix print-dev-env` evaluation.
 - **Mismatch** → re-run `nix print-dev-env` into the cache (on the host), then restart the container so it picks up the new environment.
+
+The digest: xxhash64 (seed 0) over the concatenation of one record per entry, entries sorted by relative path — `(relative path`, NUL, `exists flag`, NUL, `contents-or-empty)`. Missing files contribute their absence flag, so a file appearing or disappearing flips freshness. Cached as lowercase hex, no trailing newline.
 
 Eval-cost split: shell entry always pays the host-shell evaluation (`nix develop`'s own cost; direnv's `use flake` likewise). The hash check governs only the container env dump — fresh means no `nix print-dev-env`, stale means re-eval + restart.
 
@@ -133,7 +137,7 @@ Attrset form mirrors client CLI flags one-to-one — the wrapper surface grows w
 | `name` | string | required | bin name placed on PATH |
 | `command` | string | `name` | command executed inside the container |
 | `env` | list of `"KEY=VALUE"` | `[ ]` | one `--env` per entry |
-| `cwd` | path | `null` | `--cwd` |
+| `cwd` | string | `null` | `--cwd`; a plain string (a Nix `path` would be copied into the store) |
 
 ## Environment layering
 
