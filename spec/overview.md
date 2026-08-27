@@ -16,8 +16,8 @@ Split the devshell in two:
 `nix develop` drops the user into the host shell; a shellHook starts the container. The container is a dumb sandbox:
 
 - the host's `/nix` store is mounted read-only,
-- the container devshell is **pre-evaluated on the host** (`nix print-dev-env`) into a cached activation script,
-- the container's only long-lived process is `ncap-server`, which sources that script and serves the socket.
+- the container devshell is **pre-evaluated on the host** (`nix print-dev-env`) into a cached env dump,
+- the container's only long-lived process is `ncap-server`, which sources that dump and serves the socket.
 
 No Nix evaluation, daemon, or image content is needed inside the container — the image only provides a kernel and userland sandbox.
 
@@ -42,9 +42,9 @@ Tool invocation on the host (`ncap cargo build`) sends a request over the shared
 ## Goals
 
 - Host-side UX: wrappers make container tools feel local; the host devshell's shellHook is the entry point — plain `nix develop` works with no direnv installed, and direnv keeps working with a standard `.envrc`.
-- Namespaced, collision-free state per project and per user.
+- State keyed per project and per user — separate checkouts never share it.
 - Env forwarding that captures ad-hoc host variables without wholesale leakage.
-- Cheap staleness detection: a fresh shell entry or direnv reload costs a hash check, not a Nix evaluation.
+- Cheap freshness checks: a fresh shell entry or direnv reload costs a hash check, not a Nix evaluation.
 - Signal and exit-code fidelity good enough for scripts, Makefiles, and Ctrl-C workflows.
 
 ## Non-goals / accepted limitations
@@ -60,17 +60,17 @@ Tool invocation on the host (`ncap cargo build`) sends a request over the shared
 
 | Doc | Contents |
 | --- | --- |
-| `nix.md` | Flake-facing API: options, derived names/paths, staleness, wrappers, env layering |
+| `nix.md` | Flake-facing API: options, derived names/paths, freshness, wrappers, env layering |
 | `protocol.md` | Wire contract: framing and frame table |
 | `server.md` | Server behavior inside the container |
 | `client.md` | Client CLI, signal handling, exit codes |
 | `ctl.md` | Lifecycle commands, container invocation, mounts, env-var contract |
 
-Shell names used in examples (`default`, `container`) are placeholders — the consumer's flake names both shells; only the linkage between them matters. How the capsule library reaches a flake (overlay, lib function, consuming repo's file layout) is likewise outside this spec's concern: a plain `flake.nix` is all a consumer needs.
+Shell names used in examples (`default`, `container`) are placeholders — the consumer's flake names both shells; only the linkage between them matters. How the `nix-capsule` library reaches a flake (overlay, lib function, consuming repo's file layout) is likewise outside this spec's concern: a plain `flake.nix` is all a consumer needs.
 
 ## Trust model
 
 - The socket directory is per-user and mode `0700`, under `$XDG_RUNTIME_DIR` (tmpfs by default — it disappears at logout/reboot, so stale sockets don't accumulate). **Anyone who can connect to the socket can execute arbitrary code inside the container**; directory permissions are the only boundary. Accepted: the threat model is accidental host damage, not malicious local users.
-- The cache directory is mounted into the container **read-only**: the container must never be able to modify a file the host will later `source` (poisoning). Under `harden`, the same invariant extends to every `watchFiles` entry — each is bind-mounted read-only over the read-write project root so a contained process cannot rewrite eval inputs whose change triggers `nix print-dev-env` on the host.
+- The cache directory is mounted into the container **read-only**: the container must never be able to modify a file the host will later `source` (poisoning). Under `harden`, the same invariant extends to every `watchFiles` entry — each is bind-mounted read-only over the read-write project root so a contained process cannot rewrite watched files whose change triggers `nix print-dev-env` on the host.
 - The project root is mounted read-write — writing the workspace is the tool's purpose.
 - OCI hardening (`--cap-drop=all`, `no-new-privileges`) is available but opt-in (see above for the additional `watchFiles` mounts under `harden`).

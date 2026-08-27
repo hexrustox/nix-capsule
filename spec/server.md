@@ -1,6 +1,6 @@
 # nix-capsule — server (`ncap-server`)
 
-Runs inside the container as PID 1 — the launcher is `bash -c "source <cache>/env && exec ncap-server …"`, so the server inherits the devshell environment from the sourced dump and children resolve devshell tools through plain `PATH`.
+Runs inside the container as PID 1 — the launcher is `bash -c "source <cache>/env && exec ncap-server …"`, so the server inherits the container shell's environment from the sourced env dump and children resolve its tools through plain `PATH`.
 
 ## Startup
 

@@ -1,6 +1,6 @@
 # nix-capsule — flake-facing API
 
-The capsule exposes two things to a consuming flake:
+The `nix-capsule` flake exposes two things to a consuming flake:
 
 - an **overlay** providing the `ncap` package (client, server, and ctl binaries), and
 - **`mkShell`** — builds the host shell around a referenced container shell.
@@ -18,11 +18,11 @@ The capsule exposes two things to a consuming flake:
         inherit system;
         overlays = [ nix-capsule.overlays.default ];
       };
-      capsule = nix-capsule.lib { inherit pkgs; };
+      inherit (nix-capsule.lib { inherit pkgs; }) mkShell;
     in
     {
       devShells.${system} = {
-        default = capsule.mkShell {
+        default = mkShell {
           wrappers = [ "cargo" ];
           envForward = [ "CARGO_HOME" ];
           # …
@@ -37,10 +37,10 @@ The capsule exposes two things to a consuming flake:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `project` | string | `basename <project root>`, sanitized | Namespace for socket, container, cache, and logs. |
+| `project` | string | `basename <project root>`, sanitized | Name keying the socket, container, cache, and log paths. |
 | `image` | string | `"alpine:latest"` | OCI image; provides only the kernel/userland sandbox. |
 | `devShell` | string | `"container"` | Flake URI of the container shell. Bare names get `.#` prefixed; full URIs pass through. |
-| `watchFiles` | list of strings | `[ "flake.nix" "flake.lock" ]` | Project-root-relative inputs hashed for staleness detection; also emitted as direnv `watch_file` calls. Plain strings — a Nix `path` would be copied into the store. Entries that are absolute or contain `..` are rejected when `mkShell` evaluates. |
+| `watchFiles` | list of strings | `[ "flake.nix" "flake.lock" ]` | Project-root-relative files hashed for freshness checks; also emitted as direnv `watch_file` calls. Plain strings — a Nix `path` would be copied into the store. Entries that are absolute or contain `..` are rejected when `mkShell` evaluates. |
 | `envForward` | list of strings | `[ ]` | Env var names the client resolves from the host env, per request. |
 | `wrappers` | list | `[ ]` | Host PATH shims routing tool names through the client (schema below). |
 | `extraOptions` | list of strings | `[ ]` | Extra runtime args (mounts, env passes), appended after the default mounts; `$VAR`/`${VAR}` expanded at launch. |
@@ -48,7 +48,7 @@ The capsule exposes two things to a consuming flake:
 | `timeout` | seconds | `10` | Grace period for draining connections when the container stops. |
 | `socketPath` | path | derived | Override the Unix socket path. |
 | `containerName` | string | derived | Override the container name. |
-| `preShellHook` / `postShellHook` | strings | `""` | Extra shellHook fragments, run before/after capsule init. |
+| `preShellHook` / `postShellHook` | strings | `""` | Extra shellHook fragments, run before/after `ncap-ctl init`. |
 | `autoStart` | bool | `true` | Run `ncap-ctl init` from the shellHook. |
 
 What `mkShell` produces:
@@ -67,7 +67,7 @@ A failing `ncap-ctl init` prints a warning on stderr and does not abort shell en
 
 ## Derived names and paths
 
-All capsule state lives outside the project tree, keyed by `project`:
+All per-project state lives outside the project tree, keyed by `project`:
 
 | What | Path / name |
 | --- | --- |
@@ -80,7 +80,7 @@ If `XDG_RUNTIME_DIR` is unset, the socket falls back to `$TMPDIR/nix-capsule-<ui
 
 `project` defaults to the sanitized basename of the project root: non-alphanumeric runs collapse to a single `-`, leading and trailing `-` stripped; an empty result is a hard error telling you to set `project`. `socketPath` and `containerName` override their derived values; everything else derives from `project`.
 
-**Collision guard:** the cache holds a stamp file recording the absolute project-root path that created it. If `ncap-ctl` finds the same project name owned by a different checkout, it errors with a hint to set `project` — two checkouts of one repo must never share a socket/container/cache.
+**Stamp guard:** the cache holds a stamp file recording the absolute project-root path that created it. If `ncap-ctl` finds the same project name owned by a different checkout, it errors with a hint to set `project` — two checkouts of one repo must never share a socket/container/cache.
 
 Cache contents:
 
@@ -91,7 +91,7 @@ Cache contents:
 | `profile` | the nix profile `print-dev-env` writes; history pruned after each eval |
 | `project` | the stamp file (absolute project-root path) |
 
-## Staleness
+## Freshness
 
 Entering the host shell runs `ncap-ctl init` — `nix develop` and a direnv reload are two interchangeable triggers for the same shellHook; direnv is optional. `init` hashes `watchFiles` with **xxhash64** and compares against the cached `hash`:
 
@@ -108,7 +108,7 @@ Consequences, all deliberate:
 
 - direnv's `watch_file` is mtime-based: touching a watched file with identical content still triggers a reload, but the hash matches, so the cost is one hash pass — no evaluation, no restart.
 - Any `flake.nix` edit — even host-shell-only options like `wrappers` or `envForward` — trips the hash and restarts the container. Correct, occasionally heavier than needed.
-- Files not in `watchFiles` (e.g. locally imported `.nix` files) don't participate in staleness — add them to `watchFiles` (under `harden`, this also grants them write protection inside the container).
+- Files not in `watchFiles` (e.g. locally imported `.nix` files) don't affect freshness — add them to `watchFiles` (under `harden`, this also grants them write protection inside the container).
 
 ### direnv users (optional)
 
@@ -145,11 +145,11 @@ A child inside the container sees four layers; for a given KEY, the highest laye
 
 | # | Layer | Resolved | Changes take effect |
 | --- | --- | --- | --- |
-| 1 | devshell dump (server's inherited env) | at init, inside the container | after re-eval + restart |
+| 1 | env dump (server's inherited env) | at init, inside the container | after re-eval + restart |
 | 2 | `envForward` | by the client, from the host env, **per request** | immediately |
 | 3 | wrapper `env` | in the wrapper script | after flake edit (wrapper regen) |
 | 4 | `-e KEY=VALUE` | CLI flag, per invocation | immediately |
 
 The client merges layers 2–4 into the request's env list (later wins, deduplicated); the server applies that list over its inherited environment. A name in `envForward` that is unset on the host, and a `KEY` without `=VALUE`, are silently omitted.
 
-Note the split: forwarded *values* never require a restart (the client re-reads them each invocation). Only editing the `envForward` *list* touches the flake — which trips the staleness hash and restarts. Incidental, not required.
+Note the split: forwarded *values* never require a restart (the client re-reads them each invocation). Only editing the `envForward` *list* touches the flake — which trips the freshness hash and restarts. Incidental, not required.

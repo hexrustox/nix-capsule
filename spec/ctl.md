@@ -51,7 +51,7 @@ Defaults first; `extraOptions` args are appended after, with `$VAR`/`${VAR}` exp
 | cache dir → same path | ro | Env dump the server sources — **read-only so the container can't poison files the host will later source**. |
 | log dir → same path | rw | Server writes its JSON logs there. |
 | `<project root>/.git` → same path | ro, if it exists | Read-only git metadata for tools that read it. |
-| `<project root>/<watchFiles entries>` → same path | ro, if present and `harden = true` | Keeps eval inputs immutable from inside the container (see `harden` below). |
+| `<project root>/<watchFiles entries>` → same path | ro, if present and `harden = true` | Keeps watched files immutable from inside the container (see `harden` below). |
 
 `harden = true` prepends `--cap-drop=all --security-opt=no-new-privileges` and bind-mounts every `watchFiles` entry read-only (when present) over the read-write project-root mount — a more-specific mount wins in podman/docker, so the files stay immutable even though the parent directory is writable. This prevents a contained process from rewriting files whose change triggers host-side re-evaluation (`nix print-dev-env` on the host, `shellHook` included) and re-sourcing inside the container. `flake.lock` edits and `nix flake update` must then happen on the host; accepted tradeoff, like `.git` being read-only. Capability drops occasionally break dev tooling, so hardening stays opt-in.
 
