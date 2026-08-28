@@ -11,6 +11,7 @@ use std::path::Path;
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{CURRENT_VERSION, ErrorMsg, Exit, Message, Request, VersionMsg};
+use proptest::prelude::*;
 use test_case::test_case;
 
 use common::{Client, Server};
@@ -209,7 +210,7 @@ async fn non_request_first_frame_is_error_and_close() {
         code: None,
         signal: None,
     })],
-    None, 1, &["status", "unknow"]
+    None, 1, &["status", "unknown"]
     ; "exit_null_null_warns_and_exits_1"
 )]
 #[test_case(
@@ -262,4 +263,54 @@ async fn connect_failure_names_socket_and_suggests_init() {
         "stderr={}",
         out.stderr
     );
+}
+
+// ------------------------------------------------------------------ properties
+
+/// A NUL-free Unicode string: full range of multibyte, newline, and control
+/// characters, sized so large payloads cross the server's pipe-read chunk
+/// boundaries. NUL is filtered out because execve argv cannot carry it.
+fn arb_payload() -> impl Strategy<Value = String> {
+    prop::collection::vec(any::<char>(), 0..2048)
+        .prop_map(|chars| chars.into_iter().filter(|c| *c != '\0').collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn arbitrary_stdio_round_trips_through_a_real_child() {
+    let server = Server::builder().start().await;
+    // Each case spawns real processes, so a reduced case count keeps the
+    // suite fast while the shared server carries the expensive setup.
+    proptest!(ProptestConfig::with_cases(16), |(out in arb_payload(), err in arb_payload())| {
+        let result = server
+            .client()
+            .run(&[
+                "sh",
+                "-c",
+                "printf %s \"$1\"; printf %s \"$2\" >&2",
+                "sh",
+                &out,
+                &err,
+            ]);
+        prop_assert_eq!(result.stdout, out);
+        prop_assert_eq!(result.stderr, err);
+        prop_assert_eq!(result.status.code(), Some(0));
+    });
+    server.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn arbitrary_stdin_is_written_verbatim_to_a_child_file() {
+    let server = Server::builder().start().await;
+    // Each case spawns real processes, so a reduced case count keeps the
+    // suite fast while the shared server carries the expensive setup.
+    proptest!(ProptestConfig::with_cases(16), |(bytes in prop::collection::vec(any::<u8>(), 0..20000))| {
+        let file = tempfile::NamedTempFile::new_in(server.path()).unwrap();
+        let result = server
+            .client()
+            .stdin(&bytes)
+            .run(&["sh", "-c", "cat > \"$1\"", "sh", file.path().to_str().unwrap()]);
+        prop_assert_eq!(result.status.code(), Some(0));
+        prop_assert_eq!(fs::read(file.path()).unwrap(), bytes);
+    });
+    server.stop();
 }
