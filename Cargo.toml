@@ -10,8 +10,11 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time"] }
+futures-util = { version = "0.3", features = ["sink"] }
 
 [dev-dependencies]
 proptest = "1.11.0"
 test-case = "3.3.1"
+tempfile = "3"
 

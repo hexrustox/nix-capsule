@@ -7,18 +7,26 @@ use clap::Parser;
 #[command(version, about)]
 struct Cli {
     /// Unix socket path to bind
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", required = true)]
     socket: PathBuf,
 
     /// Directory for per-run server logs
-    #[arg(long, value_name = "DIR")]
-    log_dir: Option<PathBuf>,
+    #[arg(long, value_name = "DIR", required = true)]
+    #[allow(dead_code)] // consumed by log setup in ticket 05
+    log_dir: PathBuf,
 
     /// Drain grace for live connections at shutdown, seconds
-    #[arg(long)]
-    timeout: Option<u64>,
+    #[arg(long, required = true)]
+    #[allow(dead_code)] // consumed by drain logic in ticket 05
+    timeout: u64,
 }
 
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    let runtime = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
+    let result = runtime.block_on(nix_capsule::server::run(cli.socket));
+    if let Err(err) = result {
+        eprintln!("ncap-server: {err}");
+        std::process::exit(1);
+    }
 }

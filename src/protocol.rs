@@ -227,8 +227,7 @@ impl FrameCodec {
         if length > MAX_PAYLOAD {
             return Err(DecodeError::PayloadTooLarge(length));
         }
-        let frame_type =
-            FrameType::from_u8(src[0]).ok_or(DecodeError::UnknownFrameType(src[0]))?;
+        let frame_type = FrameType::from_u8(src[0]).ok_or(DecodeError::UnknownFrameType(src[0]))?;
         Ok(Some((frame_type, length)))
     }
 }

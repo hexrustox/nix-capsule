@@ -7,8 +7,8 @@ use clap::Parser;
 #[command(version, about)]
 struct Cli {
     /// Unix socket path of the project's server
-    #[arg(short, long, value_name = "PATH", env = "NCAP_SOCKET")]
-    socket: Option<PathBuf>,
+    #[arg(short, long, value_name = "PATH", env = "NCAP_SOCKET", required = true)]
+    socket: PathBuf,
 
     /// Working directory for the command inside the container
     #[arg(short, long, value_name = "PATH")]
@@ -20,5 +20,8 @@ struct Cli {
 }
 
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    let runtime = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
+    let code = runtime.block_on(nix_capsule::client::run(&cli.socket, cli.cwd, cli.command));
+    std::process::exit(code);
 }
