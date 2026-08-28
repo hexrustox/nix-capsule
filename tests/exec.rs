@@ -5,6 +5,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -120,6 +121,148 @@ async fn eacces_yields_126_with_synthesized_stderr() {
 
     assert_eq!(out.status.code(), Some(126));
     assert_eq!(out.stderr, "ncap: ./blocked: permission denied\n");
+}
+
+// ------------------------------------------------ env layering (ticket 03, real)
+
+#[tokio::test(flavor = "multi_thread")]
+async fn env_flag_sets_an_explicit_value_in_the_child_environment() {
+    let server = Server::builder().start().await;
+    let out = server.client().env_flag("NCAP_TEST_LAYER=from-flag").run(&[
+        "sh",
+        "-c",
+        "printf %s \"$NCAP_TEST_LAYER\"",
+    ]);
+    server.stop();
+
+    assert_eq!(out.stdout, "from-flag");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test_case(
+    Some("host-value") ; "bare_key_copies_when_set_on_host"
+)]
+#[test_case(
+    None ; "bare_key_is_omitted_when_unset_on_host"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn bare_env_flag_copies_or_omits_the_host_value(host: Option<&str>) {
+    let server = Server::builder().start().await;
+    let mut client = server.client().env_flag("NCAP_TEST_BARE");
+    if let Some(value) = host {
+        client = client.env("NCAP_TEST_BARE", value);
+    }
+    let out = client.run(&[
+        "sh",
+        "-c",
+        "printf %s \"${NCAP_TEST_BARE:-unset-fallback}\"",
+    ]);
+    server.stop();
+
+    assert_eq!(out.stdout, host.unwrap_or("unset-fallback"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_name_resolves_fresh_per_invocation_without_restart() {
+    let server = Server::builder().start().await;
+    let forward = r#"["NCAP_TEST_FRESH"]"#;
+    let first = server
+        .client()
+        .env("NCAP_ENV_FORWARD", forward)
+        .env("NCAP_TEST_FRESH", "first")
+        .run(&["sh", "-c", "printf %s \"$NCAP_TEST_FRESH\""]);
+    let second = server
+        .client()
+        .env("NCAP_ENV_FORWARD", forward)
+        .env("NCAP_TEST_FRESH", "second")
+        .run(&["sh", "-c", "printf %s \"$NCAP_TEST_FRESH\""]);
+    server.stop();
+
+    assert_eq!(first.stdout, "first");
+    assert_eq!(second.stdout, "second");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_name_unset_on_host_is_silently_omitted() {
+    let server = Server::builder().start().await;
+    let out = server
+        .client()
+        .env("NCAP_ENV_FORWARD", r#"["NCAP_TEST_MISSING"]"#)
+        .run(&[
+            "sh",
+            "-c",
+            "printf %s \"${NCAP_TEST_MISSING:-unset-fallback}\"",
+        ]);
+    server.stop();
+
+    assert_eq!(out.stdout, "unset-fallback");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_env_flags_resolve_later_wins() {
+    let server = Server::builder().start().await;
+    let out = server
+        .client()
+        .env_flag("NCAP_TEST_DUP=first")
+        .env_flag("NCAP_TEST_DUP=second")
+        .run(&["sh", "-c", "printf %s \"$NCAP_TEST_DUP\""]);
+    server.stop();
+
+    assert_eq!(out.stdout, "second");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn merged_env_arrives_deduplicated_in_the_request() {
+    let server = Server::builder()
+        .respond(vec![Message::Exit(Exit {
+            code: Some(0),
+            signal: None,
+        })])
+        .start()
+        .await;
+    let out = server
+        .client()
+        .env(
+            "NCAP_ENV_FORWARD",
+            r#"["NCAP_TEST_FWD_A", "NCAP_TEST_FWD_C"]"#,
+        )
+        .env("NCAP_TEST_FWD_A", "host-a")
+        .env("NCAP_TEST_FWD_C", "host-c")
+        .env_flag("NCAP_TEST_FWD_A=flag-a")
+        .env_flag("NCAP_TEST_FWD_B=flag-b")
+        .env_flag("NCAP_TEST_FWD_B=flag-b2")
+        .run(&["true"]);
+
+    assert_eq!(out.status.code(), Some(0));
+    let request = server.captured_request().expect("captured request");
+    server.stop();
+    let merged: BTreeMap<String, String> = request
+        .env
+        .iter()
+        .map(|entry| entry.split_once('=').expect("entry carries ="))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    assert_eq!(
+        merged.len(),
+        request.env.len(),
+        "duplicates arrived: {:?}",
+        request.env
+    );
+    assert_eq!(
+        merged.get("NCAP_TEST_FWD_A").map(String::as_str),
+        Some("flag-a"),
+        "env={merged:?}"
+    );
+    assert_eq!(
+        merged.get("NCAP_TEST_FWD_B").map(String::as_str),
+        Some("flag-b2"),
+        "env={merged:?}"
+    );
+    assert_eq!(
+        merged.get("NCAP_TEST_FWD_C").map(String::as_str),
+        Some("host-c"),
+        "env={merged:?}"
+    );
 }
 
 // ----------------------------------------------------------- raw wire protocol

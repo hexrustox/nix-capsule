@@ -16,10 +16,16 @@ use crate::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request};
 /// Run `command` against the server listening on `socket`.
 ///
 /// `cwd` overrides the working directory the server uses for the child; when
-/// `None` it defaults to the client's own current directory. Returns the exit
-/// code the client process should report.
-pub async fn run(socket: &Path, cwd: Option<PathBuf>, command: Vec<String>) -> i32 {
-    match session(socket, cwd, command).await {
+/// `None` it defaults to the client's own current directory. `env` carries the
+/// `--env` flags, each a `KEY=VALUE` override or a bare `KEY` to copy from
+/// this process. Returns the exit code the client process should report.
+pub async fn run(
+    socket: &Path,
+    cwd: Option<PathBuf>,
+    env: Vec<String>,
+    command: Vec<String>,
+) -> i32 {
+    match session(socket, cwd, env, command).await {
         Ok(code) => code,
         Err(ClientError::Connect { socket, source }) => {
             eprintln!("ncap: cannot connect to socket `{socket}`: {source}");
@@ -44,6 +50,11 @@ enum ClientError {
     },
     #[error("{0}")]
     Io(#[from] io::Error),
+    #[error("`NCAP_ENV_FORWARD` is not a JSON array of variable names: {source}")]
+    ForwardEnv {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("{0}")]
     Transport(String),
 }
@@ -51,6 +62,7 @@ enum ClientError {
 async fn session(
     socket: &Path,
     cwd: Option<PathBuf>,
+    env: Vec<String>,
     command: Vec<String>,
 ) -> Result<i32, ClientError> {
     let (name, args) = match command.split_first() {
@@ -67,7 +79,7 @@ async fn session(
     let mut framed = Framed::new(stream, FrameCodec);
     send(
         &mut framed,
-        Message::Request(build_request(cwd, name, args)?),
+        Message::Request(build_request(cwd, env, name, args)?),
     )
     .await?;
 
@@ -133,6 +145,7 @@ async fn session(
 
 fn build_request(
     cwd: Option<PathBuf>,
+    env: Vec<String>,
     name: &str,
     args: &[String],
 ) -> Result<Request, ClientError> {
@@ -140,13 +153,66 @@ fn build_request(
         Some(cwd) => cwd,
         None => std::env::current_dir()?,
     };
+    let forward = std::env::var("NCAP_ENV_FORWARD").ok();
+    let env = build_env(&env, forward.as_deref(), |name| std::env::var(name).ok())?;
     Ok(Request {
         command: name.to_string(),
         args: args.to_vec(),
         cwd: cwd.to_string_lossy().into_owned(),
-        env: Vec::new(),
+        env,
         version: Some(CURRENT_VERSION.into()),
     })
+}
+
+/// Merge the request env: every name in `NCAP_ENV_FORWARD` (a JSON array of
+/// variable names) resolved from this process first, then the `--env` flags —
+/// later-wins by key, deduplicated, unset entries silently omitted. A forward
+/// list that is not a JSON array of names is an error.
+fn build_env(
+    cli: &[String],
+    forward: Option<&str>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, ClientError> {
+    let names: Vec<String> = match forward {
+        Some(raw) => {
+            serde_json::from_str(raw).map_err(|source| ClientError::ForwardEnv { source })?
+        }
+        None => Vec::new(),
+    };
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for name in &names {
+        if let Some(value) = lookup(name) {
+            apply_entry(&mut entries, name, value);
+        }
+    }
+    for flag in cli {
+        if let Some((key, value)) = resolve_flag(flag, &lookup) {
+            apply_entry(&mut entries, &key, value);
+        }
+    }
+    Ok(entries
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect())
+}
+
+/// One `--env` flag: `KEY=VALUE` carries an explicit value, bare `KEY` copies
+/// from this process when set. An empty key is silently omitted.
+fn resolve_flag(flag: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
+    match flag.split_once('=') {
+        Some(("", _)) => None,
+        Some((key, value)) => Some((key.to_string(), value.to_string())),
+        None => lookup(flag).map(|value| (flag.to_string(), value)),
+    }
+}
+
+/// Set `key` to `value`, replacing in place when the key already arrived —
+/// later-wins with the first occurrence's position kept.
+fn apply_entry(entries: &mut Vec<(String, String)>, key: &str, value: String) {
+    match entries.iter_mut().find(|(existing, _)| existing == key) {
+        Some((_, slot)) => *slot = value,
+        None => entries.push((key.to_string(), value)),
+    }
 }
 
 fn pump_stdin(tx: mpsc::Sender<Option<Vec<u8>>>) -> tokio::task::JoinHandle<()> {
@@ -209,4 +275,61 @@ async fn send(
         .send(frame)
         .await
         .map_err(|err| ClientError::Transport(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_env;
+    use test_case::test_case;
+
+    /// A lookup over literal pairs, standing in for the process environment.
+    fn lookup_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    fn owned(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test_case(&["K=V"], None, &[], &["K=V"] ; "explicit_key_value_passes_through")]
+    #[test_case(&["K"], None, &[("K", "host")], &["K=host"] ; "bare_key_copies_when_set")]
+    #[test_case(&["K"], None, &[], &[] ; "bare_key_omitted_when_unset")]
+    #[test_case(&["K="], None, &[], &["K="] ; "empty_value_is_explicit")]
+    #[test_case(&["K=a=b"], None, &[], &["K=a=b"] ; "value_may_carry_equals")]
+    #[test_case(&["=V"], None, &[], &[] ; "empty_key_is_omitted")]
+    #[test_case(&[], Some(r#"["K"]"#), &[("K", "host")], &["K=host"] ; "forwarded_name_resolves")]
+    #[test_case(&[], Some(r#"["K"]"#), &[], &[] ; "forwarded_unset_name_is_omitted")]
+    #[test_case(&[], Some("[]"), &[("K", "host")], &[] ; "empty_forward_list_yields_nothing")]
+    #[test_case(&[], None, &[("K", "host")], &[] ; "absent_forward_yields_nothing")]
+    #[test_case(&["K=cli"], Some(r#"["K"]"#), &[("K", "host")], &["K=cli"] ; "cli_flag_wins_over_forwarded")]
+    #[test_case(&["K=first", "K=second"], None, &[], &["K=second"] ; "later_flag_wins")]
+    #[test_case(
+        &["A=cli", "B=flag"],
+        Some(r#"["A", "B", "C"]"#),
+        &[("A", "host"), ("B", "host"), ("C", "host")],
+        &["A=cli", "B=flag", "C=host"] ; "merged_list_dedups_forwarded_first_cli_wins"
+    )]
+    fn build_env_resolves_omits_and_dedups(
+        cli: &[&str],
+        forward: Option<&str>,
+        host: &[(&str, &str)],
+        expected: &[&str],
+    ) {
+        let merged = build_env(&owned(cli), forward, lookup_of(host)).expect("merge succeeds");
+        assert_eq!(merged, owned(expected));
+    }
+
+    #[test_case("not json" ; "malformed_json")]
+    #[test_case(r#"{"a": 1}"# ; "object_is_not_an_array")]
+    #[test_case(r#"["K", 1]"# ; "non_string_entry")]
+    fn malformed_forward_is_an_error(forward: &str) {
+        let err =
+            build_env(&[], Some(forward), lookup_of(&[])).expect_err("malformed forward errors");
+        assert!(err.to_string().contains("NCAP_ENV_FORWARD"), "error={err}");
+    }
 }

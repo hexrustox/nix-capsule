@@ -14,6 +14,11 @@ struct Cli {
     #[arg(short, long, value_name = "PATH")]
     cwd: Option<PathBuf>,
 
+    /// Environment override: `KEY=VALUE`, or bare `KEY` copied from this
+    /// process when set
+    #[arg(short, long, value_name = "KEY[=VALUE]")]
+    env: Vec<String>,
+
     /// Command and its arguments
     #[arg(trailing_var_arg = true, required = true)]
     command: Vec<String>,
@@ -22,6 +27,11 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
-    let code = runtime.block_on(nix_capsule::client::run(&cli.socket, cli.cwd, cli.command));
+    let code = runtime.block_on(nix_capsule::client::run(
+        &cli.socket,
+        cli.cwd,
+        cli.env,
+        cli.command,
+    ));
     std::process::exit(code);
 }

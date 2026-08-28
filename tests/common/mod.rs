@@ -8,9 +8,10 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
-use nix_capsule::protocol::{FrameCodec, Message};
+use nix_capsule::protocol::{FrameCodec, Message, Request};
 use tempfile::TempDir;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::{Duration, sleep};
@@ -29,6 +30,7 @@ pub struct Server {
     socket: PathBuf,
     _dir: TempDir,
     handle: ServerProc,
+    captured: Arc<Mutex<Option<Request>>>,
 }
 
 impl Server {
@@ -53,6 +55,11 @@ impl Server {
     /// A Client pre-bound to this server's socket.
     pub fn client(&self) -> Client<'_> {
         Client::at(&self.socket)
+    }
+
+    /// The `Request` the scripted stand-in received; `None` for a real server.
+    pub fn captured_request(&self) -> Option<Request> {
+        self.captured.lock().expect("capture lock").clone()
     }
 
     /// A raw wire-protocol connection to this server, for tests that must speak
@@ -105,6 +112,7 @@ impl ServerBuilder {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         let socket = path.join("ncap.sock");
+        let captured = Arc::new(Mutex::new(None));
         let handle = match self.respond {
             None => {
                 let log_dir = self.log_dir.unwrap_or_else(|| path.join("logs"));
@@ -124,10 +132,15 @@ impl ServerBuilder {
             }
             Some(respond) => {
                 let listener = UnixListener::bind(&socket).expect("bind fake socket");
+                let store = Arc::clone(&captured);
                 let task = tokio::spawn(async move {
                     let (stream, _) = listener.accept().await.expect("accept");
                     let mut framed = Framed::new(stream, FrameCodec);
-                    let _request = framed.next().await; // the client's Request, ignored
+                    if let Some(Ok(frame)) = framed.next().await
+                        && let Ok(Message::Request(request)) = Message::from_frame(frame)
+                    {
+                        *store.lock().expect("capture lock") = Some(request);
+                    }
                     for m in respond {
                         framed
                             .send(m.into_frame().expect("frame"))
@@ -143,6 +156,7 @@ impl ServerBuilder {
             socket,
             _dir: dir,
             handle,
+            captured,
         }
     }
 }
@@ -153,6 +167,8 @@ pub struct Client<'a> {
     socket: &'a Path,
     cwd: Option<&'a Path>,
     stdin: Option<&'a [u8]>,
+    env_flags: Vec<&'a str>,
+    process_env: Vec<(&'a str, &'a str)>,
 }
 
 impl<'a> Client<'a> {
@@ -162,6 +178,8 @@ impl<'a> Client<'a> {
             socket,
             cwd: None,
             stdin: None,
+            env_flags: Vec::new(),
+            process_env: Vec::new(),
         }
     }
 
@@ -178,12 +196,31 @@ impl<'a> Client<'a> {
         self
     }
 
+    /// Set a variable in the client process's own environment — the view that
+    /// bare `--env` flags and `NCAP_ENV_FORWARD` resolve against.
+    pub fn env(mut self, name: &'a str, value: &'a str) -> Self {
+        self.process_env.push((name, value));
+        self
+    }
+
+    /// Pre-fill one `--env` flag, as a wrapper script would.
+    pub fn env_flag(mut self, spec: &'a str) -> Self {
+        self.env_flags.push(spec);
+        self
+    }
+
     /// Run the client binary end to end with `args` as the exec command.
     pub fn run(self, args: &[&str]) -> ClientOutput {
         let mut cmd = Command::new(bin_path("ncap"));
         cmd.arg("--socket").arg(self.socket);
         if let Some(c) = self.cwd {
             cmd.arg("--cwd").arg(c);
+        }
+        for spec in &self.env_flags {
+            cmd.arg("--env").arg(spec);
+        }
+        for (name, value) in &self.process_env {
+            cmd.env(name, value);
         }
         cmd.args(args);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
