@@ -31,7 +31,7 @@ The host binary `ncap`; sends one command per connection to the server and strea
 _Avoid_: frontend, runner
 
 **Server**:
-The binary `ncap-server`; PID 1 inside the container — sources the env dump at startup and serves the socket.
+The binary `ncap-server`; the container's init process (via `exec`) — sources the env dump at startup and serves the socket.
 _Avoid_: daemon, agent
 
 **Ctl**:

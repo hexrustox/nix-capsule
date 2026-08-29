@@ -18,7 +18,7 @@ A blocking reader thread pumps host stdin into `Stdin` frames. The client never 
 
 ## Signals
 
-The child lives in another PID namespace: host terminal signals never reach it directly. The protocol is the only path.
+The child is not attached to the host terminal: terminal signals never reach it directly. The protocol is the only path.
 
 - **Signal relay:** on SIGINT, SIGTERM, SIGQUIT, or SIGHUP the client sends `Signal { sig }` verbatim and keeps streaming until `Exit`. The child may trap and clean up after, or ignore it; that grace is the child's, not the client's.
 - Job-control signals (SIGTSTP, SIGCONT) are not relayed: with no TTY on either side, stopping the child while the client keeps streaming would leave a half-suspended session. Accepted limitation.

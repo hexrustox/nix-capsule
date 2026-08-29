@@ -8,7 +8,7 @@
 | --- | --- |
 | `init` | Entry point from the shellHook. Probe, hash-check, then start or re-eval + restart (flow below). |
 | `start` | Probe `<runtime> inspect`: running ⇒ done ("already running"). Not running ⇒ run the container detached, then await `State.Running`. |
-| `stop` | `<runtime> stop <name>` — SIGTERM to PID 1, graceful drain. Idempotent: not running ⇒ success. |
+| `stop` | `<runtime> stop <name>` — SIGTERM to the container's init process (the server), graceful drain. Idempotent: not running ⇒ success. |
 | `restart` | Non-fatal `stop`, then `init` (which re-ensures the cache before starting). |
 | `enter` | `<runtime> exec -it <name> <nix-bash> -c "source <cache>/env && exec <nix-bash>"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Container running? Socket connectable? Cache fresh/stale/missing? |
@@ -20,7 +20,7 @@
 ### `init` flow
 
 1. Read the stamp guard (below).
-2. Probe liveness: `<runtime> inspect` → `State.Running`. The server is PID 1, so a running container is a live server — no socket polling needed.
+2. Probe liveness: `<runtime> inspect` → `State.Running`. The server is the container's init process (post-`exec`), so a running container is a live server — no socket polling needed.
    - Running and hash fresh ⇒ done.
    - Running and hash stale ⇒ re-eval, restart.
    - Not running ⇒ ensure cache (eval if hash stale or missing), start.
@@ -34,7 +34,7 @@ The container invocation:
   -c "source <cache>/env && exec ncap-server --socket … --log-dir … --timeout …"
 ```
 
-Detached; the server becomes PID 1 via `exec`.
+Detached; `exec` makes the server the container's init process.
 
 Readiness: after launch, poll `inspect` until `State.Running` (deadline: `timeout`). Losing a concurrent-start race ("name in use"): re-inspect — running ⇒ success; dead ⇒ `rm` the container and start once more. Never reaching `Running` ⇒ fail loudly with the `inspect` state and the tail of the newest server log.
 

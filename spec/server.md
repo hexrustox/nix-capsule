@@ -1,6 +1,6 @@
 # nix-capsule — server (`ncap-server`)
 
-Runs inside the container as PID 1 — the launcher is `bash -c "source <cache>/env && exec ncap-server …"`, so the server inherits the container shell's environment from the sourced env dump and children resolve its tools through plain `PATH`.
+Runs inside the container as its init process — the launcher is `bash -c "source <cache>/env && exec ncap-server …"`, whose trailing `exec` makes the server the process the runtime tracks, so the server inherits the container shell's environment from the sourced env dump and children resolve its tools through plain `PATH`.
 
 ## Startup
 
@@ -32,5 +32,5 @@ Spawn failure with `ENOENT` ⇒ `Exit { code: 127 }`; with `EACCES` ⇒ `Exit { 
 ## Disconnect and shutdown
 
 - **Client disconnect before the terminal frame:** the child is not orphaned — SIGTERM its process group, reap it, keep serving other connections.
-- As PID 1 the server also owns reparented orphans: a `waitpid(-1)` reaping loop runs continuously so no zombies accumulate.
-- **SIGTERM/SIGINT** (e.g. `ncap-ctl stop` sends SIGTERM to PID 1): send `ServerStopping` to every live connection, SIGTERM every child's process group, drain all connections within `--timeout` seconds, remove the socket file, exit. Connections that miss the deadline are dropped when the container tears down as PID 1 exits.
+- A `waitpid(-1)` reaping loop runs continuously so no zombies accumulate; with a PID namespace, orphans reparent to the server as the namespace's init.
+- **SIGTERM/SIGINT** (e.g. `ncap-ctl stop` signals the container's init process): send `ServerStopping` to every live connection, SIGTERM every child's process group, drain all connections within `--timeout` seconds, remove the socket file, exit. Connections that miss the deadline are dropped when the container tears down as the server — the container's init process — exits.

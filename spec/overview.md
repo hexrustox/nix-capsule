@@ -26,7 +26,7 @@ The **project root** is the workspace directory nix-capsule operates on: the git
 ```
 ┌─ host ────────────────────────────────────┐   ┌─ container (ncap-<project>) ──────────┐
 │ $ nix develop .#                          │   │                                       │
-│ host devshell                             │   │  PID 1: ncap-server                   │
+│ host devshell                             │   │  init: ncap-server                    │
 │   ├─ ncap (client) ───── Request ─────────┼───┼─▶ unix socket (same-path mount)       │
 │   ├─ ncap-ctl (lifecycle)                 │   │   └─ spawns child with devshell env   │
 │   └─ cargo (wrapper → `ncap cargo …`)     │   │      (sourced from the env dump)      │

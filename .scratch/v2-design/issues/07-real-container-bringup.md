@@ -1,6 +1,6 @@
 # 07: Real container bring-up
 
-**What to build:** The full start invocation runs against a genuine rootless OCI runtime. The launch assembles the default mount set — host `/nix` read-only, socket dir at its identical path read-write, project root at its identical path read-write as the working directory, cache dir read-only (the container must never be able to poison files the host later sources), log dir read-write, `.git` read-only when it exists — then runs the image detached with nix-store bash sourcing the env dump and exec'ing `ncap-server` so it becomes PID 1.
+**What to build:** The full start invocation runs against a genuine rootless OCI runtime. The launch assembles the default mount set — host `/nix` read-only, socket dir at its identical path read-write, project root at its identical path read-write as the working directory, cache dir read-only (the container must never be able to poison files the host later sources), log dir read-write, `.git` read-only when it exists — then runs the image detached with nix-store bash sourcing the env dump and exec'ing `ncap-server` so it becomes the container's init process.
 
 The argument surface is locked by fake-runtime integration tests (same harness as ticket 06). What only a human can verify is the real thing end-to-end: CI has no rootless runtime, so this ticket carries a short manual checklist instead of automated proofs. Done means: enter the host devshell of a consuming flake and run wrapped tools that execute inside the container with the container shell's environment.
 
