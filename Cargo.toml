@@ -10,7 +10,7 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "signal"] }
 futures-util = { version = "0.3", features = ["sink"] }
 libc = "0.2.189"
 

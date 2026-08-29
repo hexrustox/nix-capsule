@@ -14,15 +14,14 @@ ncap completions <shell>
 
 ## stdin
 
-A blocking reader thread pumps host stdin into `Stdin` frames. The client never allocates a TTY and never puts the terminal in raw mode — Ctrl-C reaches the client's own signal handler, not the child.
+A blocking reader thread pumps host stdin into `Stdin` frames. EOF on host stdin is one empty `Stdin` frame — the socket's write half stays open so the signal relay keeps working; the frame is best-effort, since a child that finished first never needs it. The client never allocates a TTY and never puts the terminal in raw mode — Ctrl-C reaches the client's own signal handler, not the child.
 
 ## Signals
 
 The child is not attached to the host terminal: terminal signals never reach it directly. The protocol is the only path.
 
-- **Signal relay:** on SIGINT, SIGTERM, SIGQUIT, or SIGHUP the client sends `Signal { sig }` verbatim and keeps streaming until `Exit`. The child may trap and clean up after, or ignore it; that grace is the child's, not the client's.
-- Job-control signals (SIGTSTP, SIGCONT) are not relayed: with no TTY on either side, stopping the child while the client keeps streaming would leave a half-suspended session. Accepted limitation.
-- Killing the client outright (or closing the terminal) drops the connection; the server SIGTERMs the child's process group.
+- **Signal relay:** on SIGINT or SIGTERM the client sends `Signal { signal }` verbatim — one frame per event, repeated signals forwarded repeatedly — and keeps streaming until the terminal frame, then exits per the child's outcome. The child may trap and clean up after, or ignore it; that grace is the child's, not the client's. The client never interprets a signal.
+- Every other signal keeps its default disposition (accepted limitation): SIGQUIT, SIGHUP, and closing the terminal kill the client outright, dropping the connection so the server SIGTERMs the child's process group; job-control signals (SIGTSTP, SIGCONT) are not relayed — with no TTY on either side, stopping the child while the client keeps streaming would leave a half-suspended session.
 
 ## Exit codes
 

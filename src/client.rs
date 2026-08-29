@@ -6,12 +6,12 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
-use crate::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request};
+use crate::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
 
 /// Run `command` against the server listening on `socket`.
 ///
@@ -50,6 +50,12 @@ enum ClientError {
     },
     #[error("{0}")]
     Io(#[from] io::Error),
+    #[error("cannot install the `{signal}` handler: {source}")]
+    SignalHandler {
+        signal: &'static str,
+        #[source]
+        source: io::Error,
+    },
     #[error("`NCAP_ENV_FORWARD` is not a JSON array of variable names: {source}")]
     ForwardEnv {
         #[source]
@@ -87,6 +93,24 @@ async fn session(
     // frame loop; chunks reach the loop through the channel instead.
     let (stdin_tx, mut stdin_rx) = mpsc::channel(8);
     tokio::spawn(pump_stdin(stdin_tx));
+
+    // Relay SIGINT and SIGTERM only, one verbatim `Signal` frame per event:
+    // no raw mode (the ISIG line discipline delivers Ctrl-C here as a signal,
+    // never as stdin bytes), no interpretation. SIGQUIT, SIGHUP, SIGTSTP, and
+    // SIGCONT keep their default dispositions — killing the client drops the
+    // connection and the server TERMs the child's process group.
+    let mut sigint =
+        signal(SignalKind::interrupt()).map_err(|source| ClientError::SignalHandler {
+            signal: "SIGINT",
+            source,
+        })?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).map_err(|source| ClientError::SignalHandler {
+            signal: "SIGTERM",
+            source,
+        })?;
+    let mut sigint_open = true;
+    let mut sigterm_open = true;
 
     let mut version_seen = false;
     let mut stdin_open = true;
@@ -133,11 +157,28 @@ async fn session(
             chunk = stdin_rx.recv(), if stdin_open => match chunk {
                 Some(Some(bytes)) => send(&mut framed, Message::Stdin(bytes)).await?,
                 Some(None) | None => {
-                    // EOF on host stdin: closing our write half gives the
-                    // child EOF without hanging up the connection.
-                    framed.get_mut().shutdown().await?;
+                    // EOF on host stdin: one empty `Stdin` frame marks it,
+                    // keeping the write half open for a later signal frame.
+                    // A failed send means the child finished first and the
+                    // terminal frame is already in flight — not fatal; the
+                    // loop keeps streaming either way.
+                    let _ = send(&mut framed, Message::Stdin(Vec::new())).await;
                     stdin_open = false;
                 }
+            },
+            sig = sigint.recv(), if sigint_open => match sig {
+                Some(()) => {
+                    send(&mut framed, Message::Signal(SignalMsg { signal: libc::SIGINT as u8 }))
+                        .await?
+                }
+                None => sigint_open = false,
+            },
+            sig = sigterm.recv(), if sigterm_open => match sig {
+                Some(()) => {
+                    send(&mut framed, Message::Signal(SignalMsg { signal: libc::SIGTERM as u8 }))
+                        .await?
+                }
+                None => sigterm_open = false,
             },
         }
     }
@@ -221,6 +262,9 @@ fn pump_stdin(tx: mpsc::Sender<Option<Vec<u8>>>) -> tokio::task::JoinHandle<()> 
         let mut buf = vec![0u8; 8 * 1024];
         loop {
             match stdin.read(&mut buf) {
+                // A relayed signal interrupts the blocking read (EINTR);
+                // retry — the stream keeps going, the frame loop relays.
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     if tx.blocking_send(Some(buf[..n].to_vec())).is_err() {

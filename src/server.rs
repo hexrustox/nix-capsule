@@ -195,12 +195,19 @@ async fn bridge(
             frame = framed.next(), if client_writes_open => match frame {
                 Some(Ok(frame)) => match Message::from_frame(frame) {
                     Ok(Message::Stdin(bytes)) => {
-                        let pipe_failed = match stdin.as_mut() {
-                            Some(pipe) => pipe.write_all(&bytes).await.is_err(),
-                            None => false,
-                        };
-                        if pipe_failed {
+                        if bytes.is_empty() {
+                            // Empty `Stdin` frame is stdin EOF: dropping the
+                            // pipe gives the child EOF while the connection
+                            // stays open for `Signal` frames.
                             stdin = None;
+                        } else {
+                            let pipe_failed = match stdin.as_mut() {
+                                Some(pipe) => pipe.write_all(&bytes).await.is_err(),
+                                None => false,
+                            };
+                            if pipe_failed {
+                                stdin = None;
+                            }
                         }
                     }
                     Ok(Message::Signal(signal_msg)) => {

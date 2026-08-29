@@ -22,7 +22,7 @@ One connection = one child; connections are handled concurrently.
    - spawned in its own process group (`process_group(0)`, the child as its own group leader) — every signal below targets the group (`kill(-pgid, …)`), so grandchildren die with their progenitor,
    - all three stdio pipes. Never a TTY (accepted limitation).
 4. Bridge:
-   - `Stdin` frames → child stdin. Client write-half close ⇒ drop the pipe (child sees EOF).
+   - `Stdin` frames → child stdin; an empty frame is stdin EOF — drop the pipe (child sees EOF) and keep the connection open for `Signal` frames. A client write-half close means the same.
    - child stdout → `Stdout`, stderr → `Stderr`, read in chunks; each stream is FIFO, cross-stream order is not guaranteed.
    - `Signal` frames → the signal number is forwarded verbatim to `kill(-pgid, sig)`; kill failures (an already-exited group, an out-of-range number) produce one warning on the server's stderr and the connection continues to its normal terminal frame.
 5. Child exits ⇒ send `Exit { code | signal }` and close. Both fields null happens only if the exit status is somehow unknowable.

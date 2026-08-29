@@ -6,10 +6,12 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{FrameCodec, Message, Request};
@@ -17,6 +19,10 @@ use tempfile::TempDir;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::{Duration, sleep};
 use tokio_util::codec::Framed;
+
+/// Upper bound on one client-wait phase; a red run fails on the assertion,
+/// never on the harness itself.
+const WAIT_LIMIT: Duration = Duration::from_secs(30);
 
 /// What a running [`Server`] holds: a real binary child or a scripted task.
 enum ServerProc {
@@ -227,8 +233,10 @@ impl<'a> Client<'a> {
         self
     }
 
-    /// Run the client binary end to end with `args` as the exec command.
-    pub fn run(self, args: &[&str]) -> ClientOutput {
+    /// Spawn the client binary end to end with `args` as the exec command
+    /// without waiting, for tests that must deliver a signal mid-run; await
+    /// the outcome with [`ClientProc::wait`].
+    pub fn spawn(self, args: &[&str]) -> ClientProc {
         let mut cmd = Command::new(bin_path("ncap"));
         cmd.arg("--socket").arg(self.socket);
         if let Some(c) = self.cwd {
@@ -253,11 +261,69 @@ impl<'a> Client<'a> {
             handle.write_all(input).expect("write stdin");
             drop(handle);
         }
-        let out = child.wait_with_output().expect("client output");
+        ClientProc { child }
+    }
+
+    /// Run the client binary end to end with `args` as the exec command.
+    pub fn run(self, args: &[&str]) -> ClientOutput {
+        self.spawn(args).wait()
+    }
+}
+
+/// A running client process, spawned so a test can deliver a signal mid-run.
+pub struct ClientProc {
+    child: Child,
+}
+
+impl ClientProc {
+    /// The client process's id, for `/proc` inspection or direct signaling.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Deliver one signal to the client process itself — not its process
+    /// group, so a container child never receives it directly.
+    pub fn signal(&self, sig: i32) {
+        let sent = unsafe { libc::kill(self.child.id() as libc::pid_t, sig) };
+        assert_eq!(sent, 0, "kill({sig}) to client {}", self.child.id());
+    }
+
+    /// Wait for the client to exit and collect its output. Bounded: a client
+    /// that never exits is killed and the test fails with a named panic.
+    pub fn wait(mut self) -> ClientOutput {
+        // Drain the pipes on a helper thread: a client blocked writing to a
+        // full pipe could never exit for the bounded poll below.
+        let stdout_pipe = self.child.stdout.take();
+        let stderr_pipe = self.child.stderr.take();
+        let drained = thread::spawn(move || {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = pipe.read_to_end(&mut stdout);
+            }
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = pipe.read_to_end(&mut stderr);
+            }
+            (stdout, stderr)
+        });
+
+        let deadline = Instant::now() + WAIT_LIMIT;
+        let status = loop {
+            match self.child.try_wait().expect("poll client") {
+                Some(status) => break status,
+                None if Instant::now() >= deadline => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    panic!("client did not exit within {WAIT_LIMIT:?}");
+                }
+                None => thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        let (stdout, stderr) = drained.join().expect("drain client pipes");
         ClientOutput {
-            status: out.status,
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            status,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         }
     }
 }

@@ -1,14 +1,17 @@
-//! Integration tests for process groups and signal delivery (ticket 04a):
-//! raw wire frames spoken directly to the real `ncap-server`.
+//! Integration tests for process groups and signal delivery: ticket 04a
+//! speaks raw wire frames to the real `ncap-server`; ticket 04c spawns the
+//! real `ncap` client, delivers host signals to it mid-run, and awaits.
 
 #[path = "common/mod.rs"]
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
+use test_case::test_case;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
@@ -300,4 +303,116 @@ async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame
         stderr.contains("kill(-") && stderr.contains("200"),
         "the EINVAL kill must warn on the server's stderr: {stderr:?}"
     );
+}
+
+// ---------------------------------------------------- client relay (ticket 04c)
+
+/// Poll until `name` exists in the server's tempdir — the child's cwd — or
+/// panic; children write flag files as observable progress markers.
+fn wait_for_flag(server: &Server, name: &str) {
+    let flag = server.path().join(name);
+    let deadline = Instant::now() + PHASE_LIMIT;
+    while !flag.exists() {
+        assert!(Instant::now() < deadline, "{name} never appeared");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sigint_to_the_client_runs_a_trapping_childs_cleanup_and_exits_with_its_code() {
+    let server = Server::builder().start().await;
+    let client = server.client().cwd(server.path()).spawn(&[
+        "sh",
+        "-c",
+        "trap 'echo CLEANUP; exit 0' INT; touch ready.flag; sleep 30",
+    ]);
+    wait_for_flag(&server, "ready.flag");
+    client.signal(libc::SIGINT);
+    let out = client.wait();
+    server.stop();
+
+    assert_eq!(out.status.code(), Some(0), "stderr={}", out.stderr);
+    assert!(out.stdout.contains("CLEANUP"), "stdout={}", out.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sigint_with_a_non_trapping_child_dies_by_signal_and_the_client_exits_130() {
+    let server = Server::builder().start().await;
+    let client =
+        server
+            .client()
+            .cwd(server.path())
+            .spawn(&["sh", "-c", "touch ready.flag; sleep 30"]);
+    wait_for_flag(&server, "ready.flag");
+    client.signal(libc::SIGINT);
+    let out = client.wait();
+    server.stop();
+
+    assert_eq!(out.status.code(), Some(130), "stderr={}", out.stderr);
+}
+
+#[test_case(true, 0 ; "trapping_child_exits_with_its_own_code")]
+#[test_case(false, 143 ; "non_trapping_child_dies_by_signal")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sigterm_is_relayed_like_sigint(traps: bool, expected: i32) {
+    let server = Server::builder().start().await;
+    let script = if traps {
+        "trap 'echo TERM-CLEANUP; exit 0' TERM; touch ready.flag; sleep 30"
+    } else {
+        "touch ready.flag; sleep 30"
+    };
+    let client = server
+        .client()
+        .cwd(server.path())
+        .spawn(&["sh", "-c", script]);
+    wait_for_flag(&server, "ready.flag");
+    client.signal(libc::SIGTERM);
+    let out = client.wait();
+    server.stop();
+
+    assert_eq!(out.status.code(), Some(expected), "stderr={}", out.stderr);
+    if traps {
+        assert!(out.stdout.contains("TERM-CLEANUP"), "stdout={}", out.stdout);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_sigints_forward_one_frame_each() {
+    let server = Server::builder().start().await;
+    let client = server.client().cwd(server.path()).spawn(&[
+        "sh",
+        "-c",
+        "trap 'c=$((c+1)); echo COUNT=$c; touch count-$c.flag' INT; touch ready.flag; while :; do sleep 0.2; done",
+    ]);
+    wait_for_flag(&server, "ready.flag");
+    client.signal(libc::SIGINT);
+    wait_for_flag(&server, "count-1.flag");
+    client.signal(libc::SIGINT);
+    wait_for_flag(&server, "count-2.flag");
+    // End the run: the child has no TERM trap, so it dies by signal.
+    client.signal(libc::SIGTERM);
+    let out = client.wait();
+    server.stop();
+
+    assert_eq!(out.status.code(), Some(143), "stderr={}", out.stderr);
+    assert!(out.stdout.contains("COUNT=1"), "stdout={}", out.stdout);
+    assert!(out.stdout.contains("COUNT=2"), "stdout={}", out.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_produced_after_the_signal_still_streams_before_the_terminal_frame() {
+    let server = Server::builder().start().await;
+    let client = server.client().cwd(server.path()).spawn(&[
+        "sh",
+        "-c",
+        "trap 'echo AFTER-1; sleep 1; echo AFTER-2; exit 0' INT; touch ready.flag; sleep 30",
+    ]);
+    wait_for_flag(&server, "ready.flag");
+    client.signal(libc::SIGINT);
+    let out = client.wait();
+    server.stop();
+
+    assert_eq!(out.status.code(), Some(0), "stderr={}", out.stderr);
+    assert!(out.stdout.contains("AFTER-1"), "stdout={}", out.stdout);
+    assert!(out.stdout.contains("AFTER-2"), "stdout={}", out.stdout);
 }

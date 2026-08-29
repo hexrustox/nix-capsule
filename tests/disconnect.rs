@@ -306,6 +306,39 @@ async fn write_half_only_close_is_stdin_eof_and_lets_the_child_finish() {
     assert!(stdout.contains("done"), "stdout={stdout:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_stdin_frame_is_stdin_eof_and_keeps_the_connection_open() {
+    let server = Server::builder().start().await;
+    let mut framed = server.raw().await;
+    send_request(&mut framed, server.path(), "cat; echo done").await;
+    for payload in [b"hello\n".to_vec(), Vec::new()] {
+        framed
+            .send(Message::Stdin(payload).into_frame().expect("encode stdin"))
+            .await
+            .expect("send stdin");
+    }
+    // No write-half close here: the empty frame alone must deliver the EOF,
+    // leaving the connection open for later `Signal` frames (ticket 04c).
+
+    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
+        matches!(message, Message::Exit(_) | Message::Error(_))
+    })
+    .await;
+    server.stop();
+
+    assert_eq!(
+        terminal_of(&frames),
+        Some(&Message::Exit(Exit {
+            code: Some(0),
+            signal: None,
+        })),
+        "the empty Stdin frame must deliver stdin EOF: frames={frames:?}"
+    );
+    let stdout = stdout_of(&frames);
+    assert!(stdout.contains("hello"), "stdout={stdout:?}");
+    assert!(stdout.contains("done"), "stdout={stdout:?}");
+}
+
 // --------------------------------------------------- TERM-trapping survivors
 
 #[tokio::test(flavor = "multi_thread")]
