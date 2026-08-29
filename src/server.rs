@@ -152,12 +152,22 @@ async fn handle_conn(stream: UnixStream) {
         };
         send(&mut framed, Message::Exit(exit)).await;
     } else {
-        let _ = child.start_kill();
+        // The connection ended before the terminal frame — the only notice
+        // is the failed send that ended the bridge (an undecodable frame
+        // lands here too). TERM the group and then await the child, however
+        // long it takes: the grace after the TERM is the child's, not the
+        // server's, so there is no KILL escalation.
+        //
+        // Accepted limitation: a silent child — no output, stdin already
+        // EOF'd — of a vanished client runs to completion; nothing
+        // observable triggers detection.
+        let _ = signal_group(pgid, libc::SIGTERM as u8);
+        let _ = child.wait().await;
     }
 }
 
 /// Pump both directions until the child's pipes close (returns true) or the
-/// connection dies (returns false, caller kills the child).
+/// connection dies (returns false, caller TERMs the group and reaps).
 async fn bridge(
     framed: &mut Framed<UnixStream, FrameCodec>,
     child: &mut tokio::process::Child,

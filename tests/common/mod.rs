@@ -69,6 +69,15 @@ impl Server {
         fs::read_to_string(self.path.join("server-stderr.log")).unwrap_or_default()
     }
 
+    /// The real server's process id, for `/proc` inspection; `None` for a
+    /// scripted stand-in.
+    pub fn pid(&self) -> Option<u32> {
+        match &self.handle {
+            ServerProc::Real(child) => Some(child.id()),
+            ServerProc::Fake(_) => None,
+        }
+    }
+
     /// A raw wire-protocol connection to this server, for tests that must speak
     /// the frames themselves rather than via the client binary.
     pub async fn raw(&self) -> Framed<UnixStream, FrameCodec> {
