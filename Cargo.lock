@@ -279,6 +279,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "libc",
  "proptest",
  "serde",
  "serde_json",

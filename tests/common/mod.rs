@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -62,6 +63,12 @@ impl Server {
         self.captured.lock().expect("capture lock").clone()
     }
 
+    /// Everything the real server has written to stderr so far; empty for a
+    /// scripted stand-in.
+    pub fn stderr(&self) -> String {
+        fs::read_to_string(self.path.join("server-stderr.log")).unwrap_or_default()
+    }
+
     /// A raw wire-protocol connection to this server, for tests that must speak
     /// the frames themselves rather than via the client binary.
     pub async fn raw(&self) -> Framed<UnixStream, FrameCodec> {
@@ -116,6 +123,8 @@ impl ServerBuilder {
         let handle = match self.respond {
             None => {
                 let log_dir = self.log_dir.unwrap_or_else(|| path.join("logs"));
+                let stderr_log = fs::File::create(path.join("server-stderr.log"))
+                    .expect("create server stderr capture");
                 let child = Command::new(bin_path("ncap-server"))
                     .arg("--socket")
                     .arg(&socket)
@@ -124,7 +133,7 @@ impl ServerBuilder {
                     .arg("--timeout")
                     .arg(Self::TIMEOUT_SECS)
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stderr(stderr_log)
                     .spawn()
                     .expect("spawn ncap-server");
                 wait_for_socket(&socket).await;

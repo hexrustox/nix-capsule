@@ -1,4 +1,4 @@
-//! Server (`ncap-server`): the per-project daemon inside the container. It
+//! Server (`ncap-server`): the per-project server inside the container. It
 //! serves one child per connection, streaming the child's stdio back to the
 //! client over the project socket.
 
@@ -89,7 +89,11 @@ async fn handle_conn(stream: UnixStream) {
             }
         }
     }
+    // The child leads a fresh process group, so signal delivery below can
+    // reach its whole group via `kill(-pgid, …)` and grandchildren die with
+    // their progenitor.
     command
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -128,8 +132,9 @@ async fn handle_conn(stream: UnixStream) {
             return;
         }
     };
+    let pgid = child.id().expect("freshly spawned child has a pid");
 
-    if bridge(&mut framed, &mut child).await {
+    if bridge(&mut framed, &mut child, pgid).await {
         let status = match child.wait().await {
             Ok(status) => status,
             Err(err) => {
@@ -156,6 +161,7 @@ async fn handle_conn(stream: UnixStream) {
 async fn bridge(
     framed: &mut Framed<UnixStream, FrameCodec>,
     child: &mut tokio::process::Child,
+    pgid: u32,
 ) -> bool {
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("child stdout is piped");
@@ -187,7 +193,15 @@ async fn bridge(
                             stdin = None;
                         }
                     }
-                    Ok(_) => {} // Signal forwarding lands with ticket 04
+                    Ok(Message::Signal(signal_msg)) => {
+                        // A failed kill (already-exited group, out-of-range
+                        // number) is one warning line, never an Error frame —
+                        // the connection continues to its normal terminal.
+                        if let Err(err) = signal_group(pgid, signal_msg.signal) {
+                            eprintln!("ncap-server: kill(-{pgid}, {}): {err}", signal_msg.signal);
+                        }
+                    }
+                    Ok(_) => {}
                     Err(err) => {
                         send_error(framed, &err.to_string()).await;
                         return false;
@@ -205,6 +219,19 @@ async fn bridge(
                 }
             },
         }
+    }
+}
+
+/// Forward one signal number to the child's process group, verbatim — the
+/// server is a relay, not a policy: whatever number arrives goes out as it
+/// is. `Err` carries the `kill` failure (ESRCH for an already-exited group,
+/// EINVAL for an out-of-range number).
+fn signal_group(pgid: u32, signal: u8) -> std::io::Result<()> {
+    let failed = unsafe { libc::kill(-(pgid as libc::pid_t), signal as libc::c_int) } != 0;
+    if failed {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -249,4 +276,25 @@ async fn send(framed: &mut Framed<UnixStream, FrameCodec>, message: Message) -> 
         Err(_) => return false,
     };
     framed.send(frame).await.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::CommandExt;
+
+    use super::*;
+
+    #[test]
+    fn signal_to_a_reaped_group_maps_esrch() {
+        let mut child = std::process::Command::new("true")
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pgid = child.id();
+        assert!(child.wait().expect("wait").success());
+
+        let err = signal_group(pgid, 15).expect_err("a reaped group cannot be signalled");
+
+        assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "err={err}");
+    }
 }

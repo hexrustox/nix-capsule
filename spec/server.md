@@ -19,12 +19,12 @@ One connection = one child; connections are handled concurrently.
    - `command` + `args` from the request,
    - `cwd` from the request — must be a valid path inside the container; the same-path mount contract makes host cwds work, anything else fails with `Error`,
    - request env applied over the inherited devshell env (`Command::envs`),
-   - spawned in its own process group (`setsid`) — every signal below targets the group (`kill(-pgid, …)`), so grandchildren die with their progenitor,
+   - spawned in its own process group (`process_group(0)`, the child as its own group leader) — every signal below targets the group (`kill(-pgid, …)`), so grandchildren die with their progenitor,
    - all three stdio pipes. Never a TTY (accepted limitation).
 4. Bridge:
    - `Stdin` frames → child stdin. Client write-half close ⇒ drop the pipe (child sees EOF).
    - child stdout → `Stdout`, stderr → `Stderr`, read in chunks; each stream is FIFO, cross-stream order is not guaranteed.
-   - `Signal` frames → `kill(-pgid, sig)`. Out-of-range signal numbers and signals for an already-exited child are ignored with a warning log.
+   - `Signal` frames → the signal number is forwarded verbatim to `kill(-pgid, sig)`; kill failures (an already-exited group, an out-of-range number) produce one warning on the server's stderr and the connection continues to its normal terminal frame.
 5. Child exits ⇒ send `Exit { code | signal }` and close. Both fields null happens only if the exit status is somehow unknowable.
 
 Spawn failure with `ENOENT` ⇒ `Exit { code: 127 }`; with `EACCES` ⇒ `Exit { code: 126 }` — terminal frame only, no `Error` (the client synthesizes the message). Any other spawn failure, invalid `Request`, or decode failure ⇒ `Error { message }` and close.
