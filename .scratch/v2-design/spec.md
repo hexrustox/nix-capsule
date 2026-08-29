@@ -25,27 +25,26 @@ Full design lives in `spec/` at the repo root: `overview.md`, `nix.md`, `protoco
 4. As a developer, I want stdout/stderr streamed back live, so that long builds show progress as it happens.
 5. As a developer, I want stdin forwarded, so that I can pipe data into container commands.
 6. As a developer, I want Ctrl-C to interrupt the running child inside the container, so that interrupting feels local.
-7. As a developer, I want a second Ctrl-C to force-kill the child, so that I'm never stuck waiting on an unresponsive tool.
-8. As a developer, I want a command's child to die when its client dies, so that the container doesn't fill up with orphans.
-9. As a developer, I want exit codes preserved, so that scripts and Makefiles chained after wrapped tools behave correctly.
-10. As a developer, I want a signal death reported as `128+signal`, so that shell conventions hold.
-11. As a direnv user, I want a standard `.envrc` (`watch_file` + `use flake .`) to keep working with no extra direnv tooling, so that my setup stays boring.
-12. As a direnv user, I want unchanged-flake reloads to cost a hash check rather than a Nix evaluation, so that `cd`-ing around my repo stays instant.
-13. As a developer editing the flake, I want the container environment refreshed on the next shell entry or reload, so that toolchain changes take effect without manual cleanup.
-14. As a developer with two checkouts of the same repo, I want per-checkout sockets/containers/caches, so that projects don't collide.
-15. As a developer hitting a name collision, I want a clear error telling me to set `project`, so that I can diagnose it in seconds.
-16. As a developer, I want ad-hoc host env vars (e.g. `CARGO_HOME`) forwarded per invocation, so that shell configuration reaches container tools without a restart.
-17. As a flake author, I want to choose exactly which env vars forward, so that host state doesn't leak wholesale into the container.
-18. As a flake author, I want `extraOptions` for extra mounts and env passes, so that caches and credentials can be shared with the container.
-19. As a security-minded flake author, I want opt-in hardening flags, so that I can trade capability for confinement.
-20. As a developer, I want `ncap-ctl status`/`log`/`enter`, so that I can debug what's happening inside the container.
-21. As a developer, I want stale socket files recovered automatically at start, so that a crashed container doesn't wedge shell entry.
-22. As a developer, I want `ncap-ctl clean` to wipe all project state for the project, so that I can start fresh.
-23. As a docker user, I want to select the OCI runtime, so that I'm not forced to install podman.
-24. As an editor user, I want my wrapped LSP to stream bidirectionally over one long-lived connection, so that editor integration works over the socket.
-25. As a multi-user machine user, I want the socket in a per-user `0700` runtime dir, so that other users can't reach my container.
-26. As a developer, I want no Nix evaluation inside the container, so that container start is fast and independent of the Nix daemon.
-27. As a developer without direnv, I want plain `nix develop` to set up and refresh the container, so that direnv is optional.
+7. As a developer, I want a command's child to die when its client dies, so that the container doesn't fill up with orphans.
+8. As a developer, I want exit codes preserved, so that scripts and Makefiles chained after wrapped tools behave correctly.
+9. As a developer, I want a signal death reported as `128+signal`, so that shell conventions hold.
+10. As a direnv user, I want a standard `.envrc` (`watch_file` + `use flake .`) to keep working with no extra direnv tooling, so that my setup stays boring.
+11. As a direnv user, I want unchanged-flake reloads to cost a hash check rather than a Nix evaluation, so that `cd`-ing around my repo stays instant.
+12. As a developer editing the flake, I want the container environment refreshed on the next shell entry or reload, so that toolchain changes take effect without manual cleanup.
+13. As a developer with two checkouts of the same repo, I want per-checkout sockets/containers/caches, so that projects don't collide.
+14. As a developer hitting a name collision, I want a clear error telling me to set `project`, so that I can diagnose it in seconds.
+15. As a developer, I want ad-hoc host env vars (e.g. `CARGO_HOME`) forwarded per invocation, so that shell configuration reaches container tools without a restart.
+16. As a flake author, I want to choose exactly which env vars forward, so that host state doesn't leak wholesale into the container.
+17. As a flake author, I want `extraOptions` for extra mounts and env passes, so that caches and credentials can be shared with the container.
+18. As a security-minded flake author, I want opt-in hardening flags, so that I can trade capability for confinement.
+19. As a developer, I want `ncap-ctl status`/`log`/`enter`, so that I can debug what's happening inside the container.
+20. As a developer, I want stale socket files recovered automatically at start, so that a crashed container doesn't wedge shell entry.
+21. As a developer, I want `ncap-ctl clean` to wipe all project state for the project, so that I can start fresh.
+22. As a docker user, I want to select the OCI runtime, so that I'm not forced to install podman.
+23. As an editor user, I want my wrapped LSP to stream bidirectionally over one long-lived connection, so that editor integration works over the socket.
+24. As a multi-user machine user, I want the socket in a per-user `0700` runtime dir, so that other users can't reach my container.
+25. As a developer, I want no Nix evaluation inside the container, so that container start is fast and independent of the Nix daemon.
+26. As a developer without direnv, I want plain `nix develop` to set up and refresh the container, so that direnv is optional.
 
 ## Implementation Decisions
 
@@ -60,8 +59,8 @@ Full design lives in `spec/` at the repo root: `overview.md`, `nix.md`, `protoco
 - **Wrappers:** `"name"` shorthand or attrset `{ name, command ? name, env ? [], cwd ? null }`; the attrset mirrors client CLI flags one-to-one and grows with them. Generated as `writeShellScriptBin` PATH shims.
 - **Protocol:** 5-byte framing (tag + u32 BE length), JSON struct payloads, raw-byte stdio frames. Frames: `Request 0x01`, `Stdin 0x02`, `Stdout 0x03`, `Stderr 0x04`, `Exit 0x05`, `Error 0x06`, `ServerStopping 0x07`, `Version 0x08` (tag pinned for backward compatibility), `Signal 0x09` (new). One connection per command. Frames cap at 16 MiB; spawn `ENOENT`/`EACCES` return as terminal `Exit` 127/126 with the message synthesized client-side. `Exit` carries `{code | signal}` explicitly — no information loss; the client still reports shell conventions (child code, `128+signal`).
 - **Version handshake stays advisory** (warning only): client and server ship from the same package.
-- **Signals:** client traps SIGINT/SIGTERM and forwards them as `Signal` frames (the child is in another PID namespace — the protocol is the only path); children spawn in their own process group, so signals and disconnect cleanup target the group. First signal = graceful (child may trap/cleanup, client streams until `Exit`). Any second signal before `Exit` = send SIGKILL, ~2 s grace, then client exits 130. Client disconnect without terminal frame ⇒ server SIGTERMs the process group and reaps it (no orphans; the server also reaps reparented zombies as PID 1). No detach mode.
-- **Exit codes:** child code (u8) / `128+signal` / `127`/`126` exec failure / `1` protocol or transport error or unknowable `Exit` / `143` on `ServerStopping` (client bails instantly) or close-without-terminal / `130` after escalation.
+- **Signals:** client traps SIGINT/SIGTERM/SIGQUIT/SIGHUP and forwards them verbatim as `Signal` frames (the child is in another PID namespace — the protocol is the only path); the client is a relay, never a policy — no escalation to SIGKILL, so a signal-ignoring child is only stopped by the client dying (disconnect ⇒ server SIGTERMs the group). Job-control signals are not relayed (accepted limitation). Children spawn in their own process group, so signals and disconnect cleanup target the group. Client disconnect without terminal frame ⇒ server SIGTERMs the process group and reaps it (no orphans; the server also reaps reparented zombies as PID 1). No detach mode.
+- **Exit codes:** child code (u8) / `128+signal` / `127`/`126` exec failure / `1` protocol or transport error or unknowable `Exit` / `143` on `ServerStopping` (client bails instantly) or close-without-terminal.
 - **Liveness:** probes use `<runtime> inspect` `State.Running` — the server is PID 1, so a running container is a live server. Stale socket files are removed before bind; the server refuses to bind over a live socket.
 - **Lifecycle:** `init start stop restart enter status log clean completions show-options`. `restart` = non-fatal stop + init. `enter` remains a direct `exec -it` bypass (the one deliberate TTY exception). `clean` wipes project-keyed cache, state, and runtime dirs. Runtime adapter: podman (default) / docker / explicit path, rootless assumed, Go-template inspect probes. Mounts: `/nix` ro, socket dir rw, `<project root>` rw same-path + workdir, cache ro (poisoning mitigation), log dir rw, `.git` ro when present, every `watchFiles` entry ro when present and `harden = true` (more-specific bind over the rw root; prevents container → host watched-file rewrite); `extraOptions` appended with `$VAR` expansion.
 - **Platform:** Linux only; darwin removed from advertised systems.
@@ -71,7 +70,7 @@ Full design lives in `spec/` at the repo root: `overview.md`, `nix.md`, `protoco
 
 - Good tests assert external behavior only: what crosses the socket, what lands on stdout/stderr, what exit code the client reports. Never internal task structure.
 - The seam is the **wire protocol** — the highest existing seam, shared by client and server. Integration tests spawn real server and client binaries (tempdir sockets, `CARGO_BIN_EXE_*` env lookups); codec unit tests cover framing round-trips at the same seam's edge.
-- Behaviors the suite must exercise: request → exec → streamed stdio; stdin EOF; `Signal` forwarding and escalation; disconnect ⇒ child reaping; `Exit{code|signal}` mapping; stale-vs-live socket probing; freshness hash and name derivation/stamp guard as pure unit tests.
+- Behaviors the suite must exercise: request → exec → streamed stdio; stdin EOF; signal relay forwarding; disconnect ⇒ child reaping; `Exit{code|signal}` mapping; stale-vs-live socket probing; freshness hash and name derivation/stamp guard as pure unit tests.
 - Lifecycle against a real podman/docker is manual-only (no rootless runtime in CI).
 - Detailed test planning is otherwise out of scope for this session.
 

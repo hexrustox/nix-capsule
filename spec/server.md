@@ -24,7 +24,7 @@ One connection = one child; connections are handled concurrently.
 4. Bridge:
    - `Stdin` frames → child stdin. Client write-half close ⇒ drop the pipe (child sees EOF).
    - child stdout → `Stdout`, stderr → `Stderr`, read in chunks; each stream is FIFO, cross-stream order is not guaranteed.
-   - `Signal` frames → `kill(-pgid, sig)`. Out-of-range signal numbers, signals for an already-exited child, and signals arriving after escalation to SIGKILL are ignored with a warning log.
+   - `Signal` frames → `kill(-pgid, sig)`. Out-of-range signal numbers and signals for an already-exited child are ignored with a warning log.
 5. Child exits ⇒ send `Exit { code | signal }` and close. Both fields null happens only if the exit status is somehow unknowable.
 
 Spawn failure with `ENOENT` ⇒ `Exit { code: 127 }`; with `EACCES` ⇒ `Exit { code: 126 }` — terminal frame only, no `Error` (the client synthesizes the message). Any other spawn failure, invalid `Request`, or decode failure ⇒ `Error { message }` and close.

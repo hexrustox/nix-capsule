@@ -88,6 +88,10 @@ One client connection executes exactly one command and spawns one Child; there a
 The process the Server spawns per request, placed in its own process group so every descendant dies with it.
 _Avoid_: job, task, worker
 
+**Signal relay**:
+The rule that the Client forwards every accepted host signal verbatim as a `Signal` frame and the Server delivers it to the Child's process group; neither side interprets or escalates.
+_Avoid_: escalation, signal policy
+
 **Terminal frame**:
 The single frame — `Exit` or `Error` — that ends every connection; nothing arrives after it.
 _Avoid_: final frame, exit message

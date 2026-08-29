@@ -20,8 +20,8 @@ A blocking reader thread pumps host stdin into `Stdin` frames. The client never 
 
 The child lives in another PID namespace: host terminal signals never reach it directly. The protocol is the only path.
 
-- **First SIGINT or SIGTERM** (Ctrl-C in the terminal): send `Signal { sig }`, keep streaming until `Exit` — a graceful interrupt the child may trap and clean up after.
-- **Any second signal before `Exit`:** send `Signal { 9 }` (SIGKILL), wait ~2 s for `Exit`, then give up and exit 130 regardless.
+- **Signal relay:** on SIGINT, SIGTERM, SIGQUIT, or SIGHUP the client sends `Signal { sig }` verbatim and keeps streaming until `Exit`. The child may trap and clean up after, or ignore it; that grace is the child's, not the client's.
+- Job-control signals (SIGTSTP, SIGCONT) are not relayed: with no TTY on either side, stopping the child while the client keeps streaming would leave a half-suspended session. Accepted limitation.
 - Killing the client outright (or closing the terminal) drops the connection; the server SIGTERMs the child's process group.
 
 ## Exit codes
@@ -34,7 +34,6 @@ The child lives in another PID namespace: host terminal signals never reach it d
 | `Exit { null, null }` (status unknowable) | warning on stderr, then `1` |
 | Terminal frame is `Error`, or transport/decode failure | `1` |
 | `ServerStopping` received — the client bails immediately and stops streaming — or socket closed without a terminal frame | `143` (128+SIGTERM) |
-| Escalation: SIGKILL sent, no `Exit` within the grace period | `130` (128+SIGINT) |
 
 ## Wrappers
 
