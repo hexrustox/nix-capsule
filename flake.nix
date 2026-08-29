@@ -19,6 +19,7 @@
       ];
 
       devShell = {
+        image = "ubuntu:latest";
         socketPath = "/tmp/nix-capsule/ncap-socket";
         containerName = "nix-capsule";
         extraOptions = [
