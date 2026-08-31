@@ -9,15 +9,29 @@ nix-capsule runs a Nix devshell inside an OCI container while you keep using you
 
 ```mermaid
 flowchart LR
-    H["Host shell<br/>nix develop"]
-    W["Command wrapper<br/>cargo, rust-analyzer, ..."]
-    C["ncap client"]
-    S["Project Unix socket"]
-    R["ncap-server<br/>inside OCI container"]
-    T["Command in<br/>container shell"]
+    subgraph HOST["Host"]
+        H["Host shell<br/>nix develop"]
+        W["Command wrapper<br/>cargo, rust-analyzer, ..."]
+        C["ncap client"]
+        HS["Unix socket<br/>host mount"]
+        CTL["ncap-ctl"]
+        RT["OCI runtime<br/>Podman/Docker"]
 
-    H --> W --> C --> S --> R --> T
-    T -->|stdout, stderr, exit status| R --> S --> C --> H
+        H --> W --> C --> HS
+        CTL --> RT
+    end
+
+    subgraph CONTAINER["Container"]
+        CS["Unix socket<br/>container mount"]
+        S["ncap-server"]
+        T["Command<br/>container shell"]
+
+        CS --> S --> T
+        T -->|stdout, stderr, exit status| S
+    end
+
+    HS <-->|"same socket path"| CS
+    RT -->|starts| CONTAINER
 ```
 
 ## Why It Exists
