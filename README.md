@@ -17,7 +17,9 @@ flowchart LR
         CTL["ncap-ctl"]
         RT["OCI runtime<br/>Podman/Docker"]
 
-        H --> W --> C --> HS
+        H --> W --> C
+        C -->|"Request + stdin"| HS
+        HS -->|"stdout, stderr, exit code"| C
         CTL --> RT
     end
 
@@ -27,7 +29,8 @@ flowchart LR
         T["Command<br/>container shell"]
 
         CS --> S --> T
-        T -->|stdout, stderr, exit status| S
+        T -->|"stdout, stderr"| S
+        S -->|"exit code"| CS
     end
 
     HS <-->|"same socket path"| CS
