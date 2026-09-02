@@ -1,64 +1,37 @@
 # nix-capsule
 
-> [!WARNING]
-> **Work in progress.** The v2 implementation and lifecycle tooling are still under development and are not ready for production use.
+[![Release](https://github.com/hexrustox/nix-capsule/actions/workflows/release.yml/badge.svg)](https://github.com/hexrustox/nix-capsule/actions/workflows/release.yml)
 
-nix-capsule runs a Nix devshell inside an OCI container while you keep using your host shell. Host-side command wrappers send work to the container, and command I/O is streamed back to your terminal.
+Run a project's building tools inside a sealed-off box on your computer — while you keep using your normal terminal, exactly as you always have.
 
-## Quick Visual Explanation
+## What is this?
+
+Some software projects come with their own toolbox: special programs that build, test, and check the code. nix-capsule keeps that toolbox locked inside a container — a sealed-off compartment on your computer — so the tools can do their job without touching anything outside the project.
+
+From your side, nothing changes. You open a terminal, type a command, press Enter. nix-capsule quietly passes the work to the sealed box, and the result appears right back in your terminal, as if it happened on your own machine.
+
+## The problem it solves
+
+| Without nix-capsule | With nix-capsule |
+| --- | --- |
+| Project tools run loose on your computer and can touch your files and settings | Tools stay sealed inside the box and only see the project |
+| Working safely means moving into the box yourself and leaving your usual setup behind | You stay in your usual terminal and setup — the work goes to the box |
+| "Is my setup up to date?" checks are slow and heavy | Checks are quick — the toolbox is confirmed fresh without slow rebuilds |
+
+## See it in one picture
 
 ```mermaid
 flowchart LR
-    subgraph HOST["Host"]
-        H["Host shell<br/>nix develop"]
-        W["Command wrapper<br/>cargo, rust-analyzer, ..."]
-        C["ncap client"]
-        HS["Unix socket<br/>host mount"]
-        CTL["ncap-ctl"]
-        RT["OCI runtime<br/>Podman/Docker"]
-
-        H --> W --> C
-        C -->|"Request + stdin"| HS
-        HS -->|"stdout, stderr, exit code"| C
-        CTL --> RT
-    end
-
-    subgraph CONTAINER["Container"]
-        CS["Unix socket<br/>container mount"]
-        S["ncap-server"]
-        T["Command<br/>container shell"]
-
-        CS --> S --> T
-        T -->|"stdout, stderr"| S
-        S -->|"exit code"| CS
-    end
-
-    HS <-->|"same socket path"| CS
-    RT -->|starts| CONTAINER
+    U(["You"]) -- "type a command" --> T["Your terminal<br/>exactly as you know it"]
+    T -- "nix-capsule passes the work along" --> B["Sealed box<br/>where the tools really run"]
+    B -- "results come back" --> T
+    T --> U
 ```
 
-## Why It Exists
+## What makes it different
 
-`nix develop` provides a convenient shell and good editor integration, but its tools run directly on the host. Running every command manually with `docker` or `podman` provides isolation, but loses the normal host-shell workflow.
-
-nix-capsule aims to combine both approaches: keep the host shell, editor, and direnv workflow while executing development tools inside an OCI container.
-
-## How It Works
-
-nix-capsule splits the devshell into two sides:
-
-- **Host shell:** a lightweight shell containing `ncap`, `ncap-ctl`, and generated command wrappers.
-- **Container shell:** the real toolchain, evaluated on the host and loaded into the container through a cached environment dump.
-
-Each command uses one connection over a per-project Unix socket. `ncap-server` runs inside the container, starts the requested child process, and relays stdin, stdout, stderr, exit status, and selected signals. The project root is mounted at the same absolute path on both sides, so host working directories remain valid in the container.
-
-Current design limitations include no TTY/PTY support and Linux-only operation.
-
-## Current Status
-
-The current v2 work includes:
-
-- Binary protocol framing and typed messages
-- `ncap` client command execution
-- `ncap-server` child-process and stream handling
-- Process-group signal relay and disconnect cleanup
+- **No new habits.** Keep your terminal, your editor, and your workflow — nix-capsule works behind the scenes.
+- **Nothing sneaks out.** Tools in the box can work on the project, but can't wander into the rest of your computer.
+- **Always fresh.** A quick check confirms the toolbox is up to date before use — no waiting for slow rebuilds.
+- **Feels native.** Stopping a command with Ctrl-C, error codes in scripts — everything behaves like you'd expect.
+- **Safety rails included.** Sensitive files are read-only where it matters, and extra locks are available when you want them.
