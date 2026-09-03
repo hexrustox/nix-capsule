@@ -6,6 +6,8 @@
 }:
 let
   flake-parts = inputs.flake-parts;
+  # Support both `nix-capsule` input name and `self` (when this repo is the capsule).
+  capsuleInput = inputs.nix-capsule or inputs.self or (throw "template.nix: expected `inputs.nix-capsule` or `inputs.self`");
 in
 flake-parts.lib.mkFlake { inherit inputs; } {
   perSystem =
@@ -17,10 +19,10 @@ flake-parts.lib.mkFlake { inherit inputs; } {
       pkgs = import inputs.nixpkgs {
         inherit system;
         overlays = extraOverlays inputs ++ [
-          inputs.nix-capsule.overlays.default
+          capsuleInput.overlays.default
         ];
       };
-      capsule-lib = inputs.nix-capsule.lib { inherit pkgs; };
+      capsule-lib = capsuleInput.lib { inherit pkgs; };
     in
     {
       apps.default = capsule-lib.app;
