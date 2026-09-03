@@ -361,8 +361,7 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
 
     if cfg.harden {
         args.push("--cap-drop=all".to_owned());
-        args.push("--security-opt".to_owned());
-        args.push("no-new-privileges".to_owned());
+        args.push("--security-opt=no-new-privileges".to_owned());
     }
 
     args.push("-v".to_owned());
@@ -460,4 +459,234 @@ fn expand_one(input: &str) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctl::config::{Cmd, Config};
+    use std::path::PathBuf;
+
+    fn cfg_with(
+        root: &std::path::Path,
+        socket: &std::path::Path,
+        cache: &std::path::Path,
+        logs: &std::path::Path,
+        watch_files: Vec<String>,
+        run_opts: Vec<String>,
+        harden: bool,
+    ) -> Config {
+        Config {
+            cmd: Cmd::Start,
+            root: Some(root.to_path_buf()),
+            project: Some("proj".into()),
+            container: "ncap-test".into(),
+            socket: Some(socket.to_path_buf()),
+            cache_dir: Some(cache.to_path_buf()),
+            log_dir: Some(logs.to_path_buf()),
+            runtime: "podman".into(),
+            timeout: 2,
+            watch_files,
+            run_opts,
+            harden,
+            image: Some("alpine:latest".into()),
+            server: Some(PathBuf::from("/nix/store/fake/bin/ncap-server")),
+            nix: None,
+            bash: Some(PathBuf::from("/nix/store/fake/bin/bash")),
+            devshell: None,
+        }
+    }
+
+    #[test]
+    fn expand_dollar_var() {
+        unsafe { std::env::set_var("NCAP_TEST_EXPAND_A", "hello") };
+        let out = expand_one("prefix-$NCAP_TEST_EXPAND_A-suffix").expect("expand");
+        assert_eq!(out, "prefix-hello-suffix");
+        unsafe { std::env::remove_var("NCAP_TEST_EXPAND_A") };
+    }
+
+    #[test]
+    fn expand_braced_var() {
+        unsafe { std::env::set_var("NCAP_TEST_EXPAND_B", "world") };
+        let out = expand_one("a-${NCAP_TEST_EXPAND_B}-b").expect("expand");
+        assert_eq!(out, "a-world-b");
+        unsafe { std::env::remove_var("NCAP_TEST_EXPAND_B") };
+    }
+
+    #[test]
+    fn expand_multiple_vars_in_one_arg() {
+        unsafe { std::env::set_var("NCAP_TEST_CARGO", "/tmp/cargo") };
+        let out = expand_one("$NCAP_TEST_CARGO:$NCAP_TEST_CARGO").expect("expand");
+        assert_eq!(out, "/tmp/cargo:/tmp/cargo");
+        let out2 = expand_one("${NCAP_TEST_CARGO}:${NCAP_TEST_CARGO}").expect("expand");
+        assert_eq!(out2, "/tmp/cargo:/tmp/cargo");
+        unsafe { std::env::remove_var("NCAP_TEST_CARGO") };
+    }
+
+    #[test]
+    fn expand_literal_passthrough() {
+        let out = expand_one("literal-no-dollar").expect("expand");
+        assert_eq!(out, "literal-no-dollar");
+        let out2 = expand_one("price $ 5").expect("expand");
+        assert_eq!(out2, "price $ 5");
+        let out3 = expand_one("a-$5b").expect("expand");
+        assert_eq!(out3, "a-$5b");
+    }
+
+    #[test]
+    fn expand_unset_is_error_naming_var() {
+        unsafe { std::env::remove_var("NCAP_TEST_UNSET_XYZ") };
+        let err = expand_one("x-$NCAP_TEST_UNSET_XYZ-y").expect_err("must error");
+        assert!(err.contains("NCAP_TEST_UNSET_XYZ"), "err={err}");
+        let err2 = expand_one("x-${NCAP_TEST_UNSET_XYZ}-y").expect_err("must error");
+        assert!(err2.contains("NCAP_TEST_UNSET_XYZ"), "err={err2}");
+    }
+
+    #[test]
+    fn expand_unset_dollar_braced_is_error() {
+        unsafe { std::env::remove_var("NCAP_TEST_UNSET2") };
+        let err = expand_one("${NCAP_TEST_UNSET2}").expect_err("must error");
+        assert!(err.contains("NCAP_TEST_UNSET2"), "err={err}");
+    }
+
+    #[test]
+    fn expand_empty_value_is_empty_not_error() {
+        unsafe { std::env::set_var("NCAP_TEST_EMPTY", "") };
+        let out = expand_one("a-$NCAP_TEST_EMPTY-b").expect("expand");
+        assert_eq!(out, "a--b");
+        let out2 = expand_one("a-${NCAP_TEST_EMPTY}-b").expect("expand");
+        assert_eq!(out2, "a--b");
+        unsafe { std::env::remove_var("NCAP_TEST_EMPTY") };
+    }
+
+    #[test]
+    fn expand_with_space_value_has_no_word_splitting() {
+        unsafe { std::env::set_var("NCAP_TEST_SPACE", "/tmp/foo bar") };
+        let out = expand_one("-v $NCAP_TEST_SPACE:/mnt").expect("expand");
+        assert_eq!(out, "-v /tmp/foo bar:/mnt");
+        // Ensure the result is a single string, not split.
+        assert_eq!(out.split(' ').count(), 3); // "-v", "/tmp/foo", "bar:/mnt" would be 3 words but we keep as one arg; we check the whole string
+        assert!(out.contains("/tmp/foo bar:/mnt"));
+        unsafe { std::env::remove_var("NCAP_TEST_SPACE") };
+    }
+
+    #[test]
+    fn build_args_defaults_before_extra_and_harden_flags_prepended() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).expect("root");
+        let cache = tmp.path().join("cache");
+        let logs = tmp.path().join("logs");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let sock = tmp.path().join("sock/ncap.sock");
+        unsafe { std::env::set_var("NCAP_TEST_EXTRA", "extra-val") };
+        let cfg = cfg_with(
+            &root,
+            &sock,
+            &cache,
+            &logs,
+            vec![],
+            vec!["--extra=$NCAP_TEST_EXTRA".into()],
+            false,
+        );
+        let args = build_runtime_args(&cfg).expect("args");
+        // Find positions: defaults like /nix must come before extra
+        let nix_pos = args.iter().position(|a| a == "/nix:/nix:ro").expect("nix");
+        let extra_pos = args.iter().position(|a| a == "--extra=extra-val").expect("extra");
+        assert!(nix_pos < extra_pos, "defaults before extra: {args:?}");
+        // No harden flags when off
+        assert!(!args.contains(&"--cap-drop=all".to_string()));
+        assert!(!args.contains(&"--security-opt=no-new-privileges".to_string()));
+        unsafe { std::env::remove_var("NCAP_TEST_EXTRA") };
+    }
+
+    #[test]
+    fn build_args_harden_adds_flags_and_present_watch_mounts_skips_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).expect("root");
+        let cache = tmp.path().join("cache");
+        let logs = tmp.path().join("logs");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let sock = tmp.path().join("sock/ncap.sock");
+        // Create one watch file, leave another missing
+        std::fs::write(root.join("flake.nix"), b"x").expect("flake");
+        // do not create "missing.nix"
+        let cfg = cfg_with(
+            &root,
+            &sock,
+            &cache,
+            &logs,
+            vec!["flake.nix".into(), "missing.nix".into()],
+            vec![],
+            true,
+        );
+        let args = build_runtime_args(&cfg).expect("args");
+        assert!(args.contains(&"--cap-drop=all".to_string()), "harden flags: {args:?}");
+        assert!(
+            args.contains(&"--security-opt=no-new-privileges".to_string()),
+            "harden flags: {args:?}"
+        );
+        let expected_mount = format!("{}:{}:ro", root.join("flake.nix").display(), root.join("flake.nix").display());
+        assert!(args.contains(&expected_mount), "present watch mount: {args:?}");
+        let missing_mount = format!("{}:{}:ro", root.join("missing.nix").display(), root.join("missing.nix").display());
+        assert!(!args.contains(&missing_mount), "missing must be skipped: {args:?}");
+        // Watch mounts must come after the project root mount (more-specific wins)
+        let root_mount = format!("{}:{}", root.display(), root.display());
+        let root_pos = args.iter().position(|a| a == &root_mount).expect("root mount");
+        let watch_pos = args.iter().position(|a| a == &expected_mount).expect("watch mount");
+        assert!(root_pos < watch_pos, "watch mount after root: {args:?}");
+    }
+
+    #[test]
+    fn build_args_harden_off_emits_no_extra_mounts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("flake.nix"), b"x").expect("flake");
+        let cache = tmp.path().join("cache");
+        let logs = tmp.path().join("logs");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let sock = tmp.path().join("sock/ncap.sock");
+        let cfg = cfg_with(
+            &root,
+            &sock,
+            &cache,
+            &logs,
+            vec!["flake.nix".into()],
+            vec![],
+            false,
+        );
+        let args = build_runtime_args(&cfg).expect("args");
+        assert!(!args.contains(&"--cap-drop=all".to_string()));
+        let watch_mount = format!("{}:{}:ro", root.join("flake.nix").display(), root.join("flake.nix").display());
+        assert!(!args.contains(&watch_mount), "harden off must not mount watch file: {args:?}");
+    }
+
+    #[test]
+    fn build_args_unset_extra_is_error_before_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).expect("root");
+        let cache = tmp.path().join("cache");
+        let logs = tmp.path().join("logs");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let sock = tmp.path().join("sock/ncap.sock");
+        unsafe { std::env::remove_var("NCAP_TEST_UNSET_EXTRA") };
+        let cfg = cfg_with(
+            &root,
+            &sock,
+            &cache,
+            &logs,
+            vec![],
+            vec!["$NCAP_TEST_UNSET_EXTRA".into()],
+            false,
+        );
+        let err = build_runtime_args(&cfg).expect_err("must error on unset");
+        assert!(err.contains("NCAP_TEST_UNSET_EXTRA"), "err={err}");
+    }
 }

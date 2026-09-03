@@ -1423,3 +1423,194 @@ esac
         "defaults must come before extraOptions: {lines:?}"
     );
 }
+
+#[test]
+fn harden_adds_security_flags_and_ro_mounts_for_present_watch_files_skips_missing() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    std::fs::create_dir_all(&root).expect("root");
+    std::fs::write(root.join("flake.nix"), b"flake").expect("watch file");
+    // missing.nix is absent
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    std::fs::create_dir_all(&state).expect("state");
+    std::fs::create_dir_all(&cache).expect("cache");
+    std::fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    std::fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    std::fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    std::fs::create_dir_all(&logs).expect("logs");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    std::fs::write(state.join("running"), "false").expect("running");
+
+    let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    env.insert("NCAP_HARDEN".into(), "1".into());
+    env.insert(
+        "NCAP_WATCH_FILES".into(),
+        r#"["flake.nix", "missing.nix"]"#.into(),
+    );
+    let out = run_ctl(&env, &["start"]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let log = std::fs::read_to_string(&runtime_log).expect("log");
+    let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
+    assert!(
+        run_line.contains("--cap-drop=all"),
+        "missing --cap-drop: {run_line}"
+    );
+    assert!(
+        run_line.contains("--security-opt=no-new-privileges"),
+        "missing --security-opt: {run_line}"
+    );
+    let expected = format!("-v {}/flake.nix:{}/flake.nix:ro", root.display(), root.display());
+    assert!(run_line.contains(&expected), "missing ro watch mount: {run_line}");
+    let missing = format!("-v {}/missing.nix", root.display());
+    assert!(!run_line.contains(&missing), "missing entry must be skipped: {run_line}");
+    // More-specific mount after root
+    let root_mount = format!("-v {}:{}", root.display(), root.display());
+    assert!(
+        run_line.find(&root_mount).unwrap() < run_line.find(&expected).unwrap(),
+        "watch mount after root: {run_line}"
+    );
+}
+
+#[test]
+fn harden_off_emits_no_flags_nor_extra_mounts() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    std::fs::create_dir_all(&root).expect("root");
+    std::fs::write(root.join("flake.nix"), b"flake").expect("watch file");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    std::fs::create_dir_all(&state).expect("state");
+    std::fs::create_dir_all(&cache).expect("cache");
+    std::fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    std::fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    std::fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    std::fs::create_dir_all(&logs).expect("logs");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    std::fs::write(state.join("running"), "false").expect("running");
+
+    let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // No NCAP_HARDEN set (default off)
+    env.insert("NCAP_WATCH_FILES".into(), r#"["flake.nix"]"#.into());
+    let out = run_ctl(&env, &["start"]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let log = std::fs::read_to_string(&runtime_log).expect("log");
+    let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
+    assert!(!run_line.contains("--cap-drop"), "harden off must not emit cap-drop: {run_line}");
+    assert!(!run_line.contains("no-new-privileges"), "harden off must not emit security-opt: {run_line}");
+    let watch_mount = format!("-v {}/flake.nix:{}/flake.nix:ro", root.display(), root.display());
+    assert!(!run_line.contains(&watch_mount), "harden off must not mount watch file: {run_line}");
+}
+
+#[test]
+fn extra_options_braced_expansion_and_literal_passthrough() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    std::fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    std::fs::create_dir_all(&state).expect("state");
+    std::fs::create_dir_all(&cache).expect("cache");
+    std::fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    std::fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    std::fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    std::fs::create_dir_all(&logs).expect("logs");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+printf "%s\n" "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    std::fs::write(state.join("running"), "false").expect("running");
+
+    let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    env.insert("NCAP_TEST_BRACED".into(), "braced-val".into());
+    env.insert(
+        "NCAP_RUN_OPTS".into(),
+        r#"["--braced=${NCAP_TEST_BRACED}", "literal-no-expand", "-v $NCAP_TEST_BRACED:/mnt"]"#.into(),
+    );
+    let mut cmd = Command::new(bin_path("ncap-ctl"));
+    cmd.arg("start");
+    for var in NCAP_VARS {
+        cmd.env_remove(var);
+    }
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+        if !env.contains_key(var) {
+            cmd.env_remove(var);
+        }
+    }
+    cmd.env("NCAP_TEST_BRACED", "braced-val");
+    let out = cmd.output().expect("spawn");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let log = std::fs::read_to_string(&runtime_log).expect("log");
+    assert!(log.contains("--braced=braced-val"), "braced expansion: {log}");
+    assert!(log.contains("literal-no-expand"), "literal passthrough: {log}");
+    assert!(log.contains("-v braced-val:/mnt"), "dollar expansion: {log}");
+}
