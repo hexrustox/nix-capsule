@@ -1036,3 +1036,390 @@ esac
     assert_eq!(mode, 0o700, "runtime dir must be 0700");
     let _ = (cache, logs);
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 07: exact default mount set and launch command shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn start_assembles_exact_default_mount_set_and_launch_command() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::create_dir_all(&cache).expect("cache");
+    fs::create_dir_all(logs.clone()).expect("logs");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect)
+    TEMPLATE="$3"
+    if [[ "$TEMPLATE" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi
+    exit 0
+    ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    fs::write(state.join("running"), "false").expect("running");
+
+    // Ensure .git does NOT exist for this base case
+    assert!(!root.join(".git").exists());
+
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    let out = run_ctl(&env, &["start"]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let log = fs::read_to_string(&runtime_log).expect("runtime log");
+    // Find the run invocation line
+    let run_line = log
+        .lines()
+        .find(|line| line.contains("run "))
+        .expect("must have run line");
+    let socket_dir = sock.parent().unwrap().to_string_lossy();
+
+    // Exact default mount set
+    assert!(
+        run_line.contains("-v /nix:/nix:ro"),
+        "missing /nix ro mount: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("-v {}:{}", socket_dir, socket_dir)),
+        "missing socket dir mount: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("-v {}:{}", root.display(), root.display())),
+        "missing project root mount: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("-w {}", root.display())),
+        "missing workdir: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("-v {}:{}:ro", cache.display(), cache.display())),
+        "missing cache ro mount: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("-v {}:{}", logs.display(), logs.display())),
+        "missing log rw mount: {run_line}"
+    );
+    // .git must be absent
+    assert!(
+        !run_line.contains(".git"),
+        "unexpected .git mount without git dir: {run_line}"
+    );
+    // Launch command shape: source dump && exec server with flags
+    let expected_source = format!("source {}/env", cache.display());
+    assert!(
+        run_line.contains(&expected_source),
+        "missing source dump: {run_line}"
+    );
+    assert!(
+        run_line.contains("&& exec /nix/store/fake/bin/ncap-server"),
+        "missing exec server: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("--socket {}", sock.display())),
+        "missing --socket flag: {run_line}"
+    );
+    assert!(
+        run_line.contains(&format!("--log-dir {}", logs.display())),
+        "missing --log-dir flag: {run_line}"
+    );
+    assert!(
+        run_line.contains("--timeout 2"),
+        "missing --timeout flag: {run_line}"
+    );
+    // Ensure detached and image/bash shape
+    assert!(run_line.contains("run -d"), "missing run -d: {run_line}");
+    assert!(
+        run_line.contains("-- alpine:latest"),
+        "missing image separator: {run_line}"
+    );
+    assert!(
+        run_line.contains("/nix/store/fake/bin/bash -c"),
+        "missing bash -c: {run_line}"
+    );
+}
+
+#[test]
+fn git_mount_present_readonly_when_git_dir_exists() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    fs::create_dir_all(root.join(".git")).expect("git dir");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::create_dir_all(&cache).expect("cache");
+    fs::create_dir_all(logs.clone()).expect("logs");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    fs::write(state.join("running"), "false").expect("running");
+
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    let out = run_ctl(&env, &["start"]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let log = fs::read_to_string(&runtime_log).expect("log");
+    let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
+    let expected = format!("-v {}/.git:{}/.git:ro", root.display(), root.display());
+    assert!(
+        run_line.contains(&expected),
+        "missing .git ro mount: {run_line}"
+    );
+}
+
+#[test]
+fn git_mount_absent_without_error_outside_git_repo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj-nogit");
+    fs::create_dir_all(&root).expect("root");
+    // No .git
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::create_dir_all(&cache).expect("cache");
+    fs::create_dir_all(logs.clone()).expect("logs");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    fs::write(state.join("running"), "false").expect("running");
+
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    let out = run_ctl(&env, &["start"]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let log = fs::read_to_string(&runtime_log).expect("log");
+    let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
+    assert!(
+        !run_line.contains(".git"),
+        "unexpected .git mount outside repo: {run_line}"
+    );
+}
+
+#[test]
+fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::create_dir_all(&cache).expect("cache");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    fs::create_dir_all(&logs).expect("logs");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    fs::write(state.join("running"), "false").expect("running");
+
+    let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Reference an unset variable via $VAR
+    env.insert(
+        "NCAP_RUN_OPTS".into(),
+        r#"["-v $UNSET_NCAP_XYZ:/mnt"]"#.into(),
+    );
+    // Ensure the variable is not set in the child's env
+    let mut cmd = Command::new(bin_path("ncap-ctl"));
+    cmd.arg("start");
+    for var in NCAP_VARS {
+        cmd.env_remove(var);
+    }
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+        if !env.contains_key(var) {
+            cmd.env_remove(var);
+        }
+    }
+    cmd.env_remove("UNSET_NCAP_XYZ");
+    let out = cmd.output().expect("spawn");
+    assert!(!out.status.success(), "must fail on unset var");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("UNSET_NCAP_XYZ"),
+        "must name unset var: {stderr}"
+    );
+    let log = fs::read_to_string(&runtime_log).unwrap_or_default();
+    assert!(
+        !log.contains("run "),
+        "must not have run the container before error: {log}"
+    );
+}
+
+#[test]
+fn extra_options_expansion_sets_var_is_passed_and_no_word_splitting() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::create_dir_all(&cache).expect("cache");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    fs::create_dir_all(&logs).expect("logs");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    // Use a stub that logs each arg on its own line to check word-splitting
+    let stub = format!(
+        r#"#!/bin/bash
+LOG="{}"
+STATE_DIR="{}"
+printf "%s\n" "$@" >> "$LOG"
+case "$1" in
+  inspect) if [[ "$3" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi; exit 0 ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+    fs::write(state.join("running"), "false").expect("running");
+
+    let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // $TEST_EXPAND should expand to "/tmp/foo bar" containing a space; no word splitting means it stays one arg
+    env.insert("TEST_EXPAND".into(), "/tmp/foo bar".into());
+    env.insert(
+        "NCAP_RUN_OPTS".into(),
+        r#"["-v $TEST_EXPAND:/mnt"]"#.into(),
+    );
+    let mut cmd = Command::new(bin_path("ncap-ctl"));
+    cmd.arg("start");
+    for var in NCAP_VARS {
+        cmd.env_remove(var);
+    }
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+        if !env.contains_key(var) {
+            cmd.env_remove(var);
+        }
+    }
+    // Ensure TEST_EXPAND is set for the child
+    cmd.env("TEST_EXPAND", "/tmp/foo bar");
+    let out = cmd.output().expect("spawn");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let log = fs::read_to_string(&runtime_log).expect("log");
+    // The expanded arg must appear as a single line "-v /tmp/foo bar:/mnt" not split
+    assert!(
+        log.contains("-v /tmp/foo bar:/mnt"),
+        "expanded arg must be present without word splitting: {log}"
+    );
+    // Ensure defaults still come before the extra option
+    let lines: Vec<String> = log.lines().map(|s| s.to_string()).collect();
+    let nix_idx = lines.iter().position(|l| l == "/nix:/nix:ro").expect("nix mount");
+    let extra_idx = lines
+        .iter()
+        .position(|l| l == "-v /tmp/foo bar:/mnt")
+        .expect("extra mount");
+    assert!(
+        nix_idx < extra_idx,
+        "defaults must come before extraOptions: {lines:?}"
+    );
+}

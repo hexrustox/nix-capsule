@@ -52,17 +52,24 @@ impl Runtime {
         }
     }
 
-    /// `run -d --name <name> -- <image> <bash> -c <cmd>` — detached. Returns
-    /// the container id on success, or the combined stderr/stdout on failure.
+    /// `run -d --name <name> <mounts and options> -- <image> <bash> -c <cmd>` —
+    /// detached. `extra_args` are the mounts and options assembled by the ctl
+    /// (defaults first, `extraOptions` appended after, `harden` prepended).
+    /// Returns the container id on success, or the combined stderr/stdout on
+    /// failure.
     pub async fn run_detached(
         &self,
         name: &str,
         image: &str,
         bash: &Path,
         exec_cmd: &str,
+        extra_args: &[String],
     ) -> Result<String, String> {
-        let output = Command::new(&self.bin)
-            .args(["run", "-d", "--name", name, "--", image])
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["run", "-d", "--name", name]);
+        cmd.args(extra_args);
+        cmd.args(["--", image]);
+        let output = cmd
             .arg(bash)
             .args(["-c", exec_cmd])
             .output()

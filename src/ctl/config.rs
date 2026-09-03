@@ -43,6 +43,8 @@ pub struct Config {
     pub runtime: String,
     pub timeout: u64,
     pub watch_files: Vec<String>,
+    pub run_opts: Vec<String>,
+    pub harden: bool,
     pub image: Option<String>,
     pub server: Option<PathBuf>,
     pub nix: Option<PathBuf>,
@@ -116,6 +118,26 @@ fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>) -> Result<u64, Error> 
     }
 }
 
+fn parse_run_opts(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, Error> {
+    match lookup_non_empty(lookup, "NCAP_RUN_OPTS") {
+        None => Ok(Vec::new()),
+        Some(raw) => serde_json::from_str(&raw).map_err(|source| Error::NotJsonArray {
+            var: "NCAP_RUN_OPTS",
+            source,
+        }),
+    }
+}
+
+fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    match lookup_non_empty(lookup, "NCAP_HARDEN") {
+        Some(raw) => {
+            let lower = raw.to_ascii_lowercase();
+            lower == "1" || lower == "true" || lower == "yes"
+        }
+        None => false,
+    }
+}
+
 fn resolve_project(
     lookup: &dyn Fn(&str) -> Option<String>,
     cmd: Cmd,
@@ -186,6 +208,8 @@ pub fn resolve(
                 paths::log_dir(&project, xdg.as_deref(), home.as_deref())?
             };
             let watch_files = parse_watch_files(lookup)?;
+            let run_opts = parse_run_opts(lookup)?;
+            let harden = parse_harden(lookup);
             let devshell = demand(lookup, cmd, "NCAP_DEVSHELL")?;
             let nix = demand(lookup, cmd, "NCAP_NIX")?;
             let image = demand(lookup, cmd, "NCAP_IMAGE")?;
@@ -202,6 +226,8 @@ pub fn resolve(
                 runtime,
                 timeout,
                 watch_files,
+                run_opts,
+                harden,
                 image: Some(image),
                 server: Some(PathBuf::from(server)),
                 nix: Some(PathBuf::from(nix)),
@@ -238,6 +264,9 @@ pub fn resolve(
                 let home = lookup_non_empty(lookup, "HOME");
                 paths::log_dir(&project, xdg.as_deref(), home.as_deref())?
             };
+            let watch_files = parse_watch_files(lookup)?;
+            let run_opts = parse_run_opts(lookup)?;
+            let harden = parse_harden(lookup);
             let image = demand(lookup, cmd, "NCAP_IMAGE")?;
             let server = demand(lookup, cmd, "NCAP_SERVER")?;
             let bash = demand(lookup, cmd, "NCAP_BASH")?;
@@ -251,7 +280,9 @@ pub fn resolve(
                 log_dir: Some(log_dir),
                 runtime,
                 timeout,
-                watch_files: Vec::new(),
+                watch_files,
+                run_opts,
+                harden,
                 image: Some(image),
                 server: Some(PathBuf::from(server)),
                 nix: None,
@@ -282,6 +313,8 @@ pub fn resolve(
                 runtime,
                 timeout,
                 watch_files: Vec::new(),
+                run_opts: Vec::new(),
+                harden: false,
                 image: None,
                 server: None,
                 nix: None,
@@ -360,6 +393,8 @@ pub fn resolve(
                 root_opt
             };
 
+            let run_opts = parse_run_opts(lookup)?;
+            let harden = parse_harden(lookup);
             Ok(Config {
                 cmd,
                 root,
@@ -371,6 +406,8 @@ pub fn resolve(
                 runtime,
                 timeout,
                 watch_files,
+                run_opts,
+                harden,
                 image: None,
                 server: None,
                 nix: None,

@@ -255,9 +255,15 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
         cfg.timeout
     );
 
+    // Assemble mount set and options. Expansion errors are fatal before the
+    // runtime is ever invoked, naming the unset variable.
+    let mount_args = build_runtime_args(cfg)?;
+
     let rt = runtime::Runtime::new(cfg.runtime.clone());
 
-    let run_result = rt.run_detached(&cfg.container, image, bash, &exec_cmd).await;
+    let run_result = rt
+        .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
+        .await;
 
     let run_ok = match run_result {
         Ok(_) => true,
@@ -269,7 +275,10 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
             }
             // Dead container with the same name — remove and retry once.
             let _ = rt.remove(&cfg.container).await;
-            match rt.run_detached(&cfg.container, image, bash, &exec_cmd).await {
+            match rt
+                .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
+                .await
+            {
                 Ok(_) => true,
                 Err(stderr) => return Err(format!("{} run failed: {stderr}", rt.bin())),
             }
@@ -331,4 +340,124 @@ fn parse_log_epoch(name: &str) -> Option<u64> {
     let rest = name.strip_prefix("ncap-server-")?;
     let epoch = rest.strip_suffix(".log")?;
     epoch.parse().ok()
+}
+
+fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
+    let root = cfg.root.as_deref().expect("build mounts demands root");
+    let socket = cfg.socket.as_deref().expect("build mounts demands socket");
+    let cache_dir = cfg
+        .cache_dir
+        .as_deref()
+        .expect("build mounts demands cache_dir");
+    let log_dir = cfg.log_dir.as_deref().expect("build mounts demands log_dir");
+    let socket_dir = socket.parent().ok_or_else(|| {
+        format!(
+            "socket path `{}` has no parent directory",
+            socket.display()
+        )
+    })?;
+
+    let mut args = Vec::new();
+
+    if cfg.harden {
+        args.push("--cap-drop=all".to_owned());
+        args.push("--security-opt".to_owned());
+        args.push("no-new-privileges".to_owned());
+    }
+
+    args.push("-v".to_owned());
+    args.push("/nix:/nix:ro".to_owned());
+    args.push("-v".to_owned());
+    args.push(format!("{}:{}", socket_dir.display(), socket_dir.display()));
+    args.push("-v".to_owned());
+    args.push(format!("{}:{}", root.display(), root.display()));
+    args.push("-w".to_owned());
+    args.push(root.display().to_string());
+    args.push("-v".to_owned());
+    args.push(format!("{}:{}:ro", cache_dir.display(), cache_dir.display()));
+    args.push("-v".to_owned());
+    args.push(format!("{}:{}", log_dir.display(), log_dir.display()));
+
+    let git_path = root.join(".git");
+    if git_path.is_dir() {
+        args.push("-v".to_owned());
+        args.push(format!("{}:{}:ro", git_path.display(), git_path.display()));
+    }
+
+    if cfg.harden {
+        for entry in &cfg.watch_files {
+            let src = root.join(entry);
+            if src.exists() {
+                args.push("-v".to_owned());
+                args.push(format!("{}:{}:ro", src.display(), src.display()));
+            }
+        }
+    }
+
+    for opt in &cfg.run_opts {
+        let expanded = expand_one(opt)?;
+        args.push(expanded);
+    }
+
+    Ok(args)
+}
+
+fn expand_one(input: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            if matches!(chars.peek(), Some('{')) {
+                chars.next();
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch == '}' {
+                        break;
+                    }
+                    name.push(ch);
+                    chars.next();
+                }
+                let closed = chars.next();
+                if closed != Some('}') {
+                    // No closing brace — treat as literal.
+                    out.push_str(&format!("${{{name}"));
+                    if let Some(ch) = closed {
+                        out.push(ch);
+                    }
+                    continue;
+                }
+                if name.is_empty() {
+                    out.push_str("${}");
+                    continue;
+                }
+                match std::env::var(&name) {
+                    Ok(val) => out.push_str(&val),
+                    Err(_) => {
+                        return Err(format!("referenced unset variable `{name}`"));
+                    }
+                }
+            } else if matches!(chars.peek(), Some(ch) if ch.is_ascii_alphabetic() || *ch == '_') {
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_ascii_alphanumeric() || ch == '_' {
+                        name.push(ch);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                match std::env::var(&name) {
+                    Ok(val) => out.push_str(&val),
+                    Err(_) => {
+                        return Err(format!("referenced unset variable `{name}`"));
+                    }
+                }
+            } else {
+                out.push('$');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
 }
