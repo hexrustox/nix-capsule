@@ -45,6 +45,8 @@ impl Server {
     pub fn builder() -> ServerBuilder {
         ServerBuilder {
             log_dir: None,
+            socket_path: None,
+            timeout: None,
             respond: None,
         }
     }
@@ -103,21 +105,75 @@ impl Server {
             ServerProc::Fake(task) => task.abort(),
         }
     }
+
+    /// Deliver one signal to a real server process — not its group — without
+    /// waiting; pair with [`Server::wait_for_exit`]. Panics for a scripted
+    /// stand-in, which owns no signalable process.
+    pub fn signal(&mut self, sig: i32) {
+        let ServerProc::Real(child) = &mut self.handle else {
+            panic!("signal to a scripted stand-in");
+        };
+        let sent = unsafe { libc::kill(child.id() as libc::pid_t, sig) };
+        assert_eq!(sent, 0, "kill({sig}) to server {}", child.id());
+    }
+
+    /// Wait for a real server to exit and return its status. Bounded: a
+    /// server that never exits is killed and the test fails with a named
+    /// panic. `None` for a scripted stand-in.
+    pub fn wait_for_exit(&mut self) -> Option<ExitStatus> {
+        let ServerProc::Real(child) = &mut self.handle else {
+            return None;
+        };
+        let deadline = Instant::now() + WAIT_LIMIT;
+        loop {
+            match child.try_wait().expect("poll server") {
+                Some(status) => return Some(status),
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("server did not exit within {WAIT_LIMIT:?}");
+                }
+                None => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
+    /// Deliver `sig` to a real server and await its exit; `None` for a
+    /// scripted stand-in.
+    pub fn terminate(&mut self, sig: i32) -> Option<ExitStatus> {
+        self.signal(sig);
+        self.wait_for_exit()
+    }
 }
 
 pub struct ServerBuilder {
     log_dir: Option<PathBuf>,
+    socket_path: Option<PathBuf>,
+    timeout: Option<u64>,
     respond: Option<Vec<Message>>,
 }
 
 impl ServerBuilder {
     /// Drain-grace seconds handed to a real server, matching what `ncap-ctl`
     /// emits.
-    const TIMEOUT_SECS: &str = "10";
+    const TIMEOUT_SECS: u64 = 10;
 
     /// Override where a real server writes its logs; defaults to `<path>/logs`.
     pub fn log_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.log_dir = Some(dir.into());
+        self
+    }
+
+    /// Override the socket a real server binds; defaults to `<path>/ncap.sock`.
+    pub fn socket_path(mut self, socket: impl Into<PathBuf>) -> Self {
+        self.socket_path = Some(socket.into());
+        self
+    }
+
+    /// Drain-grace seconds handed to a real server; defaults to
+    /// [`Self::TIMEOUT_SECS`].
+    pub fn timeout(mut self, seconds: u64) -> Self {
+        self.timeout = Some(seconds);
         self
     }
 
@@ -133,7 +189,7 @@ impl ServerBuilder {
     pub async fn start(self) -> Server {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
-        let socket = path.join("ncap.sock");
+        let socket = self.socket_path.unwrap_or_else(|| path.join("ncap.sock"));
         let captured = Arc::new(Mutex::new(None));
         let handle = match self.respond {
             None => {
@@ -146,7 +202,7 @@ impl ServerBuilder {
                     .arg("--log-dir")
                     .arg(log_dir)
                     .arg("--timeout")
-                    .arg(Self::TIMEOUT_SECS)
+                    .arg(self.timeout.unwrap_or(Self::TIMEOUT_SECS).to_string())
                     .stdout(Stdio::null())
                     .stderr(stderr_log)
                     .spawn()
@@ -288,6 +344,11 @@ impl ClientProc {
         assert_eq!(sent, 0, "kill({sig}) to client {}", self.child.id());
     }
 
+    /// Non-blocking exit poll: `Some(status)` once the client has exited.
+    pub fn try_wait(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().expect("poll client")
+    }
+
     /// Wait for the client to exit and collect its output. Bounded: a client
     /// that never exits is killed and the test fails with a named panic.
     pub fn wait(mut self) -> ClientOutput {
@@ -337,7 +398,7 @@ pub struct ClientOutput {
 
 /// Absolute path to a compiled binary target, resolved at runtime from the
 /// `CARGO_BIN_EXE_*` env var Cargo sets for integration tests.
-fn bin_path(name: &str) -> PathBuf {
+pub fn bin_path(name: &str) -> PathBuf {
     let var = format!("CARGO_BIN_EXE_{name}");
     std::env::var(&var)
         .unwrap_or_else(|_| panic!("CARGO_BIN_EXE not set for binary {name}"))

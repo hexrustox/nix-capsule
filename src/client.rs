@@ -13,6 +13,10 @@ use tokio_util::codec::Framed;
 
 use crate::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
 
+/// Exit code for an orderly server shutdown: 128 + SIGTERM. `ServerStopping`
+/// and a clean close without a terminal frame both carry it.
+const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
+
 /// Run `command` against the server listening on `socket`.
 ///
 /// `cwd` overrides the working directory the server uses for the child; when
@@ -140,18 +144,19 @@ async fn session(
                         eprintln!("ncap: {}", message.message);
                         return Ok(1);
                     }
-                    // ServerStopping (ticket 05) and server misuse of
-                    // client-only frames carry nothing actionable yet.
-                    Message::Request(_)
-                    | Message::Stdin(_)
-                    | Message::Signal(_)
-                    | Message::ServerStopping => {}
+                    Message::ServerStopping => {
+                        return Ok(SHUTDOWN_EXIT);
+                    }
+                    // Server misuse of client-only frames carries nothing
+                    // actionable.
+                    Message::Request(_) | Message::Stdin(_) | Message::Signal(_) => {}
                 },
                 Some(Err(err)) => return Err(ClientError::Transport(err.to_string())),
                 None => {
-                    return Err(ClientError::Transport(
-                        "connection closed without a terminal frame".into(),
-                    ))
+                    // A clean close without a terminal frame is the server's
+                    // orderly-shutdown signature: bail with 128 + SIGTERM,
+                    // never a transport failure.
+                    return Ok(SHUTDOWN_EXIT);
                 }
             },
             chunk = stdin_rx.recv(), if stdin_open => match chunk {

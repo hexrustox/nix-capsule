@@ -1,58 +1,160 @@
 //! Server (`ncap-server`): the per-project server inside the container. It
 //! serves one child per connection, streaming the child's stdio back to the
-//! client over the project socket.
+//! client over the project socket. Startup probes the socket (refusing a
+//! live server, replacing a stale file) and logs per-run; SIGTERM/SIGINT
+//! stop every connection orderly within the drain grace.
 
-use std::io::ErrorKind;
+use std::fs::OpenOptions;
+use std::io::{self, ErrorKind, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
 use crate::protocol::{CURRENT_VERSION, ErrorMsg, Exit, FrameCodec, Message, VersionMsg};
 
-/// Bind `socket` and serve connections until the process is stopped.
-pub async fn run(socket: PathBuf) -> std::io::Result<()> {
-    // Ticket 02 unlinks blindly; the live-vs-stale probe lands with ticket 05.
-    match std::fs::remove_file(&socket) {
-        Err(err) if err.kind() != ErrorKind::NotFound => return Err(err),
-        _ => {}
-    }
+/// Bind `socket` and serve connections until the process is stopped. A
+/// SIGTERM or SIGINT starts the orderly shutdown: `ServerStopping` to every
+/// live connection, a group TERM for every child, a drain bounded by
+/// `drain`, then the socket file's removal.
+pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io::Result<()> {
+    let log = Arc::new(Log::start(&log_dir)?);
+    log.line(&format!(
+        "server starting on socket `{}` (pid {})",
+        socket.display(),
+        std::process::id()
+    ));
+    probe_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)?;
-    loop {
-        let (stream, _) = listener.accept().await?;
-        tokio::spawn(handle_conn(stream));
+    log.line(&format!(
+        "server listening on socket `{}`",
+        socket.display()
+    ));
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let connections: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let acceptor = tokio::spawn(accept_loop(
+        listener,
+        stop_rx.clone(),
+        connections.clone(),
+        log.clone(),
+    ));
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let received = tokio::select! {
+        _ = sigterm.recv() => "SIGTERM",
+        _ = sigint.recv() => "SIGINT",
+    };
+    log.line(&format!("{received} received; notifying live connections"));
+    let _ = stop_tx.send(true);
+    acceptor.abort();
+    // Await the cancelled acceptor so every handle it pushed is visible
+    // before the drain snapshots them — a connection accepted on the way
+    // out still gets its ServerStopping and group TERM.
+    let _ = acceptor.await;
+
+    let handles: Vec<JoinHandle<()>> = connections
+        .lock()
+        .expect("connection lock")
+        .drain(..)
+        .collect();
+    log.line(&format!("draining connections within {}s", drain.as_secs()));
+    let _ = tokio::time::timeout(drain, async {
+        for handle in handles {
+            let _ = handle.await;
+        }
+    })
+    .await;
+    let _ = std::fs::remove_file(&socket);
+    log.line("socket removed; server stopped");
+    Ok(())
+}
+
+/// Probe an existing socket file before binding: a connectable socket is
+/// owned by a live server — refuse rather than disturb it. A connect failure
+/// means the file is stale (the previous server crashed) and is removed so
+/// the bind can succeed.
+async fn probe_socket(socket: &Path) -> std::io::Result<()> {
+    if !socket.exists() {
+        return Ok(());
+    }
+    match UnixStream::connect(socket).await {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("socket `{}` is owned by a live server", socket.display()),
+        )),
+        Err(_) => {
+            std::fs::remove_file(socket)?;
+            Ok(())
+        }
     }
 }
 
-async fn handle_conn(stream: UnixStream) {
-    let mut framed = Framed::new(stream, FrameCodec);
-
-    let request = match framed.next().await {
-        Some(Ok(frame)) => match Message::from_frame(frame) {
-            Ok(Message::Request(request)) => request,
-            Ok(other) => {
-                send_error(
-                    &mut framed,
-                    &format!("expected a Request frame, got {:?}", other.frame_type()),
-                )
-                .await;
-                return;
+/// Accept connections until cancelled, registering each task so the
+/// shutdown can drain them.
+async fn accept_loop(
+    listener: UnixListener,
+    stopping: watch::Receiver<bool>,
+    connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    log: Arc<Log>,
+) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let handle = tokio::spawn(handle_conn(stream, stopping.clone(), log.clone()));
+                connections.lock().expect("connection lock").push(handle);
             }
             Err(err) => {
+                log.line(&format!("accept failed: {err}"));
+                return;
+            }
+        }
+    }
+}
+
+async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: Arc<Log>) {
+    let mut framed = Framed::new(stream, FrameCodec);
+
+    let request = tokio::select! {
+        frame = framed.next() => match frame {
+            Some(Ok(frame)) => match Message::from_frame(frame) {
+                Ok(Message::Request(request)) => request,
+                Ok(other) => {
+                    send_error(
+                        &mut framed,
+                        &format!("expected a Request frame, got {:?}", other.frame_type()),
+                    )
+                    .await;
+                    return;
+                }
+                Err(err) => {
+                    send_error(&mut framed, &err.to_string()).await;
+                    return;
+                }
+            },
+            Some(Err(err)) => {
                 send_error(&mut framed, &err.to_string()).await;
                 return;
             }
+            None => return, // client left before its first frame
         },
-        Some(Err(err)) => {
-            send_error(&mut framed, &err.to_string()).await;
+        _ = stopping_signalled(stopping.clone()) => {
+            // Every live connection learns of the shutdown, even one still
+            // waiting for its first frame.
+            send(&mut framed, Message::ServerStopping).await;
             return;
         }
-        None => return, // client left before its first frame
     };
 
     let version = Message::Version(VersionMsg {
@@ -134,7 +236,7 @@ async fn handle_conn(stream: UnixStream) {
     };
     let pgid = child.id().expect("freshly spawned child has a pid");
 
-    if bridge(&mut framed, &mut child, pgid).await {
+    if bridge(&mut framed, &mut child, pgid, stopping, &log).await {
         let status = match child.wait().await {
             Ok(status) => status,
             Err(err) => {
@@ -167,11 +269,16 @@ async fn handle_conn(stream: UnixStream) {
 }
 
 /// Pump both directions until the child's pipes close (returns true) or the
-/// connection dies (returns false, caller TERMs the group and reaps).
+/// connection dies (returns false, caller TERMs the group and reaps). The
+/// first shutdown broadcast announces `ServerStopping` to the client, TERMs
+/// the child's group, and leaves the bridge running so a child finishing
+/// inside the drain grace still completes normally.
 async fn bridge(
     framed: &mut Framed<UnixStream, FrameCodec>,
     child: &mut tokio::process::Child,
     pgid: u32,
+    stopping: watch::Receiver<bool>,
+    log: &Log,
 ) -> bool {
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("child stdout is piped");
@@ -182,6 +289,7 @@ async fn bridge(
     tokio::spawn(pump_output(stderr, Message::Stderr, tx));
 
     let mut client_writes_open = true;
+    let mut stopping_open = true;
     loop {
         tokio::select! {
             message = rx.recv() => match message {
@@ -215,7 +323,7 @@ async fn bridge(
                         // number) is one warning line, never an Error frame —
                         // the connection continues to its normal terminal.
                         if let Err(err) = signal_group(pgid, signal_msg.signal) {
-                            eprintln!("ncap-server: kill(-{pgid}, {}): {err}", signal_msg.signal);
+                            log.line(&format!("kill(-{pgid}, {}): {err}", signal_msg.signal));
                         }
                     }
                     Ok(_) => {}
@@ -235,8 +343,23 @@ async fn bridge(
                     client_writes_open = false;
                 }
             },
+            _ = stopping_signalled(stopping.clone()), if stopping_open => {
+                stopping_open = false;
+                // The client learns first, then the whole group gets the
+                // TERM. The bridge keeps running so a child that dies
+                // (or traps and exits) inside the drain grace still
+                // delivers its terminal frame.
+                send(framed, Message::ServerStopping).await;
+                let _ = signal_group(pgid, libc::SIGTERM as u8);
+            }
         }
     }
+}
+
+/// Resolve once the server is shutting down; the `watch::Ref` never escapes
+/// this future, keeping it `Send` for the select loops.
+async fn stopping_signalled(mut rx: watch::Receiver<bool>) {
+    let _ = rx.wait_for(|stopping| *stopping).await;
 }
 
 /// Forward one signal number to the child's process group, verbatim — the
@@ -293,6 +416,51 @@ async fn send(framed: &mut Framed<UnixStream, FrameCodec>, message: Message) -> 
         Err(_) => return false,
     };
     framed.send(frame).await.is_ok()
+}
+
+/// The per-run log file `<log-dir>/ncap-server-<epoch>.log`. Every line is
+/// mirrored to stderr so the container runtime captures the same stream.
+struct Log {
+    file: Mutex<std::fs::File>,
+}
+
+impl Log {
+    /// Create `dir` when missing and open this run's epoch-stamped log file.
+    /// Millisecond epochs keep runs started in the same second apart.
+    fn start(dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("ncap-server-{}.log", epoch_millis()));
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: Mutex::new(file),
+        })
+    }
+
+    /// Append one stamped line to the log file and stderr; logging is
+    /// best-effort and never disturbs the connection it reports on.
+    fn line(&self, message: &str) {
+        let line = format!("[{}] {message}\n", epoch_secs());
+        if let Ok(mut file) = self.file.lock() {
+            let _ = file.write_all(line.as_bytes());
+        }
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
+}
+
+/// Seconds since the Unix epoch, saturating at 0 for a clock set before it.
+fn epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// Milliseconds since the Unix epoch, saturating at 0 like [`epoch_secs`].
+fn epoch_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
