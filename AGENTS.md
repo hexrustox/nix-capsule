@@ -15,8 +15,16 @@
 - For manual binary or scenario testing, run the script through `bash -c "..."` so it executes in the same container as the binaries.
 - For mutation testing, mutate the source directly and restore the source after the test.
 
-## Repository Docs
+## Agent skills
 
-- Read `CONTEXT.md` for the project vocabulary and `docs/agents/domain.md` for domain-document usage.
-- Issues and specs are tracked under `.scratch/<feature>/`; see `docs/agents/issue-tracker.md`.
-- Use the canonical triage labels `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`; see `docs/agents/triage-labels.md`.
+### Issue tracker
+
+Issues and specs are tracked as local markdown under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.

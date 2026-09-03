@@ -31,6 +31,6 @@ Spawn failure with `ENOENT` ⇒ `Exit { code: 127 }`; with `EACCES` ⇒ `Exit { 
 
 ## Disconnect and shutdown
 
-- **Client disconnect before the terminal frame:** the child is not orphaned — SIGTERM its process group, reap it, keep serving other connections.
-- A `waitpid(-1)` reaping loop runs continuously so no zombies accumulate; with a PID namespace, orphans reparent to the server as the namespace's init.
+- **Client disconnect before the terminal frame:** the child is not orphaned — the only notice is a failed send, on which the server SIGTERMs the child's process group, reaps it, and keeps serving other connections. A silent child of a vanished client runs to completion (accepted limitation).
+- Children are reaped without an explicit reaper: the connection task awaits its child, and the async runtime's process driver collects anything left behind, so no zombies accumulate. With a PID namespace, orphans reparent to the server as the namespace's init.
 - **SIGTERM/SIGINT** (e.g. `ncap-ctl stop` signals the container's init process): send `ServerStopping` to every live connection, SIGTERM every child's process group, drain all connections within `--timeout` seconds, remove the socket file, exit. Connections that miss the deadline are dropped when the container tears down as the server — the container's init process — exits.

@@ -22,7 +22,7 @@ Every frame is: 1 tag byte, a 4-byte big-endian payload length, then the payload
 | `0x06` | `Error` | server → client | `{ "message": str }` |
 | `0x07` | `ServerStopping` | server → client | empty |
 | `0x08` | `Version` | server → client | `{ "version": str }` — tag pinned for backward compatibility |
-| `0x09` | `Signal` | client → server | `{ "signal": int }` (POSIX signal number, e.g. 2, 9, 15) |
+| `0x09` | `Signal` | client → server | `{ "signal": u8 }` (POSIX signal number, e.g. 2, 9, 15) |
 
 ## Connection lifecycle
 
@@ -37,7 +37,7 @@ Every frame is: 1 tag byte, a 4-byte big-endian payload length, then the payload
 - **Version is advisory.** Client and server ship from the same package and are always in lockstep; a mismatch (or a missing version) is a warning on the client's stderr / server's log, never a rejection. Comparison is exact string equality.
 - **Ordering:** per-stream FIFO is guaranteed; interleaving between stdout and stderr is not (independent forwarding tasks).
 - **EOF:** there is no EOF frame type. stdin EOF travels as one empty `Stdin` frame — a client write-half close means the same to the server; either way the server drops the child's stdin pipe, giving the child EOF, and the connection stays open so a later `Signal` frame still flows.
-- **Disconnect before the terminal frame:** the socket closing without `Exit`/`Error` means the client went away — the server kills the child (see `server.md`).
+- **Disconnect before the terminal frame:** a failed send is the server's only disconnect notice — on it the child's process group is TERMed and reaped (see `server.md`). A read-side close means stdin EOF, never a disconnect; a silent child of a vanished client runs to completion (accepted limitation).
 - **Signals:** the client never sends bytes that behave like terminal signals; host Ctrl-C arrives at the client's own signal handler and travels as a `Signal` frame (see `client.md`).
 - **Exec failures:** spawning the child failing with `ENOENT` ⇒ terminal `Exit { "code": 127 }`, `EACCES` ⇒ terminal `Exit { "code": 126 }` — no `Error` frame; the client synthesizes the stderr line. Any other spawn failure ⇒ terminal `Error { message }`.
 - **Encoding:** `command`, `args`, `env`, `cwd` travel as UTF-8 JSON strings; non-UTF-8 host bytes convert lossily (`U+FFFD`). Accepted limitation.
