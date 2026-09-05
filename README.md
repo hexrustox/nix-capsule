@@ -4,6 +4,7 @@
 
 *Run a project's building tools inside a sealed-off box on your computer — while you keep using your normal terminal, exactly as you always have.*
 
+[![Rust](https://img.shields.io/badge/Rust-2024%20edition-DEA584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Release](https://github.com/hexrustox/nix-capsule/actions/workflows/release.yml/badge.svg)](https://github.com/hexrustox/nix-capsule/actions/workflows/release.yml)
 
 </div>
