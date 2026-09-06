@@ -1,6 +1,6 @@
 # nix-capsule — server (`ncap-server`)
 
-Runs inside the container as its init process — the launcher is `bash -c "source <cache>/env && exec ncap-server …"`, whose trailing `exec` makes the server the process the runtime tracks, so the server inherits the container shell's environment from the sourced env dump and children resolve its tools through plain `PATH`.
+Runs inside the container as its init process — the launcher is `bash -c "source <cache>/env && exec ncap-server …"`, whose trailing `exec` makes the server the process the runtime tracks, so the server inherits the container shell's environment from the sourced env dump and children resolve its tools through plain `PATH`. No Nix evaluation, daemon, or image content is needed inside the container — the image only provides a kernel and userland sandbox. The container environment is a snapshot that changes only on re-init (see `nix.md` Freshness and `ctl.md` Mounts).
 
 ## Startup
 
@@ -17,7 +17,7 @@ One connection = one child; connections are handled concurrently.
 2. Send `Version`.
 3. Spawn the child:
    - `command` + `args` from the request,
-   - `cwd` from the request — must be a valid path inside the container; the same-path mount contract makes host cwds work, anything else fails with `Error`,
+   - `cwd` from the request — must be a valid path inside the container; the same-path mount contract (see `ctl.md` Mounts) makes host cwds work, anything else fails with `Error`,
    - request env applied over the inherited devshell env (`Command::envs`),
    - spawned in its own process group (`process_group(0)`, the child as its own group leader) — every signal below targets the group (`kill(-pgid, …)`), so grandchildren die with their progenitor,
    - all three stdio pipes. Never a TTY (accepted limitation).

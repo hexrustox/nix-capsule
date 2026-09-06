@@ -53,11 +53,15 @@ Defaults first; `extraOptions` args are appended after, with `$VAR`/`${VAR}` exp
 | `<project root>/.git` → same path | ro, if it exists | Read-only git metadata for tools that read it. |
 | `<project root>/<watchFiles entries>` → same path | ro, if present and `harden = true` | Keeps watched files immutable from inside the container (see `harden` below). |
 
+Host paths are valid inside the container only because the project root is bind-mounted at the same absolute path; anything not mounted is invisible inside.
+
 `harden = true` prepends `--cap-drop=all --security-opt=no-new-privileges` and bind-mounts every `watchFiles` entry read-only (when present) over the read-write project-root mount — a more-specific mount wins in podman/docker, so the files stay immutable even though the parent directory is writable. This prevents a contained process from rewriting files whose change triggers host-side re-evaluation (`nix print-dev-env` on the host, `shellHook` included) and re-sourcing inside the container. `flake.lock` edits and `nix flake update` must then happen on the host; accepted tradeoff, like `.git` being read-only. Capability drops occasionally break dev tooling, so hardening stays opt-in.
 
 ## Runtime adapter
 
 `NCAP_RUNTIME` names the OCI runtime: `podman` (default), `docker`, or an absolute path. Both runtimes speak the same argument surface; state probes use Go-template `inspect` (`State.Running`, `Id`). Rootless operation is the assumption.
+
+Linux only — same-path bind mounts, read-only `/nix`, and shared Unix sockets rule out macOS (podman-machine's VM breaks path identity).
 
 ## `NCAP_*` contract
 
@@ -78,7 +82,7 @@ Set by `mkShell`; consumed by `ncap-ctl` (and `NCAP_SOCKET`, `NCAP_ENV_FORWARD` 
 | `NCAP_NIX` | store path of `nix` |
 | `NCAP_BASH` | store path of devshell bash |
 | `NCAP_TIMEOUT` | drain grace, seconds |
-| `NCAP_PROJECT_ROOT` | project root |
+| `NCAP_PROJECT_ROOT` | project root — the git toplevel of the consumer's checkout, falling back to the current directory outside a git repo; anchors the project name, the workspace mount, and the workdir of executed commands |
 
 ## Stamp guard
 

@@ -1,5 +1,14 @@
 # nix-capsule — flake-facing API
 
+nix-capsule runs a Nix devshell inside an OCI container while the user stays in their host shell. Commands typed on the host are forwarded over a Unix socket, executed inside the container with the devshell environment, and stdout/stderr stream back to the host terminal.
+
+It splits a devshell in two:
+
+- a **host shell** (e.g. `devShells.default` in the consumer's flake): the `ncap` client, the `ncap-ctl` lifecycle tool, and wrapper scripts routing tool names through the client.
+- a **container shell** (a second devshell attr, e.g. `devShells.container`): the real toolchain, never entered directly.
+
+`nix develop` drops the user into the host shell; a shellHook starts the container (see `ctl.md` for lifecycle and mounts and `server.md` for execution inside the container). The container is a dumb sandbox — the host's `/nix` store is mounted read-only and the container devshell is pre-evaluated on the host (`nix print-dev-env`) into a cached env dump that the server sources; no Nix evaluation runs inside the container (see `server.md`).
+
 The `nix-capsule` flake exposes two things to a consuming flake:
 
 - an **overlay** providing the `ncap` package (client, server, and ctl binaries), and
@@ -32,6 +41,8 @@ The `nix-capsule` flake exposes two things to a consuming flake:
     };
 }
 ```
+
+Shell names used in examples (`default`, `container`) are placeholders — the consumer's flake names both shells; only the linkage between them matters. How the `nix-capsule` library reaches a flake (overlay, lib function, file layout) is outside this spec's concern: a plain `flake.nix` is all a consumer needs.
 
 ## Options
 
@@ -76,9 +87,9 @@ All per-project state lives outside the project tree, keyed by `project`:
 | Cache | `$XDG_CACHE_HOME/nix-capsule/<project>/` |
 | Logs | `$XDG_STATE_HOME/nix-capsule/<project>/logs/` |
 
-If `XDG_RUNTIME_DIR` is unset, the socket falls back to `$TMPDIR/nix-capsule-<uid>/nix-capsule/<project>/` (dir `0700`).
+If `XDG_RUNTIME_DIR` is unset, the socket falls back to `$TMPDIR/nix-capsule-<uid>/nix-capsule/<project>/` (dir `0700`). The socket directory is per-user and mode `0700`, typically on tmpfs — it disappears at logout/reboot, so stale sockets don't accumulate.
 
-`project` defaults to the sanitized basename of the project root: non-alphanumeric runs collapse to a single `-`, leading and trailing `-` stripped; an empty result is a hard error telling you to set `project`. `socketPath` and `containerName` override their derived values; everything else derives from `project`.
+`project` defaults to the sanitized basename of the project root (see `ctl.md` for project-root definition): non-alphanumeric runs collapse to a single `-`, leading and trailing `-` stripped; an empty result is a hard error telling you to set `project`. `socketPath` and `containerName` override their derived values; everything else derives from `project`.
 
 **Stamp guard:** the cache holds a stamp file recording the absolute project-root path that created it. If `ncap-ctl` finds the same project name owned by a different checkout, it errors with a hint to set `project` — two checkouts of one repo must never share a socket/container/cache.
 

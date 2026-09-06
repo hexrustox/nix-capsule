@@ -40,4 +40,5 @@ Every frame is: 1 tag byte, a 4-byte big-endian payload length, then the payload
 - **Disconnect before the terminal frame:** a failed send is the server's only disconnect notice — on it the child's process group is TERMed and reaped (see `server.md`). A read-side close means stdin EOF, never a disconnect; a silent child of a vanished client runs to completion (accepted limitation).
 - **Signals:** the client never sends bytes that behave like terminal signals; host Ctrl-C arrives at the client's own signal handler and travels as a `Signal` frame (see `client.md`).
 - **Exec failures:** spawning the child failing with `ENOENT` ⇒ terminal `Exit { "code": 127 }`, `EACCES` ⇒ terminal `Exit { "code": 126 }` — no `Error` frame; the client synthesizes the stderr line. Any other spawn failure ⇒ terminal `Error { message }`.
+- **Path translation:** none — host paths are valid inside the container only because the project root is bind-mounted at the same absolute path (see `ctl.md` Mounts); anything not mounted is invisible.
 - **Encoding:** `command`, `args`, `env`, `cwd` travel as UTF-8 JSON strings; non-UTF-8 host bytes convert lossily (`U+FFFD`). Accepted limitation.
