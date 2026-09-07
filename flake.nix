@@ -1,6 +1,4 @@
 {
-  description = "nix-capsule — containerized dev shells with transparent binary execution";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     rust-overlay = {
@@ -8,102 +6,96 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-parts.url = "github:hercules-ci/flake-parts";
+    nix-capsule.url = "gitlab:codnixus/nix-capsule?ref=v0.8.0";
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay, flake-parts, ... }@inputs:
+    { flake-parts, ... }@inputs:
     let
       rustVersion = "1.95.0";
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       flake = {
-        overlays.default = final: prev:
+        lib = { pkgs }: import ./lib.nix { inherit pkgs; };
+
+        overlays.default =
+          final: prev:
           let
-            rust = if prev ? rust-bin then prev.rust-bin.stable.${rustVersion}.default else null;
-            rPlatform = if rust != null then prev.makeRustPlatform { cargo = rust; rustc = rust; } else prev.rustPlatform;
+            rust = prev.rust-bin.${rustVersion}.default;
           in
           {
             ncap = prev.callPackage ./package.nix {
-              pkgs = prev;
-              rustPlatform = rPlatform;
+              rustPlatform = prev.makeRustPlatform {
+                cargo = rust;
+                rustc = rust;
+              };
             };
           };
 
-        lib = { pkgs }: import ./lib.nix { inherit pkgs; };
       };
-
       perSystem =
         {
           system,
           ...
         }:
         let
-          pkgs = import nixpkgs {
+          pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [
-              rust-overlay.overlays.default
-              self.overlays.default
+              inputs.rust-overlay.overlays.default
+              inputs.nix-capsule.overlays.default
             ];
           };
-          capsule-lib = self.lib { inherit pkgs; };
-          rust = pkgs.rust-bin.stable.${rustVersion}.default;
+          capsule-lib = inputs.nix-capsule.lib { inherit pkgs; };
         in
         {
-          packages = {
-            ncap = pkgs.ncap;
-            default = pkgs.ncap;
-          };
-
           apps.default = capsule-lib.app;
-
           devShells = {
             default = capsule-lib.mkShell {
-              project = "nix-capsule";
+              socketPath = "/tmp/nix-capsule/ncap-socket";
+              containerName = "nix-capsule";
               image = "alpine:latest";
               devShell = "container";
-              wrappers = [
-                "cargo"
-                "codebook-lsp"
-                "rust-analyzer"
-                "taplo"
-              ];
-              envForward = [ "CARGO_HOME" ];
               extraOptions = [
+                "-e"
+                "NIX_PATH"
                 "-e"
                 "CARGO_HOME"
                 "-v"
                 "$CARGO_HOME:$CARGO_HOME"
+              ];
+              wrappers = [
+                "cargo"
+                "codebook-lsp"
+                "rust-analyzer"
+                "nixd"
+                "taplo"
               ];
               preShellHook = ''
                 export CARGO_HOME=''${CARGO_HOME:-$HOME/.cargo}
                 mkdir -p "$CARGO_HOME"
               '';
             };
-
-            container =
-              let
-                rustWithExt = rust.override {
+            container = pkgs.mkShellNoCC {
+              packages = with pkgs; [
+                cargo-deny
+                cargo-edit
+                cargo-machete
+                clang
+                codebook
+                nixd
+                nixfmt
+                mold
+                taplo
+                (rust-bin.stable.${rustVersion}.default.override {
                   extensions = [
                     "rust-src"
                     "rust-analyzer"
-                    "llvm-tools-preview"
+                    # "llvm-tools-preview"
                   ];
-                };
-              in
-              pkgs.mkShellNoCC {
-                packages = with pkgs; [
-                  cargo-deny
-                  cargo-edit
-                  cargo-machete
-                  cargo-llvm-cov
-                  clang
-                  codebook
-                  mold
-                  taplo
-                  rustWithExt
-                  git
-                ];
-              };
+                })
+              ];
+            };
           };
         };
 
