@@ -6,7 +6,6 @@
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-DEA584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Nix](https://img.shields.io/badge/Nix-flake-5277C3?style=flat-square&logo=nixos&logoColor=white)](https://nixos.org)
-[![Release](https://github.com/hexrustox/nix-capsule/actions/workflows/release.yml/badge.svg)](https://github.com/hexrustox/nix-capsule/actions/workflows/release.yml)
 
 </div>
 
