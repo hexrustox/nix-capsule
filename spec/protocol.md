@@ -47,6 +47,11 @@ JSON conventions:
 4. The Server sends exactly one terminal frame — `Exit` on Child completion
    (exec-failure codes included), `Error` on any other failure — and nothing
    after it. `ServerStopping` is not a terminal frame; it may precede one.
+   Split semantics: `ServerStopping` is terminal for the Client — the Client
+   bails immediately per spec/client.md § Exit codes — but non-terminal
+   server-side, where the bridge keeps running so a Child that finishes
+   inside the drain grace still delivers its terminal frame
+   (spec/server.md § Shutdown).
 5. Either side may then close.
 
 ## Guarantees
@@ -69,6 +74,12 @@ JSON conventions:
   reaped (spec/server.md § Disconnect before the terminal frame). A read-side
   close means stdin EOF, never a disconnect; a silent Child of a vanished
   Client runs to completion (accepted limitation).
+- **ServerStopping:** terminal for the Client, non-terminal for the Server.
+  The Client stops streaming and exits `143` on receipt (spec/client.md
+  § Exit codes) and never processes a later terminal frame on that
+  Connection; the Server keeps the bridge running through the drain grace
+  so a finishing Child still delivers its terminal frame
+  (spec/server.md § Shutdown).
 - **Signals:** the Client never sends bytes that behave like terminal
   signals; host Ctrl-C arrives at the Client's own signal handler and travels
   as a `Signal` frame (spec/client.md § Signals).

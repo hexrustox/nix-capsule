@@ -55,6 +55,10 @@ _Avoid_: namespace, slug, bare "project"
 **Socket**:
 The per-project Unix socket appearing at the same absolute path on host and container — the sole channel between Client and Server.
 
+**Liveness**:
+The Container being both `Running` and socket-connectable — one predicate serving the `init` liveness probe and the `start` readiness poll; `Running` alone is not live.
+_Avoid_: health check, up
+
 **Cache**:
 The per-project store of derived artifacts kept outside the project tree; chiefly the env dump, the freshness hash, and the stamp file.
 _Avoid_: build cache, ncap-cache (as prose)
@@ -93,7 +97,7 @@ The rule that the Client forwards every accepted host signal verbatim as a `Sign
 _Avoid_: escalation, signal policy
 
 **Terminal frame**:
-The single frame — `Exit` or `Error` — that ends every connection; nothing arrives after it.
+The single frame — `Exit` or `Error` — that ends every connection; nothing arrives after it. Exception: `ServerStopping` is terminal for the Client but not for the Server's bridge.
 _Avoid_: final frame, exit message
 
 **Drain grace**:

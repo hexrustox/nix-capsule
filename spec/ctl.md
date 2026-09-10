@@ -10,26 +10,33 @@ contract).
 | Command | Behavior |
 | --- | --- |
 | `init` | Entry point from the shellHook. Stamp guard, probe, hash-check, then start or re-eval + restart (§ init flow). |
-| `start` | Stamp guard, probe: running ⇒ done ("already running"). Not running ⇒ run the Container detached, then await readiness (§ start flow). |
+| `start` | Stamp guard, probe: live ⇒ done ("already running"). Not live ⇒ run the Container detached, then await readiness (§ start flow). |
 | `stop` | `<runtime> stop <name>` — SIGTERM to the container's init process (the Server), graceful drain. Idempotent: not running ⇒ success. A failed stop whose follow-up probe shows not-running ⇒ success. |
 | `restart` | Non-fatal `stop`, then `init` (which re-ensures the Cache before starting). |
 | `enter` | `<runtime> exec -it <name> <bash> -c "source <cache>/env && exec <bash>"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
-| `status` | Container running? Socket connectable? Cache fresh/stale/missing (§ Freshness and the digest)? |
+| `status` | Container running? Socket connectable (§ Liveness)? Cache fresh/stale/missing (§ Freshness and the digest)? |
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
 | `clean` | Stop the Container, remove the (stopped) container, and delete this project's Cache, log, and socket dirs — stamp included. |
 | `completions <shell>` | Shell completions (`bash`, `zsh`, `fish` required; others optional). |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
 
+## Liveness
+
+One predicate serves both the `init` liveness probe and the `start`
+readiness poll — liveness and readiness are the same check at different
+call sites. Live means both: `<runtime> inspect` reports `State.Running`,
+and the socket is connectable. The container reports `Running` while still
+sourcing the Env dump ahead of the Server's bind, so `Running` alone is
+not live.
+
 ## init flow
 
 1. Read the stamp guard (§ Stamp guard).
-2. Probe liveness: `<runtime> inspect` → `State.Running`, and the socket
-   connectable. The container reports `Running` while still sourcing the Env
-   dump ahead of the Server's bind, so `Running` alone is not liveness.
-   - Running and fresh ⇒ done.
-   - Running and stale/missing ⇒ re-eval (§ Freshness and the digest), then a
+2. Probe liveness (§ Liveness).
+   - Live and fresh ⇒ done.
+   - Live and stale/missing ⇒ re-eval (§ Freshness and the digest), then a
      non-fatal `stop`, then start (§ start flow).
-   - Not running ⇒ ensure the Cache (eval if stale or missing), start.
+   - Not live ⇒ ensure the Cache (eval if stale or missing), start.
 
 ## start flow
 
@@ -52,8 +59,8 @@ launch must not rely on its `PATH` for these binaries.
 
 Detached; `exec` makes the Server the container's init process.
 
-Readiness: after launch, poll until the container reports `State.Running` via
-`inspect` and the socket is connectable (deadline: `NCAP_TIMEOUT`, which
+Readiness: after launch, poll the liveness predicate (§ Liveness) until live
+(deadline: `NCAP_TIMEOUT`, which
 bounds both this readiness poll and the Server's drain grace). Losing a
 concurrent-start race ("name in use"): re-inspect — running ⇒ success; dead
 ⇒ `rm` the container and start once more. Never reaching readiness ⇒ fail

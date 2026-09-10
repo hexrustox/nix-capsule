@@ -51,9 +51,9 @@ One Connection = one Child; connections are handled concurrently.
 7. Bridge:
    - `Stdin` frames → Child stdin; an empty frame is stdin EOF — drop the
      pipe (Child sees EOF) and keep the Connection open for `Signal` frames.
-     A client write-half close means the same. A failed write to the Child's
-     stdin (pipe already closed) drops the stdin pipe; the Connection
-     continues.
+     A client write-half close is observably identical on this transport.
+     A failed write to the Child's stdin (pipe already closed) drops the
+     stdin pipe; the Connection continues.
    - Child stdout → `Stdout`, stderr → `Stderr`, read in chunks; each stream
      is FIFO, cross-stream order is not guaranteed.
    - `Signal` frames → the signal number is forwarded verbatim to
@@ -80,8 +80,9 @@ One Connection = one Child; connections are handled concurrently.
 - **SIGTERM/SIGINT** (e.g. `ncap-ctl stop` signals the container's init
   process): send `ServerStopping` to every live Connection — including one
   still waiting for its first frame — then TERM every Child's process group.
-  Each bridge keeps running, so a Child that finishes inside the drain grace
-  still delivers its terminal frame.
+  `ServerStopping` is terminal for the Client but non-terminal here: each
+  bridge keeps running, so a Child that finishes inside the drain grace
+  still delivers its terminal frame (spec/protocol.md § Guarantees).
 - Drain all connections within `--timeout` seconds. Connections that miss the
   deadline are dropped when the container tears down, as the Server — the
   container's init process — exits.

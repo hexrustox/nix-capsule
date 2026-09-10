@@ -87,3 +87,8 @@ it directly. The protocol is the only path.
 | Terminal `Exit` with neither field set (status unknowable) | warning on stderr, then `1` |
 | Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`) | `1` |
 | `ServerStopping` received — the Client bails immediately and stops streaming — or the socket closed without a terminal frame | `143` (128 + SIGTERM) |
+
+`ServerStopping` is terminal for the Client but non-terminal server-side:
+after bailing the Client never processes a later terminal frame on that
+Connection, while the Server keeps the bridge running through the drain
+grace — see spec/protocol.md § Guarantees.
