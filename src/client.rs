@@ -2,6 +2,7 @@
 //! send one `Request`, stream the child's stdio back to the terminal, and exit
 //! with the child's status.
 
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -22,12 +23,14 @@ const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
 /// `cwd` overrides the working directory the server uses for the child; when
 /// `None` it defaults to the client's own current directory. `env` carries the
 /// `--env` flags, each a `KEY=VALUE` override or a bare `KEY` to copy from
-/// this process. Returns the exit code the client process should report.
+/// this process. Non-UTF-8 bytes in `env`/`command` convert lossily
+/// (`U+FFFD`) at this boundary — never rejected. Returns the exit code the
+/// client process should report.
 pub async fn run(
     socket: &Path,
     cwd: Option<PathBuf>,
-    env: Vec<String>,
-    command: Vec<String>,
+    env: Vec<OsString>,
+    command: Vec<OsString>,
 ) -> i32 {
     match session(socket, cwd, env, command).await {
         Ok(code) => code,
@@ -72,13 +75,14 @@ enum ClientError {
 async fn session(
     socket: &Path,
     cwd: Option<PathBuf>,
-    env: Vec<String>,
-    command: Vec<String>,
+    env: Vec<OsString>,
+    command: Vec<OsString>,
 ) -> Result<i32, ClientError> {
-    let (name, args) = match command.split_first() {
-        Some(split) => split,
-        None => return Err(ClientError::Transport("no command given".into())),
-    };
+    if command.is_empty() {
+        return Err(ClientError::Transport("no command given".into()));
+    }
+
+    let command_name = command[0].to_string_lossy().into_owned();
 
     let stream = UnixStream::connect(socket)
         .await
@@ -89,7 +93,7 @@ async fn session(
     let mut framed = Framed::new(stream, FrameCodec);
     send(
         &mut framed,
-        Message::Request(build_request(cwd, env, name, args)?),
+        Message::Request(build_request(cwd, &env, &command)?),
     )
     .await?;
 
@@ -137,7 +141,7 @@ async fn session(
                     Message::Stderr(bytes) => write_stream(&mut io::stderr().lock(), &bytes)?,
                     Message::Exit(exit) => {
                         warn_absent_version(version_seen);
-                        return Ok(exit_code(&exit, name));
+                        return Ok(exit_code(&exit, &command_name));
                     }
                     Message::Error(message) => {
                         warn_absent_version(version_seen);
@@ -191,19 +195,23 @@ async fn session(
 
 fn build_request(
     cwd: Option<PathBuf>,
-    env: Vec<String>,
-    name: &str,
-    args: &[String],
+    env: &[OsString],
+    command: &[OsString],
 ) -> Result<Request, ClientError> {
     let cwd = match cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir()?,
     };
-    let forward = std::env::var("NCAP_ENV_FORWARD").ok();
-    let env = build_env(&env, forward.as_deref(), |name| std::env::var(name).ok())?;
+    // `NCAP_ENV_FORWARD` itself travels through `var_os`: present-but-non-Unicode
+    // is lossy-decoded (then fails as malformed JSON → exit 1), not treated as absent.
+    let forward =
+        std::env::var_os("NCAP_ENV_FORWARD").map(|raw| raw.to_string_lossy().into_owned());
+    let env = build_env(env, forward.as_deref(), |name| std::env::var_os(name))?;
+    let mut lossy = command.iter().map(|arg| arg.to_string_lossy().into_owned());
+    let name = lossy.next().expect("session rejects an empty command");
     Ok(Request {
-        command: name.to_string(),
-        args: args.to_vec(),
+        command: name,
+        args: lossy.collect(),
         cwd: cwd.to_string_lossy().into_owned(),
         env,
         version: Some(CURRENT_VERSION.into()),
@@ -213,11 +221,12 @@ fn build_request(
 /// Merge the request env: every name in `NCAP_ENV_FORWARD` (a JSON array of
 /// variable names) resolved from this process first, then the `--env` flags —
 /// later-wins by key, deduplicated, unset entries silently omitted. A forward
-/// list that is not a JSON array of names is an error.
+/// list that is not a JSON array of names is an error. Present-but-non-Unicode
+/// values forward lossily (`U+FFFD`); only unset names are omitted.
 fn build_env(
-    cli: &[String],
+    cli: &[OsString],
     forward: Option<&str>,
-    lookup: impl Fn(&str) -> Option<String>,
+    lookup: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Vec<String>, ClientError> {
     let names: Vec<String> = match forward {
         Some(raw) => {
@@ -228,7 +237,7 @@ fn build_env(
     let mut entries: Vec<(String, String)> = Vec::new();
     for name in &names {
         if let Some(value) = lookup(name) {
-            apply_entry(&mut entries, name, value);
+            apply_entry(&mut entries, name, value.to_string_lossy().into_owned());
         }
     }
     for flag in cli {
@@ -243,12 +252,18 @@ fn build_env(
 }
 
 /// One `--env` flag: `KEY=VALUE` carries an explicit value, bare `KEY` copies
-/// from this process when set. An empty key is silently omitted.
-fn resolve_flag(flag: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
+/// from this process when set. An empty key is silently omitted. The flag is
+/// lossy-decoded first so non-UTF-8 bytes arrive as `U+FFFD`, never rejected.
+fn resolve_flag(
+    flag: &OsString,
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Option<(String, String)> {
+    let flag = flag.to_string_lossy();
     match flag.split_once('=') {
         Some(("", _)) => None,
         Some((key, value)) => Some((key.to_string(), value.to_string())),
-        None => lookup(flag).map(|value| (flag.to_string(), value)),
+        None => lookup(flag.as_ref())
+            .map(|value| (flag.into_owned(), value.to_string_lossy().into_owned())),
     }
 }
 
@@ -328,20 +343,28 @@ async fn send(
 
 #[cfg(test)]
 mod tests {
-    use super::build_env;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
     use test_case::test_case;
 
+    use super::{build_env, build_request};
+
     /// A lookup over literal pairs, standing in for the process environment.
-    fn lookup_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+    fn lookup_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |name| {
             pairs
                 .iter()
                 .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.to_string())
+                .map(|(_, value)| OsString::from(value.to_string()))
         }
     }
 
-    fn owned(items: &[&str]) -> Vec<String> {
+    fn owned(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(|item| OsString::from(item)).collect()
+    }
+
+    fn expected_strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
     }
 
@@ -370,7 +393,39 @@ mod tests {
         expected: &[&str],
     ) {
         let merged = build_env(&owned(cli), forward, lookup_of(host)).expect("merge succeeds");
-        assert_eq!(merged, owned(expected));
+        assert_eq!(merged, expected_strings(expected));
+    }
+
+    #[test]
+    fn non_utf8_flag_value_is_lossy_not_rejected() {
+        let flag = OsString::from_vec(b"K=\xff".to_vec());
+        let merged = build_env(&[flag], None, lookup_of(&[])).expect("merge succeeds");
+        assert_eq!(merged, vec!["K=\u{FFFD}".to_string()]);
+    }
+
+    #[test]
+    fn non_utf8_forwarded_value_is_lossy_not_omitted() {
+        let lookup = |_: &str| Some(OsString::from_vec(b"ho\xffst".to_vec()));
+        let merged = build_env(&[], Some(r#"["K"]"#), lookup).expect("merge succeeds");
+        assert_eq!(merged, vec!["K=ho\u{FFFD}st".to_string()]);
+    }
+
+    #[test]
+    fn non_utf8_bare_flag_value_is_lossy_not_omitted() {
+        let lookup = |_: &str| Some(OsString::from_vec(b"va\xffl".to_vec()));
+        let merged = build_env(&[OsString::from("K")], None, lookup).expect("merge succeeds");
+        assert_eq!(merged, vec!["K=va\u{FFFD}l".to_string()]);
+    }
+
+    #[test]
+    fn non_utf8_command_and_args_are_lossy() {
+        let command = vec![
+            OsString::from_vec(b"cm\xffd".to_vec()),
+            OsString::from_vec(b"ar\xffg".to_vec()),
+        ];
+        let request = build_request(None, &[], &command).expect("request builds");
+        assert_eq!(request.command, "cm\u{FFFD}d");
+        assert_eq!(request.args, vec!["ar\u{FFFD}g".to_string()]);
     }
 
     #[test_case("not json" ; "malformed_json")]
