@@ -2,36 +2,158 @@
 let
   lib = pkgs.lib;
 
-  # Sanitize a basename: non-alphanumeric runs collapse to single '-', edges stripped.
-  # Returns null when nothing survives.
-  sanitize =
-    basename:
-    let
-      chars = lib.stringToCharacters basename;
-      isAlnum = c: builtins.match "[A-Za-z0-9]" c != null;
-      folded = lib.foldl' (
-        acc: ch:
-        if isAlnum ch then
-          if acc.run && acc.out != "" then
-            {
-              out = acc.out + "-" + ch;
-              run = false;
-            }
-          else
-            {
-              out = acc.out + ch;
-              run = false;
-            }
+  # Render a received value for error messages: type + value.
+  showReceived =
+    v:
+    if v == null then
+      "null"
+    else if builtins.isString v then
+      "string `\"${v}\"`"
+    else if builtins.isPath v then
+      "Nix path `${toString v}`"
+    else
+      "${builtins.typeOf v} `${builtins.toString v}`";
+
+  throwOpt = opt: expected: v: throw "option `${opt}`: expected ${expected}, got ${showReceived v}";
+
+  throwPath =
+    opt: expected: v:
+    throw "option `${opt}`: expected ${expected}, got Nix path `${toString v}` (paths must be plain strings; a Nix path would be copied into the store)";
+
+  # ---- scalar checks (return the value on success) ---------------------------
+  checkString =
+    opt: v:
+    if builtins.isPath v then
+      throwPath opt "string" v
+    else if builtins.isString v then
+      v
+    else
+      throwOpt opt "string" v;
+
+  checkNullOrString =
+    opt: v:
+    if v == null then
+      null
+    else if builtins.isPath v then
+      throwPath opt "null or string" v
+    else if builtins.isString v then
+      v
+    else
+      throwOpt opt "null or string" v;
+
+  checkBool =
+    opt: v:
+    if builtins.isPath v then
+      throwPath opt "bool" v
+    else if builtins.isBool v then
+      v
+    else
+      throwOpt opt "bool" v;
+
+  checkTimeout =
+    opt: v:
+    if builtins.isPath v then
+      throwPath opt "positive integer" v
+    else if !builtins.isInt v then
+      throwOpt opt "positive integer" v
+    else if v <= 0 then
+      throwOpt opt "positive integer" v
+    else
+      v;
+
+  checkRuntime =
+    opt: v:
+    if builtins.isPath v then
+      throwPath opt "one of `podman`, `docker`" v
+    else if !builtins.isString v then
+      throwOpt opt "one of `podman`, `docker`" v
+    else if v == "podman" || v == "docker" then
+      v
+    else
+      throw "option `${opt}`: expected one of `podman`, `docker`, got string `\"${v}\"`";
+
+  # ---- list-of-strings check (returns the list on success) -------------------
+  checkStringList =
+    opt: v:
+    if builtins.isPath v then
+      throwPath opt "list of strings" v
+    else if !builtins.isList v then
+      throwOpt opt "list of strings" v
+    else
+      map (
+        e:
+        if builtins.isPath e then
+          throwPath opt "list of strings" e
+        else if builtins.isString e then
+          e
         else
-          {
-            out = acc.out;
-            run = true;
-          }
-      ) { out = ""; run = false; } chars;
-      # folded.out already has no leading/trailing '-', due to run logic.
-      out = folded.out;
-    in
-    if out == "" then null else out;
+          throw "option `${opt}`: expected list of strings, got entry ${showReceived e}"
+      ) v;
+
+  # ---- wrappers check --------------------------------------------------------
+  checkWrappers =
+    opt: v:
+    if builtins.isPath v then
+      throwPath opt "list of strings or attrsets" v
+    else if !builtins.isList v then
+      throwOpt opt "list of strings or attrsets" v
+    else
+      map (
+        elem:
+        if builtins.isPath elem then
+          throwPath opt "string or attrset" elem
+        else if builtins.isString elem then
+          elem
+        else if builtins.isAttrs elem then
+          let
+            hasName = elem ? name;
+            nameRaw = if hasName then elem.name else throw "option `${opt}`: wrapper attrset missing required `name`";
+            name =
+              if builtins.isPath nameRaw then
+                throwPath opt "wrapper `name` string" nameRaw
+              else if builtins.isString nameRaw then
+                nameRaw
+              else
+                throw "option `${opt}`: expected wrapper `name` to be string, got ${showReceived nameRaw}";
+            commandRaw = if elem ? command then elem.command else name;
+            command =
+              if builtins.isPath commandRaw then
+                throwPath opt "wrapper `command` string" commandRaw
+              else if builtins.isString commandRaw then
+                commandRaw
+              else
+                throw "option `${opt}`: expected wrapper `command` to be string, got ${showReceived commandRaw}";
+            envRaw = if elem ? env then elem.env else [ ];
+            env =
+              if builtins.isPath envRaw then
+                throwPath opt "wrapper `env` list of strings" envRaw
+              else if !builtins.isList envRaw then
+                throw "option `${opt}`: expected wrapper `env` to be list of strings, got ${showReceived envRaw}"
+              else
+                map (
+                  e:
+                  if builtins.isPath e then
+                    throwPath opt "wrapper `env` list of strings" e
+                  else if builtins.isString e then
+                    e
+                  else
+                    throw "option `${opt}`: expected wrapper `env` to be list of strings, got entry ${showReceived e}"
+                ) envRaw;
+            cwdRaw = if elem ? cwd then elem.cwd else null;
+            cwd =
+              if cwdRaw == null then
+                null
+              else if builtins.isPath cwdRaw then
+                throwPath opt "wrapper `cwd` null or string" cwdRaw
+              else if builtins.isString cwdRaw then
+                cwdRaw
+              else
+                throw "option `${opt}`: expected wrapper `cwd` to be null or string, got ${showReceived cwdRaw}";
+          in
+          builtins.deepSeq [ name command env cwd ] elem
+        else
+          throw "option `${opt}`: expected string or attrset, got ${showReceived elem}"
+      ) v;
 
   # Normalize devShell URI: bare names get ".#" prefixed, full URIs pass through.
   normalizeDevShell =
@@ -39,24 +161,6 @@ let
     if lib.hasPrefix "." devShell || lib.hasPrefix "/" devShell then devShell
     else if lib.hasInfix ":" devShell || lib.hasInfix "#" devShell then devShell
     else ".#" + devShell;
-
-  # Validate watchFiles entries: plain strings only, no absolute, no "..".
-  validateWatchFiles =
-    files:
-    let
-      checkOne = f:
-        if builtins.isPath f then
-          throw "watchFiles entry `${toString f}` is a Nix path; use a plain string (a path would be copied into the store)"
-        else if !builtins.isString f then
-          throw "watchFiles entry must be a string, got ${builtins.typeOf f}"
-        else if lib.hasPrefix "/" f then
-          throw "watchFiles entry `${f}` is absolute; watchFiles must be project-root-relative and not absolute"
-        else if lib.hasInfix ".." f then
-          throw "watchFiles entry `${f}` contains `..`; watchFiles must be project-root-relative and not contain `..`"
-        else
-          f;
-    in
-    map checkOne files;
 
 in
 {
@@ -76,67 +180,60 @@ in
       timeout ? 10,
       socketPath ? null,
       containerName ? null,
+      cacheDir ? null,
+      logDir ? null,
       preShellHook ? "",
       postShellHook ? "",
       autoStart ? true,
       runtime ? "podman",
     }:
     let
-      # ---- validation ---------------------------------------------------------
-      validatedWatchFiles = validateWatchFiles watchFiles;
+      # ---- eval-time type checks (spec/flake-api.md § Type checks, ADR-0003) --
+      # Every option is checked before mkShellNoCC runs; a mismatch throws
+      # naming the option, the expected shape, and the received type/value.
+      # Null is accepted only where the table default is null. No coercions;
+      # no Nix `path` values for any option.
+      checkedProject = checkNullOrString "project" project;
+      checkedImage = checkString "image" image;
+      checkedDevShell = checkString "devShell" devShell;
+      checkedWatchFiles = checkStringList "watchFiles" watchFiles;
+      checkedEnvForward = checkStringList "envForward" envForward;
+      checkedWrappers = checkWrappers "wrappers" wrappers;
+      checkedExtraOptions = checkStringList "extraOptions" extraOptions;
+      checkedHarden = checkBool "harden" harden;
+      checkedTimeout = checkTimeout "timeout" timeout;
+      checkedSocketPath = checkNullOrString "socketPath" socketPath;
+      checkedContainerName = checkNullOrString "containerName" containerName;
+      checkedCacheDir = checkNullOrString "cacheDir" cacheDir;
+      checkedLogDir = checkNullOrString "logDir" logDir;
+      checkedPreShellHook = checkString "preShellHook" preShellHook;
+      checkedPostShellHook = checkString "postShellHook" postShellHook;
+      checkedAutoStart = checkBool "autoStart" autoStart;
+      checkedRuntime = checkRuntime "runtime" runtime;
 
-      normalizedDevShell = normalizeDevShell devShell;
+      # Force all checks before building the shell. deepSeq catches lazy
+      # list entries (plain seq only forces the list spine).
+      checkAll = builtins.deepSeq [
+        checkedProject
+        checkedImage
+        checkedDevShell
+        checkedWatchFiles
+        checkedEnvForward
+        checkedWrappers
+        checkedExtraOptions
+        checkedHarden
+        checkedTimeout
+        checkedSocketPath
+        checkedContainerName
+        checkedCacheDir
+        checkedLogDir
+        checkedPreShellHook
+        checkedPostShellHook
+        checkedAutoStart
+        checkedRuntime
+      ] true;
 
-      # ---- project derivation -------------------------------------------------
-      # When project is not set, derive from PWD basename (impure). This mirrors
-      # the Rust derivation (sanitize basename, error if empty). In pure eval
-      # where PWD is empty, we require an explicit `project` rather than
-      # falling back to the store path (`toString ./.`) which would be misleading.
-      projectName =
-        if project != null then
-          project
-        else
-          let
-            pwd = builtins.getEnv "PWD";
-            base = if pwd != "" then builtins.baseNameOf pwd else throw "cannot derive a project name from root `${toString ./.}`; set `project`";
-            sanitized = sanitize base;
-          in
-          if sanitized == null then
-            throw "cannot derive a project name from root `${base}`; set `project`"
-          else
-            sanitized;
-
-      # ---- derived names/paths ------------------------------------------------
-      containerDerived = "ncap-${projectName}";
-      containerFinal = if containerName != null then containerName else containerDerived;
-
-      # XDG fallback rule (mirrors ctl's paths.rs):
-      # - socket: $XDG_RUNTIME_DIR/nix-capsule/<project>/ncap.sock (dir 0700),
-      #   fallback $TMPDIR/nix-capsule/<project>/ncap.sock ($TMPDIR default /tmp)
-      # - cache:  $XDG_CACHE_HOME/nix-capsule/<project> else $HOME/.cache/nix-capsule/<project>
-      # - logs:   $XDG_STATE_HOME/nix-capsule/<project>/logs else $HOME/.local/state/nix-capsule/<project>/logs
-      # Cache/log have no further fallback: neither the XDG var nor HOME
-      # being set is an eval error naming the missing variable.
-      # At Nix eval we capture the evaluating shell's XDG/TMPDIR/HOME (impure)
-      # so the derived path is keyed by project and the fallback logic is visible
-      # in the Nix code; the runtime ctl re-derives with the user's actual env
-      # if NCAP_* is unset, but mkShell now sets them for eval-level checks.
-      xdgRuntimeDir = builtins.getEnv "XDG_RUNTIME_DIR";
-      tmpdir = let t = builtins.getEnv "TMPDIR"; in if t != "" then t else "/tmp";
-      xdgCacheHome = builtins.getEnv "XDG_CACHE_HOME";
-      xdgStateHome = builtins.getEnv "XDG_STATE_HOME";
-      home = builtins.getEnv "HOME";
-      runtimeDir = if xdgRuntimeDir != "" then "${xdgRuntimeDir}/nix-capsule/${projectName}" else "${tmpdir}/nix-capsule/${projectName}";
-      socketDerived = "${runtimeDir}/ncap.sock";
-      socketFinal = if socketPath != null then socketPath else socketDerived;
-      cacheDerived =
-        if xdgCacheHome != "" then "${xdgCacheHome}/nix-capsule/${projectName}"
-        else if home != "" then "${home}/.cache/nix-capsule/${projectName}"
-        else throw "cannot derive the cache dir: neither `XDG_CACHE_HOME` nor `HOME` is set";
-      logDerived =
-        if xdgStateHome != "" then "${xdgStateHome}/nix-capsule/${projectName}/logs"
-        else if home != "" then "${home}/.local/state/nix-capsule/${projectName}/logs"
-        else throw "cannot derive the log dir: neither `XDG_STATE_HOME` nor `HOME` is set";
+      normalizedDevShell = normalizeDevShell checkedDevShell;
 
       # ---- wrappers normalization ----------------------------------------------
       normalizedWrappers = map (
@@ -148,24 +245,14 @@ in
             env = [ ];
             cwd = null;
           }
-        else if builtins.isAttrs elem then
-          let
-            cwdVal = elem.cwd or null;
-            _cwdCheck = if cwdVal != null && builtins.isPath cwdVal then
-              throw "wrapper `cwd` for `${elem.name or "unknown"}` is a Nix path; use a plain string (a path would be copied into the store)"
-            else if cwdVal != null && !builtins.isString cwdVal then
-              throw "wrapper `cwd` for `${elem.name or "unknown"}` must be a string, got ${builtins.typeOf cwdVal}"
-            else null;
-          in
-          builtins.seq _cwdCheck {
-            name = elem.name or (throw "wrapper attrset missing required `name`");
-            command = elem.command or elem.name;
-            env = elem.env or [ ];
-            cwd = cwdVal;
-          }
         else
-          throw "wrapper entry must be a string or attrset, got ${builtins.typeOf elem}"
-      ) wrappers;
+          {
+            name = elem.name;
+            command = if elem ? command then elem.command else elem.name;
+            env = if elem ? env then elem.env else [ ];
+            cwd = if elem ? cwd then elem.cwd else null;
+          }
+      ) checkedWrappers;
 
       mkWrapperScript =
         w:
@@ -179,18 +266,18 @@ in
       wrapperBins = map mkWrapperScript normalizedWrappers;
 
       # ---- JSON-array vars ----------------------------------------------------
-      watchFilesJson = builtins.toJSON validatedWatchFiles;
-      runOptsJson = builtins.toJSON extraOptions;
-      envForwardJson = builtins.toJSON envForward;
+      watchFilesJson = builtins.toJSON checkedWatchFiles;
+      runOptsJson = builtins.toJSON checkedExtraOptions;
+      envForwardJson = builtins.toJSON checkedEnvForward;
 
       # ---- shellHook construction ---------------------------------------------
       # Order: preHook → export NCAP_PROJECT_ROOT → guarded watch_file per entry → init when autoStart → postHook
       watchFileLines = lib.concatMapStringsSep "\n" (
         f: "[ -n \"\${DIRENV_DIR:-}\" ] && watch_file ${lib.escapeShellArg f}"
-      ) validatedWatchFiles;
+      ) checkedWatchFiles;
 
       # The init call must not abort shell entry on failure; wrap with warning.
-      initHook = lib.optionalString autoStart ''
+      initHook = lib.optionalString checkedAutoStart ''
         if ! ncap-ctl init; then
           echo "ncap-ctl: init failed (run \`ncap-ctl init\` to retry; wrapped commands will hint on connect)" >&2
         fi
@@ -198,43 +285,55 @@ in
 
       shellHookFragments = lib.concatStringsSep "\n" (
         lib.filter (s: s != "") [
-          preShellHook
+          checkedPreShellHook
           ''export NCAP_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"''
           watchFileLines
           initHook
-          postShellHook
+          checkedPostShellHook
         ]
       );
 
       # Need to handle empty watchFileLines -> don't emit blank line confusion.
       # Already filtered.
 
+      # ---- NCAP_* contract (spec/ctl.md) --------------------------------------
+      # A null option leaves its NCAP_* unset (no eval-time derivation);
+      # Ctl derives per contract. Ctl never sees an overridden value.
+      nullableEnv =
+        lib.optionalAttrs (checkedProject != null) { NCAP_PROJECT = checkedProject; }
+        // lib.optionalAttrs (checkedContainerName != null) { NCAP_CONTAINER = checkedContainerName; }
+        // lib.optionalAttrs (checkedSocketPath != null) { NCAP_SOCKET = checkedSocketPath; }
+        // lib.optionalAttrs (checkedCacheDir != null) { NCAP_CACHE_DIR = checkedCacheDir; }
+        // lib.optionalAttrs (checkedLogDir != null) { NCAP_LOG_DIR = checkedLogDir; };
+
+      baseEnv = {
+        NCAP_IMAGE = checkedImage;
+        NCAP_DEVSHELL = normalizedDevShell;
+        NCAP_WATCH_FILES = watchFilesJson;
+        NCAP_RUN_OPTS = runOptsJson;
+        NCAP_ENV_FORWARD = envForwardJson;
+        NCAP_TIMEOUT = toString checkedTimeout;
+        NCAP_HARDEN = if checkedHarden then "true" else "false";
+        NCAP_RUNTIME = checkedRuntime;
+        NCAP_SERVER = "${pkgs.ncap}/bin/ncap-server";
+        NCAP_NIX = "${pkgs.nix}/bin/nix";
+        NCAP_BASH = "${pkgs.bash}/bin/bash";
+      };
+
     in
-    pkgs.mkShellNoCC {
-      name = "nix-capsule-shell";
+    builtins.seq checkAll (
+      pkgs.mkShellNoCC (
+        {
+          name = "nix-capsule-shell";
 
-      packages = [ pkgs.ncap ] ++ wrapperBins;
+          packages = [ pkgs.ncap ] ++ wrapperBins;
 
-      # ----- NCAP_* contract --------------------------------------------------
-      NCAP_PROJECT = projectName;
-      NCAP_IMAGE = image;
-      NCAP_DEVSHELL = normalizedDevShell;
-      NCAP_WATCH_FILES = watchFilesJson;
-      NCAP_RUN_OPTS = runOptsJson;
-      NCAP_ENV_FORWARD = envForwardJson;
-      NCAP_TIMEOUT = toString timeout;
-      NCAP_HARDEN = if harden then "true" else "false";
-      NCAP_RUNTIME = runtime;
-      NCAP_CONTAINER = containerFinal;
-      NCAP_SOCKET = socketFinal;
-      NCAP_CACHE_DIR = cacheDerived;
-      NCAP_LOG_DIR = logDerived;
-      NCAP_SERVER = "${pkgs.ncap}/bin/ncap-server";
-      NCAP_NIX = "${pkgs.nix}/bin/nix";
-      NCAP_BASH = "${pkgs.bash}/bin/bash";
-
-      shellHook = shellHookFragments;
-    };
+          shellHook = shellHookFragments;
+        }
+        // baseEnv
+        // nullableEnv
+      )
+    );
 
   app = {
     type = "app";
