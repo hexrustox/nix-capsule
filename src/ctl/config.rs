@@ -250,8 +250,7 @@ pub fn resolve(
             } else {
                 let xdg = lookup_non_empty(lookup, "XDG_RUNTIME_DIR");
                 let tmpdir = lookup_non_empty(lookup, "TMPDIR");
-                let uid = unsafe { libc::getuid() };
-                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref(), uid);
+                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref());
                 paths::socket_path(&dir)
             };
             let cache_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
@@ -308,8 +307,7 @@ pub fn resolve(
             } else {
                 let xdg = lookup_non_empty(lookup, "XDG_RUNTIME_DIR");
                 let tmpdir = lookup_non_empty(lookup, "TMPDIR");
-                let uid = unsafe { libc::getuid() };
-                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref(), uid);
+                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref());
                 paths::socket_path(&dir)
             };
             let cache_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
@@ -419,8 +417,7 @@ pub fn resolve(
                 })?;
                 let xdg = lookup_non_empty(lookup, "XDG_RUNTIME_DIR");
                 let tmpdir = lookup_non_empty(lookup, "TMPDIR");
-                let uid = unsafe { libc::getuid() };
-                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref(), uid);
+                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref());
                 Some(paths::socket_path(&dir))
             };
 
@@ -605,8 +602,7 @@ pub fn resolve(
                 })?;
                 let xdg = lookup_non_empty(lookup, "XDG_RUNTIME_DIR");
                 let tmpdir = lookup_non_empty(lookup, "TMPDIR");
-                let uid = unsafe { libc::getuid() };
-                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref(), uid);
+                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref());
                 Some(paths::socket_path(&dir))
             };
             let cache_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
@@ -765,15 +761,15 @@ mod tests {
     }
 
     #[test]
-    fn socket_falls_back_to_tmpdir_with_uid() {
+    fn socket_falls_back_to_tmpdir_flat() {
         let mut pairs = full_init_env();
         pairs.retain(|(key, _)| *key != "NCAP_SOCKET" && *key != "XDG_RUNTIME_DIR");
         pairs.push(("TMPDIR", "/tmp/foo"));
         let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
-        let uid = unsafe { libc::getuid() };
-        let expected =
-            PathBuf::from(format!("/tmp/foo/nix-capsule-{uid}/nix-capsule/myproj/ncap.sock"));
-        assert_eq!(cfg.socket.as_deref(), Some(expected.as_path()));
+        assert_eq!(
+            cfg.socket.as_deref(),
+            Some(Path::new("/tmp/foo/nix-capsule/myproj/ncap.sock"))
+        );
     }
 
     #[test]

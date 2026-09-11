@@ -112,30 +112,31 @@ in
 
       # XDG fallback rule (mirrors ctl's paths.rs):
       # - socket: $XDG_RUNTIME_DIR/nix-capsule/<project>/ncap.sock (dir 0700),
-      #   fallback $TMPDIR/nix-capsule-<uid>/nix-capsule/<project>/ncap.sock
+      #   fallback $TMPDIR/nix-capsule/<project>/ncap.sock ($TMPDIR default /tmp)
       # - cache:  $XDG_CACHE_HOME/nix-capsule/<project> else $HOME/.cache/nix-capsule/<project>
       # - logs:   $XDG_STATE_HOME/nix-capsule/<project>/logs else $HOME/.local/state/nix-capsule/<project>/logs
-      # At Nix eval we capture the evaluating shell's XDG/TMPDIR/HOME/UID (impure)
+      # Cache/log have no further fallback: neither the XDG var nor HOME
+      # being set is an eval error naming the missing variable.
+      # At Nix eval we capture the evaluating shell's XDG/TMPDIR/HOME (impure)
       # so the derived path is keyed by project and the fallback logic is visible
       # in the Nix code; the runtime ctl re-derives with the user's actual env
       # if NCAP_* is unset, but mkShell now sets them for eval-level checks.
       xdgRuntimeDir = builtins.getEnv "XDG_RUNTIME_DIR";
       tmpdir = let t = builtins.getEnv "TMPDIR"; in if t != "" then t else "/tmp";
-      uid = let u = builtins.getEnv "UID"; in if u != "" then u else "1000";
       xdgCacheHome = builtins.getEnv "XDG_CACHE_HOME";
       xdgStateHome = builtins.getEnv "XDG_STATE_HOME";
       home = builtins.getEnv "HOME";
-      runtimeDir = if xdgRuntimeDir != "" then "${xdgRuntimeDir}/nix-capsule/${projectName}" else "${tmpdir}/nix-capsule-${uid}/nix-capsule/${projectName}";
+      runtimeDir = if xdgRuntimeDir != "" then "${xdgRuntimeDir}/nix-capsule/${projectName}" else "${tmpdir}/nix-capsule/${projectName}";
       socketDerived = "${runtimeDir}/ncap.sock";
       socketFinal = if socketPath != null then socketPath else socketDerived;
       cacheDerived =
         if xdgCacheHome != "" then "${xdgCacheHome}/nix-capsule/${projectName}"
         else if home != "" then "${home}/.cache/nix-capsule/${projectName}"
-        else "/tmp/nix-capsule-${uid}/cache/${projectName}";
+        else throw "cannot derive the cache dir: neither `XDG_CACHE_HOME` nor `HOME` is set";
       logDerived =
         if xdgStateHome != "" then "${xdgStateHome}/nix-capsule/${projectName}/logs"
         else if home != "" then "${home}/.local/state/nix-capsule/${projectName}/logs"
-        else "/tmp/nix-capsule-${uid}/state/${projectName}/logs";
+        else throw "cannot derive the log dir: neither `XDG_STATE_HOME` nor `HOME` is set";
 
       # ---- wrappers normalization ----------------------------------------------
       normalizedWrappers = map (

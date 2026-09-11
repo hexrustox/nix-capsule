@@ -14,20 +14,12 @@ pub struct NoHome {
 }
 
 /// The per-project runtime dir that holds the socket.
-pub fn runtime_dir(
-    project: &str,
-    xdg_runtime_dir: Option<&str>,
-    tmpdir: Option<&str>,
-    uid: u32,
-) -> PathBuf {
+pub fn runtime_dir(project: &str, xdg_runtime_dir: Option<&str>, tmpdir: Option<&str>) -> PathBuf {
     if let Some(dir) = xdg_runtime_dir.filter(|value| !value.is_empty()) {
         Path::new(dir).join("nix-capsule").join(project)
     } else {
         let base = tmpdir.filter(|value| !value.is_empty()).unwrap_or("/tmp");
-        Path::new(base)
-            .join(format!("nix-capsule-{uid}"))
-            .join("nix-capsule")
-            .join(project)
+        Path::new(base).join("nix-capsule").join(project)
     }
 }
 
@@ -92,29 +84,22 @@ pub fn ensure_dir_0700(dir: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    fn uid() -> u32 {
-        unsafe { libc::getuid() }
-    }
-
     #[test]
     fn runtime_dir_prefers_xdg_runtime_dir() {
-        let dir = runtime_dir("proj", Some("/run/user/1000"), Some("/tmp"), uid());
+        let dir = runtime_dir("proj", Some("/run/user/1000"), Some("/tmp"));
         assert_eq!(dir, Path::new("/run/user/1000/nix-capsule/proj"));
     }
 
     #[test]
-    fn runtime_dir_falls_back_to_tmpdir_with_uid() {
-        let dir = runtime_dir("proj", None, Some("/tmp/foo"), uid());
-        assert_eq!(
-            dir,
-            Path::new(&format!("/tmp/foo/nix-capsule-{}/nix-capsule/proj", uid()))
-        );
+    fn runtime_dir_falls_back_to_tmpdir_flat() {
+        let dir = runtime_dir("proj", None, Some("/tmp/foo"));
+        assert_eq!(dir, Path::new("/tmp/foo/nix-capsule/proj"));
     }
 
     #[test]
     fn runtime_dir_falls_back_to_slash_tmp_when_tmpdir_unset() {
-        let dir = runtime_dir("proj", None, None, 42);
-        assert_eq!(dir, Path::new("/tmp/nix-capsule-42/nix-capsule/proj"));
+        let dir = runtime_dir("proj", None, None);
+        assert_eq!(dir, Path::new("/tmp/nix-capsule/proj"));
     }
 
     #[test]

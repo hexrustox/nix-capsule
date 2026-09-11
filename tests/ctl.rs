@@ -1245,9 +1245,7 @@ esac
     // socket path is derived (no NCAP_SOCKET), so rebuild it here; its
     // parent is pre-created mode 0700 so the assertion below holds (the ctl
     // leaves an existing dir untouched).
-    let uid_sock = unsafe { libc::getuid() };
     let derived_sock = xdg_fallback
-        .join(format!("nix-capsule-{uid_sock}"))
         .join("nix-capsule")
         .join("proj")
         .join("ncap.sock");
@@ -1263,11 +1261,7 @@ esac
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
 
     // The derived runtime dir must exist with 0700
-    let uid = unsafe { libc::getuid() };
-    let derived = xdg_fallback
-        .join(format!("nix-capsule-{uid}"))
-        .join("nix-capsule")
-        .join("proj");
+    let derived = xdg_fallback.join("nix-capsule").join("proj");
     let mode = fs::metadata(&derived).expect("derived dir").permissions().mode() & 0o777;
     assert_eq!(mode, 0o700, "runtime dir must be 0700");
     let _ = (cache, logs);
