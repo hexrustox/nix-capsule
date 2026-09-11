@@ -77,7 +77,7 @@ side makes no guarantee about the derived value.
 | --- | --- | --- | --- |
 | `project` | string | `null` | Sets `NCAP_PROJECT`. |
 | `image` | string | `"alpine:latest"` | Sets `NCAP_IMAGE`. |
-| `devShell` | string | `"container"` | Sets `NCAP_DEVSHELL`. |
+| `devShell` | string | `".#container"` | Sets `NCAP_DEVSHELL`. |
 | `watchFiles` | list of strings | `[ "flake.nix" "flake.lock" ]` | Sets `NCAP_WATCH_FILES`. |
 | `envForward` | list of strings | `[ ]` | Sets `NCAP_ENV_FORWARD`. |
 | `wrappers` | list | `[ ]` | Host PATH shims routing tool names through the Client (§ Wrappers). |
@@ -100,10 +100,6 @@ the option, the expected shape, and the received type/value. `null`
 is accepted only where the table default is `null`. No coercions: a
 value of the wrong type is an error, never silently converted.
 
-No option accepts a Nix `path` — passing a `path` throws. Paths are
-plain strings: a Nix `path` value would be copied into the store,
-while these are runtime absolute paths.
-
 Checked shapes: `project` null or string; `image`, `devShell`,
 `containerName`, `runtime` strings (`runtime` is one of `podman`,
 `docker`); `watchFiles`, `envForward`, `extraOptions` lists of
@@ -120,8 +116,9 @@ The shellHook runs, in order (empty fragments skipped):
 
 1. `preShellHook`,
 2. exports `NCAP_PROJECT_ROOT` (git toplevel, falling back to `pwd`),
-3. emits a guarded `watch_file <f>` for every `watchFiles` entry (guard:
-   `${DIRENV_DIR:-}` non-empty — inert outside direnv),
+3. emits one guarded `watch_file` invocation taking every `watchFiles`
+   entry as arguments (guard: `${DIRENV_DIR:-}` non-empty — inert outside
+   direnv); an empty `watchFiles` emits no line,
 4. runs `ncap-ctl init` when `autoStart`,
 5. `postShellHook`.
 
@@ -146,7 +143,7 @@ with the Client's flags:
 | `name` | string | required | bin name placed on PATH |
 | `command` | string | `name` | command executed inside the container |
 | `env` | list of `"KEY=VALUE"` | `[ ]` | one `--env` per entry |
-| `cwd` | string | `null` | `--cwd`; a plain string (a Nix `path` would be copied into the store) |
+| `cwd` | string | `null` | `--cwd` |
 
 Wrapped and bare invocations share every Client behavior — a wrapper is just
 a pre-filled command line (spec/client.md § CLI).

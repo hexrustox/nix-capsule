@@ -126,7 +126,7 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 | `NCAP_CONTAINER` | `ncap-<project>` (§ Project name) | Container name. Set by `containerName`. |
 | `NCAP_IMAGE` | `-` | OCI image; provides only the kernel/userland sandbox. Set by `image`. |
 | `NCAP_RUNTIME` | `-` | OCI runtime (§ Runtime adapter). Set by `runtime`. |
-| `NCAP_DEVSHELL` | `-` | Flake URI of the Container shell. Bare names get `.#` prefixed; URIs containing `:` or `#`, or starting with `.` or `/`, pass through. Set by `devShell`. |
+| `NCAP_DEVSHELL` | `-` | Flake URI of the Container shell. Set by `devShell`. |
 | `NCAP_RUN_OPTS` | `-` | JSON array of extra runtime args, appended after the default mounts (§ Mounts). Set by `extraOptions`. |
 | `NCAP_WATCH_FILES` | `-` | JSON array of project-root-relative watched files hashed for freshness (§ Freshness and the digest); also emitted as direnv `watch_file` calls (spec/flake-api.md § Freshness triggers). Set by `watchFiles`. |
 | `NCAP_ENV_FORWARD` | `-` | JSON array of forwarded variable names (additionally consumed by the Client). Set by `envForward`. |
