@@ -15,9 +15,11 @@ ncap completions <shell>
 - `--socket` is required; `NCAP_SOCKET` supplies the default. Neither present
   is a usage error.
 - `--env KEY=VALUE` sets an override — layer 4 of the environment layering
-  (spec/flake-api.md § Environment layering). Bare `KEY` copies that variable
-  from the Client's environment if set; silently omitted otherwise. `KEY=` is an explicit empty
-  value; a value may itself contain `=`; an empty key is silently omitted.
+  (spec/flake-api.md § Environment layering). Valid forms are `KEY` and
+  `KEY=VALUE`: bare `KEY` copies that variable from the Client's environment
+  if set; silently omitted otherwise. `KEY=` is an explicit empty value; a
+  value may itself contain `=`. An empty key (`=VALUE`, or the empty string)
+  is a usage error.
 - `--cwd` defaults to the Client's current directory. The same-path mount
   contract (spec/ctl.md § Mounts) makes host cwds valid inside the container;
   anything not mounted is invisible — the Server reports the failure.
@@ -85,7 +87,7 @@ it directly. The protocol is the only path.
 | Terminal `Exit` carries code `127` (spawn `ENOENT`, or a Child's own 127) | prints `ncap: <command>: command not found` to stderr; exits `127` |
 | Terminal `Exit` carries code `126` (spawn `EACCES`, or a Child's own 126) | prints `ncap: <command>: permission denied` to stderr; exits `126` |
 | Terminal `Exit` with neither field set (status unknowable) | warning on stderr, then `1` |
-| Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`) | `1` |
+| Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`, invalid `--env`) | `1` |
 | `ServerStopping` received — the Client bails immediately and stops streaming — or the socket closed without a terminal frame | `143` (128 + SIGTERM) |
 
 `ServerStopping` is terminal for the Client but non-terminal server-side:

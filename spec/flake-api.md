@@ -160,10 +160,8 @@ layer defining it wins:
 | 3 | wrapper `env` | in the wrapper script | after flake edit (wrapper regen) |
 | 4 | `-e KEY=VALUE` | CLI flag, per invocation | immediately |
 
-The Client merges layers 2–4 into the request's env list (later wins,
-deduplicated; unset entries silently omitted); the Server applies that list
-over its inherited environment. A name in `envForward` that is unset on the
-host, and a `KEY` without `=VALUE`, are silently omitted.
+The Client merges layers 2–4 into the request's env list; the Server applies
+that list over its inherited environment.
 
 Note the split: forwarded *values* never require a restart (the Client
 re-reads them each invocation). Only editing the `envForward` *list* touches

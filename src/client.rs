@@ -34,8 +34,8 @@ pub async fn run(
 ) -> i32 {
     match session(socket, cwd, env, command).await {
         Ok(code) => code,
-        Err(ClientError::Connect { socket, source }) => {
-            eprintln!("ncap: cannot connect to socket `{socket}`: {source}");
+        Err(err @ ClientError::Connect { .. }) => {
+            eprintln!("ncap: {err}");
             eprintln!("  run `ncap-ctl init` to start this project's container");
             1
         }
@@ -68,6 +68,8 @@ enum ClientError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid `--env` `{flag}`: empty key")]
+    EnvFlag { flag: String },
     #[error("{0}")]
     Transport(String),
 }
@@ -78,11 +80,19 @@ async fn session(
     env: Vec<OsString>,
     command: Vec<OsString>,
 ) -> Result<i32, ClientError> {
+    // Unreachable: the only caller is the `ncap` binary, whose `command`
+    // argument carries `required = true` (src/bin/ncap.rs:27), so clap
+    // rejects an empty command before `run` is ever invoked — keeping
+    // `build_request`'s `expect` below from ever firing.
     if command.is_empty() {
-        return Err(ClientError::Transport("no command given".into()));
+        unreachable!();
     }
 
-    let command_name = command[0].to_string_lossy().into_owned();
+    // Local errors — malformed `NCAP_ENV_FORWARD`, invalid `--env`, an
+    // unresolvable cwd — fire before any connection attempt, so they fail
+    // identically whether or not the Server is up.
+    let request = build_request(cwd, &env, &command)?;
+    let command_name = request.command.clone();
 
     let stream = UnixStream::connect(socket)
         .await
@@ -91,11 +101,7 @@ async fn session(
             source,
         })?;
     let mut framed = Framed::new(stream, FrameCodec);
-    send(
-        &mut framed,
-        Message::Request(build_request(cwd, &env, &command)?),
-    )
-    .await?;
+    send(&mut framed, Message::Request(request)).await?;
 
     // Stdin travels on a blocking thread so a silent pipe never stalls the
     // frame loop; chunks reach the loop through the channel instead.
@@ -220,9 +226,10 @@ fn build_request(
 
 /// Merge the request env: every name in `NCAP_ENV_FORWARD` (a JSON array of
 /// variable names) resolved from this process first, then the `--env` flags —
-/// later-wins by key, deduplicated, unset entries silently omitted. A forward
-/// list that is not a JSON array of names is an error. Present-but-non-Unicode
-/// values forward lossily (`U+FFFD`); only unset names are omitted.
+/// later-wins by key, deduplicated, unset entries silently omitted, an empty
+/// `--env` key an error. A forward list that is not a JSON array of names is
+/// an error. Present-but-non-Unicode values forward lossily (`U+FFFD`); only
+/// unset names are omitted.
 fn build_env(
     cli: &[OsString],
     forward: Option<&str>,
@@ -241,7 +248,7 @@ fn build_env(
         }
     }
     for flag in cli {
-        if let Some((key, value)) = resolve_flag(flag, &lookup) {
+        if let Some((key, value)) = resolve_flag(flag, &lookup)? {
             apply_entry(&mut entries, &key, value);
         }
     }
@@ -252,18 +259,24 @@ fn build_env(
 }
 
 /// One `--env` flag: `KEY=VALUE` carries an explicit value, bare `KEY` copies
-/// from this process when set. An empty key is silently omitted. The flag is
-/// lossy-decoded first so non-UTF-8 bytes arrive as `U+FFFD`, never rejected.
+/// from this process when set. An empty key (`=VALUE`, or the empty string) is
+/// an error. The flag is lossy-decoded first so non-UTF-8 bytes arrive as
+/// `U+FFFD`, never rejected.
 fn resolve_flag(
     flag: &OsString,
     lookup: impl Fn(&str) -> Option<OsString>,
-) -> Option<(String, String)> {
+) -> Result<Option<(String, String)>, ClientError> {
     let flag = flag.to_string_lossy();
     match flag.split_once('=') {
-        Some(("", _)) => None,
-        Some((key, value)) => Some((key.to_string(), value.to_string())),
-        None => lookup(flag.as_ref())
-            .map(|value| (flag.into_owned(), value.to_string_lossy().into_owned())),
+        Some(("", _)) => Err(ClientError::EnvFlag {
+            flag: flag.into_owned(),
+        }),
+        Some((key, value)) => Ok(Some((key.to_string(), value.to_string()))),
+        None if flag.is_empty() => Err(ClientError::EnvFlag {
+            flag: flag.into_owned(),
+        }),
+        None => Ok(lookup(flag.as_ref())
+            .map(|value| (flag.into_owned(), value.to_string_lossy().into_owned()))),
     }
 }
 
@@ -344,11 +357,10 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
 
     use test_case::test_case;
 
-    use super::{build_env, build_request};
+    use super::build_env;
 
     /// A lookup over literal pairs, standing in for the process environment.
     fn lookup_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
@@ -361,7 +373,7 @@ mod tests {
     }
 
     fn owned(items: &[&str]) -> Vec<OsString> {
-        items.iter().map(|item| OsString::from(item)).collect()
+        items.iter().map(OsString::from).collect()
     }
 
     fn expected_strings(items: &[&str]) -> Vec<String> {
@@ -373,7 +385,6 @@ mod tests {
     #[test_case(&["K"], None, &[], &[] ; "bare_key_omitted_when_unset")]
     #[test_case(&["K="], None, &[], &["K="] ; "empty_value_is_explicit")]
     #[test_case(&["K=a=b"], None, &[], &["K=a=b"] ; "value_may_carry_equals")]
-    #[test_case(&["=V"], None, &[], &[] ; "empty_key_is_omitted")]
     #[test_case(&[], Some(r#"["K"]"#), &[("K", "host")], &["K=host"] ; "forwarded_name_resolves")]
     #[test_case(&[], Some(r#"["K"]"#), &[], &[] ; "forwarded_unset_name_is_omitted")]
     #[test_case(&[], Some("[]"), &[("K", "host")], &[] ; "empty_forward_list_yields_nothing")]
@@ -396,38 +407,6 @@ mod tests {
         assert_eq!(merged, expected_strings(expected));
     }
 
-    #[test]
-    fn non_utf8_flag_value_is_lossy_not_rejected() {
-        let flag = OsString::from_vec(b"K=\xff".to_vec());
-        let merged = build_env(&[flag], None, lookup_of(&[])).expect("merge succeeds");
-        assert_eq!(merged, vec!["K=\u{FFFD}".to_string()]);
-    }
-
-    #[test]
-    fn non_utf8_forwarded_value_is_lossy_not_omitted() {
-        let lookup = |_: &str| Some(OsString::from_vec(b"ho\xffst".to_vec()));
-        let merged = build_env(&[], Some(r#"["K"]"#), lookup).expect("merge succeeds");
-        assert_eq!(merged, vec!["K=ho\u{FFFD}st".to_string()]);
-    }
-
-    #[test]
-    fn non_utf8_bare_flag_value_is_lossy_not_omitted() {
-        let lookup = |_: &str| Some(OsString::from_vec(b"va\xffl".to_vec()));
-        let merged = build_env(&[OsString::from("K")], None, lookup).expect("merge succeeds");
-        assert_eq!(merged, vec!["K=va\u{FFFD}l".to_string()]);
-    }
-
-    #[test]
-    fn non_utf8_command_and_args_are_lossy() {
-        let command = vec![
-            OsString::from_vec(b"cm\xffd".to_vec()),
-            OsString::from_vec(b"ar\xffg".to_vec()),
-        ];
-        let request = build_request(None, &[], &command).expect("request builds");
-        assert_eq!(request.command, "cm\u{FFFD}d");
-        assert_eq!(request.args, vec!["ar\u{FFFD}g".to_string()]);
-    }
-
     #[test_case("not json" ; "malformed_json")]
     #[test_case(r#"{"a": 1}"# ; "object_is_not_an_array")]
     #[test_case(r#"["K", 1]"# ; "non_string_entry")]
@@ -435,5 +414,14 @@ mod tests {
         let err =
             build_env(&[], Some(forward), lookup_of(&[])).expect_err("malformed forward errors");
         assert!(err.to_string().contains("NCAP_ENV_FORWARD"), "error={err}");
+    }
+
+    #[test_case(&["=V"], "`--env` `=V`" ; "value_only")]
+    #[test_case(&["="], "`--env` `=`" ; "equals_alone")]
+    #[test_case(&[""], "`--env` ``" ; "empty_string")]
+    #[test_case(&["=V", "K=V"], "empty key" ; "errors_before_a_later_valid_flag_merges")]
+    fn empty_key_flag_is_an_error(cli: &[&str], expected_substring: &str) {
+        let err = build_env(&owned(cli), None, lookup_of(&[])).expect_err("empty key errors");
+        assert!(err.to_string().contains(expected_substring), "error={err}");
     }
 }

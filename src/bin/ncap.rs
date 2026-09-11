@@ -24,7 +24,7 @@ struct Cli {
     env: Vec<OsString>,
 
     /// Command and its arguments
-    #[arg(trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true, required = true)]
     command: Vec<OsString>,
 }
 

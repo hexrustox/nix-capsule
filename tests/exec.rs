@@ -540,6 +540,26 @@ async fn connect_failure_names_socket_and_suggests_init() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_key_env_flag_is_a_local_error_before_any_connection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("missing.sock");
+
+    let out = Client::at(&socket).env_flag("=VALUE").run(&["echo", "hi"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stderr.contains("invalid `--env` `=VALUE`: empty key"),
+        "stderr={}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("ncap-ctl init"),
+        "the connect hint must not appear: stderr={}",
+        out.stderr
+    );
+}
+
 // ------------------------------------------------------------------ properties
 
 /// A NUL-free Unicode string: full range of multibyte, newline, and control
