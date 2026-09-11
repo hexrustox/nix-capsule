@@ -14,6 +14,10 @@ pub enum Cmd {
     Stop,
     Restart,
     Status,
+    Enter,
+    Log,
+    Clean,
+    ShowOptions,
 }
 
 impl Cmd {
@@ -24,6 +28,10 @@ impl Cmd {
             Cmd::Stop => "stop",
             Cmd::Restart => "restart",
             Cmd::Status => "status",
+            Cmd::Enter => "enter",
+            Cmd::Log => "log",
+            Cmd::Clean => "clean",
+            Cmd::ShowOptions => "show-options",
         }
     }
 }
@@ -408,6 +416,204 @@ pub fn resolve(
                 watch_files,
                 run_opts,
                 harden,
+                image: None,
+                server: None,
+                nix: None,
+                bash: None,
+                devshell: None,
+            })
+        }
+        Cmd::Enter => {
+            // Enter needs the container, the cache dir (env dump path), and bash.
+            let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
+            let needs_project = lookup_non_empty(lookup, "NCAP_CONTAINER").is_none()
+                || lookup_non_empty(lookup, "NCAP_CACHE_DIR").is_none();
+            let project = if needs_project {
+                Some(resolve_project(lookup, cmd, root_opt.as_deref())?)
+            } else {
+                lookup_non_empty(lookup, "NCAP_PROJECT")
+            };
+            let container = if let Some(container) = lookup_non_empty(lookup, "NCAP_CONTAINER") {
+                container
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                format!("ncap-{project}")
+            };
+            let cache_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
+                Some(PathBuf::from(dir))
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                let xdg = lookup_non_empty(lookup, "XDG_CACHE_HOME");
+                let home = lookup_non_empty(lookup, "HOME");
+                Some(paths::cache_dir(&project, xdg.as_deref(), home.as_deref())?)
+            };
+            let bash = demand(lookup, cmd, "NCAP_BASH")?;
+            Ok(Config {
+                cmd,
+                root: root_opt,
+                project,
+                container,
+                socket: None,
+                cache_dir,
+                log_dir: None,
+                runtime,
+                timeout,
+                watch_files: Vec::new(),
+                run_opts: Vec::new(),
+                harden: false,
+                image: None,
+                server: None,
+                nix: None,
+                bash: Some(PathBuf::from(bash)),
+                devshell: None,
+            })
+        }
+        Cmd::Log => {
+            // Log only needs the log dir.
+            let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
+            let needs_project = lookup_non_empty(lookup, "NCAP_LOG_DIR").is_none();
+            let project = if needs_project {
+                Some(resolve_project(lookup, cmd, root_opt.as_deref())?)
+            } else {
+                lookup_non_empty(lookup, "NCAP_PROJECT")
+            };
+            let log_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_LOG_DIR") {
+                Some(PathBuf::from(dir))
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                let xdg = lookup_non_empty(lookup, "XDG_STATE_HOME");
+                let home = lookup_non_empty(lookup, "HOME");
+                Some(paths::log_dir(&project, xdg.as_deref(), home.as_deref())?)
+            };
+            let container = lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_else(|| {
+                project
+                    .clone()
+                    .map(|p| format!("ncap-{p}"))
+                    .unwrap_or_default()
+            });
+            Ok(Config {
+                cmd,
+                root: root_opt,
+                project,
+                container,
+                socket: None,
+                cache_dir: None,
+                log_dir,
+                runtime,
+                timeout,
+                watch_files: Vec::new(),
+                run_opts: Vec::new(),
+                harden: false,
+                image: None,
+                server: None,
+                nix: None,
+                bash: None,
+                devshell: None,
+            })
+        }
+        Cmd::Clean => {
+            // Clean needs container + cache/log/socket dirs to delete.
+            let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
+            let needs_project = lookup_non_empty(lookup, "NCAP_CONTAINER").is_none()
+                || lookup_non_empty(lookup, "NCAP_SOCKET").is_none()
+                || lookup_non_empty(lookup, "NCAP_CACHE_DIR").is_none()
+                || lookup_non_empty(lookup, "NCAP_LOG_DIR").is_none();
+            let project = if needs_project {
+                Some(resolve_project(lookup, cmd, root_opt.as_deref())?)
+            } else {
+                lookup_non_empty(lookup, "NCAP_PROJECT")
+            };
+            let container = if let Some(container) = lookup_non_empty(lookup, "NCAP_CONTAINER") {
+                container
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                format!("ncap-{project}")
+            };
+            let socket = if let Some(socket) = lookup_non_empty(lookup, "NCAP_SOCKET") {
+                Some(PathBuf::from(socket))
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                let xdg = lookup_non_empty(lookup, "XDG_RUNTIME_DIR");
+                let tmpdir = lookup_non_empty(lookup, "TMPDIR");
+                let uid = unsafe { libc::getuid() };
+                let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref(), uid);
+                Some(paths::socket_path(&dir))
+            };
+            let cache_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
+                Some(PathBuf::from(dir))
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                let xdg = lookup_non_empty(lookup, "XDG_CACHE_HOME");
+                let home = lookup_non_empty(lookup, "HOME");
+                Some(paths::cache_dir(&project, xdg.as_deref(), home.as_deref())?)
+            };
+            let log_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_LOG_DIR") {
+                Some(PathBuf::from(dir))
+            } else {
+                let project = project.clone().ok_or(Error::Missing {
+                    command: cmd.name(),
+                    var: "NCAP_PROJECT_ROOT",
+                })?;
+                let xdg = lookup_non_empty(lookup, "XDG_STATE_HOME");
+                let home = lookup_non_empty(lookup, "HOME");
+                Some(paths::log_dir(&project, xdg.as_deref(), home.as_deref())?)
+            };
+            Ok(Config {
+                cmd,
+                root: root_opt,
+                project,
+                container,
+                socket,
+                cache_dir,
+                log_dir,
+                runtime,
+                timeout,
+                watch_files: Vec::new(),
+                run_opts: Vec::new(),
+                harden: false,
+                image: None,
+                server: None,
+                nix: None,
+                bash: None,
+                devshell: None,
+            })
+        }
+        Cmd::ShowOptions => {
+            // Show-options only needs NCAP_RUN_OPTS (optional, empty by default).
+            let run_opts = parse_run_opts(lookup)?;
+            let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
+            let container = lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_default();
+            Ok(Config {
+                cmd,
+                root: root_opt,
+                project: lookup_non_empty(lookup, "NCAP_PROJECT"),
+                container,
+                socket: None,
+                cache_dir: None,
+                log_dir: None,
+                runtime,
+                timeout,
+                watch_files: Vec::new(),
+                run_opts,
+                harden: false,
                 image: None,
                 server: None,
                 nix: None,

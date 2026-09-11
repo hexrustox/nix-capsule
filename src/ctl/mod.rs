@@ -34,6 +34,10 @@ pub async fn run(cmd: Cmd) -> i32 {
         Cmd::Stop => stop(cfg).await,
         Cmd::Restart => restart(cfg).await,
         Cmd::Status => status(cfg).await,
+        Cmd::Enter => enter(cfg).await,
+        Cmd::Log => log(cfg).await,
+        Cmd::Clean => clean(cfg).await,
+        Cmd::ShowOptions => show_options(cfg).await,
     };
     match result {
         Ok(()) => 0,
@@ -194,6 +198,85 @@ async fn status(cfg: Config) -> Result<(), String> {
     Ok(())
 }
 
+async fn enter(cfg: Config) -> Result<(), String> {
+    let cache_dir = cfg.cache_dir.as_deref().expect("enter demands cache_dir");
+    let bash = cfg.bash.as_deref().expect("enter demands bash");
+    if !cache_dir.join("env").is_file() {
+        return Err("no cached dev environment found; run `ncap-ctl init` first".to_owned());
+    }
+    let rt = runtime::Runtime::new(cfg.runtime.clone());
+    if !rt.is_running(&cfg.container).await {
+        return Err(format!(
+            "container `{}` is not running; run `ncap-ctl init` to start it",
+            cfg.container
+        ));
+    }
+    rt.exec_interactive(&cfg.container, bash, cache_dir).await
+}
+
+async fn log(cfg: Config) -> Result<(), String> {
+    let log_dir = cfg.log_dir.as_deref().expect("log demands log_dir");
+    let newest = newest_log_path(log_dir)
+        .ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
+    let (prog, args) = pager_command();
+    let mut cmd = tokio::process::Command::new(&prog);
+    cmd.args(&args);
+    cmd.arg(&newest);
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+    let status = cmd.status().await.map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        match status.code() {
+            Some(code) => Err(format!("pager `{prog}` exited with status {code}")),
+            None => Err(format!("pager `{prog}` terminated by signal")),
+        }
+    }
+}
+
+async fn clean(cfg: Config) -> Result<(), String> {
+    let rt = runtime::Runtime::new(cfg.runtime.clone());
+    // Stop the container (best-effort, idempotent) then remove it.
+    if rt.is_running(&cfg.container).await {
+        let _ = rt.stop(&cfg.container).await;
+    }
+    let _ = rt.remove(&cfg.container).await;
+
+    if let Some(cache_dir) = cfg.cache_dir.as_deref() {
+        remove_dir_all_if_exists(cache_dir)?;
+    }
+    if let Some(log_dir) = cfg.log_dir.as_deref() {
+        remove_dir_all_if_exists(log_dir)?;
+    }
+    if let Some(socket) = cfg.socket.as_deref()
+        && let Some(parent) = socket.parent()
+    {
+        // Delete the socket file itself, then best-effort remove the parent
+        // dir if empty. Never `remove_dir_all` the parent: an explicit
+        // NCAP_SOCKET may point into a shared dir (e.g. `/tmp/x.sock`),
+        // where a recursive delete would destroy unrelated files. Parent
+        // removal failure is non-fatal (non-empty, permission, ...).
+        match fs::remove_file(socket) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.to_string()),
+        }
+        let _ = fs::remove_dir(parent);
+    }
+    eprintln!("cleaned project `{}`", cfg.container);
+    Ok(())
+}
+
+async fn show_options(cfg: Config) -> Result<(), String> {
+    for opt in &cfg.run_opts {
+        let expanded = expand_one(opt)?;
+        println!("{expanded}");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers shared by init/start
 // ---------------------------------------------------------------------------
@@ -342,6 +425,41 @@ fn parse_log_epoch(name: &str) -> Option<u64> {
     let rest = name.strip_prefix("ncap-server-")?;
     let epoch = rest.strip_suffix(".log")?;
     epoch.parse().ok()
+}
+
+fn newest_log_path(log_dir: &Path) -> Option<PathBuf> {
+    let dir = fs::read_dir(log_dir).ok()?;
+    let mut entries: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(epoch) = parse_log_epoch(&name) {
+            entries.push((epoch, entry.path()));
+        }
+    }
+    entries.sort_by_key(|(epoch, _)| *epoch);
+    entries.pop().map(|(_, path)| path)
+}
+
+fn pager_command() -> (String, Vec<String>) {
+    if let Ok(pager) = std::env::var("PAGER") {
+        let trimmed = pager.trim();
+        if !trimmed.is_empty() {
+            let parts: Vec<String> =
+                trimmed.split_whitespace().map(|s| s.to_owned()).collect();
+            if !parts.is_empty() {
+                return (parts[0].clone(), parts[1..].to_vec());
+            }
+        }
+    }
+    ("less".to_owned(), vec!["-R".to_owned()])
+}
+
+fn remove_dir_all_if_exists(dir: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {

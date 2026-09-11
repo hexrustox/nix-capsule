@@ -126,6 +126,42 @@ impl Runtime {
         }
     }
 
+    /// `exec -it <name> <bash> -c "source <cache>/env && exec <bash>"` —
+    /// interactive escape hatch. Inherits stdio so the user's terminal drives
+    /// the container shell directly. Returns `Ok` on exit 0, else an error
+    /// naming the exit status.
+    pub async fn exec_interactive(
+        &self,
+        name: &str,
+        bash: &Path,
+        cache_dir: &Path,
+    ) -> Result<(), String> {
+        let env_file = cache_dir.join("env");
+        let cmd_str = format!(
+            "source {} && exec {}",
+            shell_quote(&env_file.to_string_lossy()),
+            shell_quote(&bash.to_string_lossy())
+        );
+        let status = Command::new(&self.bin)
+            .args(["exec", "-it", name])
+            .arg(bash)
+            .args(["-c", &cmd_str])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .await
+            .map_err(|err| err.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            match status.code() {
+                Some(code) => Err(format!("`{}` exec exited with status {code}", self.bin)),
+                None => Err(format!("`{}` exec terminated by signal", self.bin)),
+            }
+        }
+    }
+
     /// Whether the runtime binary resolves and is executable. Accepts a bare
     /// name (PATH lookup) or an absolute path.
     pub fn check_exists(&self) -> Result<(), String> {
@@ -165,6 +201,21 @@ impl Runtime {
 pub fn is_name_in_use(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("already in use") || lower.contains("name in use")
+}
+
+/// Single-quote a value for `bash -c`: `'a'\''b'` escaping.
+fn shell_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 #[allow(dead_code)]

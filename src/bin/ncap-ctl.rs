@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use nix_capsule::ctl::config::Cmd as CtlCmd;
 
@@ -30,6 +30,12 @@ enum Cmd {
     Clean,
     /// Print the expanded runtime adapter options
     ShowOptions,
+    /// Print shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 fn main() {
@@ -40,9 +46,19 @@ fn main() {
         Cmd::Stop => block_on(CtlCmd::Stop),
         Cmd::Restart => block_on(CtlCmd::Restart),
         Cmd::Status => block_on(CtlCmd::Status),
-        Cmd::Enter | Cmd::Log | Cmd::Clean | Cmd::ShowOptions => {
-            eprintln!("ncap-ctl: not implemented yet (ticket 10)");
-            1
+        Cmd::Enter => block_on(CtlCmd::Enter),
+        Cmd::Log => block_on(CtlCmd::Log),
+        Cmd::Clean => block_on(CtlCmd::Clean),
+        Cmd::ShowOptions => block_on(CtlCmd::ShowOptions),
+        Cmd::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(
+                shell,
+                &mut cmd,
+                "ncap-ctl",
+                &mut std::io::stdout(),
+            );
+            0
         }
     };
     std::process::exit(code);
