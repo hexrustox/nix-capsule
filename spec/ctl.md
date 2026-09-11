@@ -17,7 +17,6 @@ contract).
 | `status` | Container running? Socket connectable (§ Liveness)? Cache fresh/stale/missing (§ Freshness and the digest)? |
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
 | `clean` | Stop the Container, remove the (stopped) container, and delete this project's Cache, log, and socket dirs — stamp included. |
-| `completions <shell>` | Shell completions (`bash`, `zsh`, `fish` required; others optional). |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
 
 ## Liveness

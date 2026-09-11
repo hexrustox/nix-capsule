@@ -8,15 +8,15 @@ use clap::Parser;
 #[command(version, about)]
 struct Cli {
     /// Unix socket path to bind
-    #[arg(long, value_name = "PATH", required = true)]
+    #[arg(long, value_name = "PATH")]
     socket: PathBuf,
 
     /// Directory for per-run server logs
-    #[arg(long, value_name = "DIR", required = true)]
+    #[arg(long, value_name = "DIR")]
     log_dir: PathBuf,
 
     /// Drain grace for live connections at shutdown, seconds
-    #[arg(long, required = true)]
+    #[arg(long)]
     timeout: u64,
 }
 

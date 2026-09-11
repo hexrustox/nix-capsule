@@ -9,7 +9,6 @@ that provides `ncap` and its Wrappers is spec/flake-api.md § mkShell.
 
 ```
 ncap [--socket PATH | $NCAP_SOCKET] [--env KEY[=VALUE]]… [--cwd PATH] [--] COMMAND [ARGS…]
-ncap completions <shell>
 ```
 
 - `--socket` is required; `NCAP_SOCKET` supplies the default. Neither present
@@ -26,9 +25,6 @@ ncap completions <shell>
 - Connect failure errors with a static hint naming the socket path and
   suggesting `ncap-ctl init`. No implicit auto-start — init may need to
   evaluate Nix, and surprises are worse than a hint.
-- `completions <shell>` prints a completion script for the named shell
-  (`bash`, `zsh`, and `fish` are required; other shells optional) and demands
-  nothing else.
 
 ## Request construction
 
