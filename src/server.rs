@@ -164,6 +164,23 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
         return;
     }
 
+    // Version is advisory, never a rejection: a differing (or missing)
+    // request version is one warning line, then the connection continues to
+    // cwd validation. Comparison is exact string equality.
+    match &request.version {
+        Some(peer) if peer == CURRENT_VERSION => {}
+        Some(peer) => {
+            log.line(&format!(
+                "version mismatch: client `{peer}`, server `{CURRENT_VERSION}`"
+            ));
+        }
+        None => {
+            log.line(&format!(
+                "client did not send a version (server `{CURRENT_VERSION}`)"
+            ));
+        }
+    }
+
     if !Path::new(&request.cwd).is_dir() {
         send_error(
             &mut framed,

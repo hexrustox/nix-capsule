@@ -92,7 +92,7 @@ pub struct ErrorMsg {
     pub message: String,
 }
 
-/// Either side → the other: the sender's protocol version.
+/// Server → client: the sender's protocol version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionMsg {
     /// Version string; compared by exact equality, advisory only.
@@ -123,7 +123,7 @@ pub enum Message {
     Error(ErrorMsg),
     /// Server → client: the server is shutting down. Empty payload.
     ServerStopping,
-    /// Either side → the other: version handshake.
+    /// Server → client: version handshake.
     Version(VersionMsg),
     /// Client → server: a forwarded host signal.
     Signal(SignalMsg),
@@ -145,6 +145,15 @@ impl Message {
     }
 
     pub fn into_frame(self) -> Result<Frame, EncodeError> {
+        // `Exit` carries exactly one outcome: both fields set is never valid
+        // on the wire (`None`, `None` is the unknowable-status exception).
+        if let Self::Exit(Exit {
+            code: Some(_),
+            signal: Some(_),
+        }) = &self
+        {
+            return Err(EncodeError::InvalidExit);
+        }
         let frame_type = self.frame_type();
         let payload = match self {
             Self::Stdin(b) | Self::Stdout(b) | Self::Stderr(b) => b,
@@ -171,9 +180,20 @@ impl Message {
             FrameType::Stdin => Self::Stdin(payload),
             FrameType::Stdout => Self::Stdout(payload),
             FrameType::Stderr => Self::Stderr(payload),
-            FrameType::Exit => Self::Exit(serde_json::from_slice(&payload)?),
+            FrameType::Exit => {
+                let exit: Exit = serde_json::from_slice(&payload)?;
+                if exit.code.is_some() && exit.signal.is_some() {
+                    return Err(DecodeError::InvalidExit);
+                }
+                Self::Exit(exit)
+            }
             FrameType::Error => Self::Error(serde_json::from_slice(&payload)?),
-            FrameType::ServerStopping => Self::ServerStopping,
+            FrameType::ServerStopping => {
+                if !payload.is_empty() {
+                    return Err(DecodeError::NonEmptyServerStopping(payload.len()));
+                }
+                Self::ServerStopping
+            }
             FrameType::Version => Self::Version(serde_json::from_slice(&payload)?),
             FrameType::Signal => Self::Signal(serde_json::from_slice(&payload)?),
         })
@@ -192,6 +212,12 @@ pub enum DecodeError {
     /// A JSON struct payload failed to parse.
     #[error("frame payload parse error: {0}")]
     Json(#[from] serde_json::Error),
+    /// `ServerStopping` arrived with a non-empty payload (spec: empty).
+    #[error("non-empty `ServerStopping` payload: {0} bytes")]
+    NonEmptyServerStopping(usize),
+    /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
+    #[error("both `code` and `signal` set in `Exit` frame")]
+    InvalidExit,
     /// Underlying I/O failure.
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -206,6 +232,9 @@ pub enum EncodeError {
     /// A JSON struct payload failed to serialize.
     #[error("frame payload serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
+    #[error("both `code` and `signal` set in `Exit` frame")]
+    InvalidExit,
     /// Underlying I/O failure.
     #[error("{0}")]
     Io(#[from] std::io::Error),

@@ -43,13 +43,14 @@ pub fn of(root: &Path, entries: &[String]) -> io::Result<String> {
 
 /// Compare the computed digest against the cached `<cache>/hash`: the env
 /// dump missing is `Missing`, a matching hash is `Fresh`, everything else is
-/// `Stale`.
+/// `Stale`. The cached hash is trimmed before comparing so a trailing newline
+/// (spec: stored with no trailing newline) reads as fresh, matching `status`.
 pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
     if !cache_dir.join("env").is_file() {
         return Freshness::Missing;
     }
     match fs::read_to_string(cache_dir.join("hash")) {
-        Ok(cached) if cached == of(root, entries).unwrap_or_default() => Freshness::Fresh,
+        Ok(cached) if cached.trim() == of(root, entries).unwrap_or_default() => Freshness::Fresh,
         _ => Freshness::Stale,
     }
 }
@@ -192,5 +193,20 @@ mod tests {
         store(cache.path(), "0123456789abcdef").expect("store");
         let raw = fs::read(cache.path().join("hash")).expect("hash file");
         assert_eq!(raw, b"0123456789abcdef");
+    }
+
+    #[test]
+    fn freshness_tolerates_a_trailing_newline_in_the_cached_hash() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().expect("tempdir");
+        write(&root.path().join("w.txt"), b"x");
+        let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
+        fs::write(cache.path().join("hash"), format!("{digest}\n")).expect("hash with newline");
+        assert_eq!(
+            check(cache.path(), root.path(), &entries(&["w.txt"])),
+            Freshness::Fresh,
+            "a trailing newline must read as fresh, matching `status`"
+        );
     }
 }

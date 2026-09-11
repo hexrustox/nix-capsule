@@ -202,8 +202,9 @@ the relative path is part of the record, so moving a watched file flips it
 too. Cached as lowercase hex, no trailing newline.
 
 Freshness states: **missing** (no `env` in the Cache), **fresh** (`env`
-present and `hash` equals the computed digest), **stale** (everything else —
-hash differs or is unreadable).
+present and `hash` equals the computed digest after trimming surrounding
+whitespace, so a stray trailing newline still reads as fresh), **stale**
+(everything else — hash differs or is unreadable).
 
 Ensuring the Cache: fresh ⇒ nothing happens — no Nix evaluation. Stale or
 missing ⇒ `nix print-dev-env --profile <cache>/profile <devshell>` runs on

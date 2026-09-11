@@ -70,7 +70,17 @@ fn arb_message() -> impl Strategy<Value = Message> {
         prop::collection::vec(any::<u8>(), 0..256).prop_map(Message::Stdin),
         prop::collection::vec(any::<u8>(), 0..256).prop_map(Message::Stdout),
         prop::collection::vec(any::<u8>(), 0..256).prop_map(Message::Stderr),
-        (any::<Option<u8>>(), any::<Option<u8>>())
+        // `Exit` with both fields set is never valid on the wire
+        // (`None`, `None` is the unknowable-status exception), so the
+        // round-trip strategy excludes it; both-set rejection is pinned
+        // below.
+        (
+            any::<Option<u8>>(),
+            any::<Option<u8>>(),
+        )
+            .prop_filter("not both set", |(code, signal)| !(
+                code.is_some() && signal.is_some()
+            ))
             .prop_map(|(code, signal)| Message::Exit(Exit { code, signal })),
         ".*".prop_map(|message| Message::Error(ErrorMsg { message })),
         Just(Message::ServerStopping),
@@ -140,9 +150,46 @@ fn encodes_the_documented_wire_bytes(msg: Message, want: Vec<u8>) {
 
 #[test_case(Some(7), None => framed(0x05, br#"{"code":7}"#) ; "code_only")]
 #[test_case(None, Some(9) => framed(0x05, br#"{"signal":9}"#) ; "signal_only")]
-#[test_case(None, None => framed(0x05, b"{}") ; "neither_set")]
+#[test_case(None, None => framed(0x05, b"{}") ; "neither_set_is_the_unknowable_status_exception")]
 fn encode_exit_emits_only_the_set_field(code: Option<u8>, signal: Option<u8>) -> Vec<u8> {
     encoded(&Message::Exit(Exit { code, signal }))
+}
+
+#[test]
+fn encode_exit_with_both_fields_set_is_rejected() {
+    let frame = Message::Exit(Exit {
+        code: Some(1),
+        signal: Some(9),
+    })
+    .into_frame();
+    assert!(
+        matches!(frame, Err(EncodeError::InvalidExit)),
+        "both set must not encode, got {frame:?}"
+    );
+}
+
+#[test]
+fn decode_exit_with_both_fields_set_is_rejected() {
+    let wire = framed(0x05, br#"{"code":1,"signal":9}"#);
+    let mut codec = FrameCodec;
+    let mut src = BytesMut::from(wire.as_slice());
+    let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
+    assert!(
+        matches!(Message::from_frame(frame), Err(DecodeError::InvalidExit)),
+        "both set must not decode"
+    );
+}
+
+#[test]
+fn decode_server_stopping_with_non_empty_payload_is_rejected() {
+    let wire = framed(0x07, b"junk");
+    let mut codec = FrameCodec;
+    let mut src = BytesMut::from(wire.as_slice());
+    let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
+    match Message::from_frame(frame) {
+        Err(DecodeError::NonEmptyServerStopping(4)) => {}
+        other => panic!("expected NonEmptyServerStopping(4), got {other:?}"),
+    }
 }
 
 // ------------------------------------------------------------ error taxonomy
@@ -160,7 +207,8 @@ fn unknown_tag_bytes_reject_decoding(bad_tag: u8) {
     }
 }
 
-// `ServerStopping` is deliberately absent: its payload is tolerated, not parsed.
+// `ServerStopping` has no struct payload: only the empty payload decodes;
+// a non-empty payload is pinned as a rejection below.
 #[test_case(FrameType::Request ; "request")]
 #[test_case(FrameType::Exit ; "exit")]
 #[test_case(FrameType::Error ; "error")]

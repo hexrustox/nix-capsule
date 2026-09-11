@@ -321,6 +321,138 @@ async fn non_request_first_frame_is_error_and_close() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
+    let server = Server::builder().start().await;
+    let warnings_before = server.stderr();
+
+    // Mismatched version with a good cwd: the command still runs.
+    let mut framed = server.raw().await;
+    framed
+        .send(
+            Message::Request(Request {
+                command: "sh".into(),
+                args: vec!["-c".into(), "printf ok".into()],
+                cwd: server.path().to_string_lossy().into_owned(),
+                env: vec![],
+                version: Some("9.9.9".into()),
+            })
+            .into_frame()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut stdout = String::new();
+    let mut code = None;
+    while let Some(frame) = framed.next().await {
+        match Message::from_frame(frame.unwrap()).unwrap() {
+            Message::Version(v) => assert_eq!(v.version, CURRENT_VERSION),
+            Message::Stdout(b) => stdout.push_str(&String::from_utf8_lossy(&b)),
+            Message::Exit(e) => {
+                code = e.code;
+                break;
+            }
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    assert_eq!(stdout, "ok");
+    assert_eq!(code, Some(0));
+
+    // Mismatched version with a bad cwd: cwd validation still runs.
+    let mut bad = server.raw().await;
+    bad.send(
+        Message::Request(Request {
+            command: "sh".into(),
+            args: vec![],
+            cwd: "/nonexistent-xyz-abc-123".into(),
+            env: vec![],
+            version: Some("9.9.9".into()),
+        })
+        .into_frame()
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut saw_error = false;
+    while let Some(frame) = bad.next().await {
+        match Message::from_frame(frame.unwrap()).unwrap() {
+            Message::Version(_) => {}
+            Message::Error(err) => {
+                assert!(err.message.contains("cwd"), "message={}", err.message);
+                saw_error = true;
+                break;
+            }
+            other => panic!("expected Error for bad cwd, got {other:?}"),
+        }
+    }
+    assert!(saw_error, "bad cwd must still fail with Error");
+
+    let stderr = server.stderr();
+    server.stop();
+
+    let new_warnings: Vec<&str> = stderr[warnings_before.len()..]
+        .lines()
+        .filter(|line| line.contains("version mismatch"))
+        .collect();
+    assert_eq!(
+        new_warnings.len(),
+        2,
+        "one warning per mismatched connection: {stderr:?}"
+    );
+    assert!(
+        new_warnings.iter().all(|line| line.contains("9.9.9")),
+        "warnings name the client version: {new_warnings:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_version_warns_once_and_command_still_succeeds() {
+    let server = Server::builder().start().await;
+    let warnings_before = server.stderr();
+
+    let mut framed = server.raw().await;
+    framed
+        .send(
+            Message::Request(Request {
+                command: "sh".into(),
+                args: vec!["-c".into(), "printf ok".into()],
+                cwd: server.path().to_string_lossy().into_owned(),
+                env: vec![],
+                version: None,
+            })
+            .into_frame()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut code = None;
+    while let Some(frame) = framed.next().await {
+        match Message::from_frame(frame.unwrap()).unwrap() {
+            Message::Version(_) => {}
+            Message::Exit(e) => {
+                code = e.code;
+                break;
+            }
+            Message::Stdout(_) | Message::Stderr(_) => {}
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    assert_eq!(code, Some(0));
+
+    let stderr = server.stderr();
+    server.stop();
+
+    let new_warnings: Vec<&str> = stderr[warnings_before.len()..]
+        .lines()
+        .filter(|line| line.contains("did not send a version"))
+        .collect();
+    assert_eq!(
+        new_warnings.len(),
+        1,
+        "one warning for the missing version: {stderr:?}"
+    );
+}
+
 // ------------------------------------------------------------ client behaviors
 
 #[test_case(

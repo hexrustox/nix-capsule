@@ -37,6 +37,9 @@ payload.
 JSON conventions:
 
 - Receivers tolerate unknown JSON fields and a `Request` without `version`.
+- Receivers reject a `ServerStopping` frame with a non-empty payload and an
+  `Exit` frame with both `code` and `signal` set. (`None`, `None` is the
+  unknowable-status exception, spec/server.md § Connection handling.)
 
 ## Connection lifecycle
 
