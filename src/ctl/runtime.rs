@@ -112,6 +112,16 @@ impl Runtime {
         }
     }
 
+    /// Whether a container with `name` exists at all (running or stopped):
+    /// `inspect <name>` succeeding. Used by the start flow to remove an
+    /// exists-but-stopped container before launch.
+    pub async fn exists(&self, name: &str) -> bool {
+        match Command::new(&self.bin).args(["inspect", name]).output().await {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
     pub async fn remove(&self, name: &str) -> Result<String, String> {
         let output = Command::new(&self.bin)

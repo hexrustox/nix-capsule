@@ -320,6 +320,7 @@ fn stop_refuses_without_container_or_derivation() {
     // No NCAP_CONTAINER, no NCAP_PROJECT, no root → must name NCAP_PROJECT_ROOT
     let mut env = HashMap::new();
     env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert("NCAP_TIMEOUT".into(), "2".into());
     let out = run_ctl(&env, &["stop"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -329,6 +330,7 @@ fn stop_refuses_without_container_or_derivation() {
     let mut env2 = HashMap::new();
     env2.insert("NCAP_CONTAINER".into(), "ncap-foo".into());
     env2.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env2.insert("NCAP_TIMEOUT".into(), "2".into());
     let out2 = run_ctl(&env2, &["stop"]);
     assert!(out2.status.success(), "stderr={}", String::from_utf8_lossy(&out2.stderr));
 }
@@ -903,6 +905,75 @@ esac
     assert_eq!(run_count.trim(), "2");
 }
 
+#[test]
+fn start_removes_stopped_container_before_launch() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    // Exists but stopped: `inspect -f State.Running` says false, while a
+    // bare `inspect` succeeds (the fake's default branch exits 0).
+    fs::write(state.join("running"), "false").expect("running");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    // `run` flips to running so the readiness poll succeeds.
+    let stub = format!(
+        r#"#!/usr/bin/env bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect)
+    TEMPLATE="$3"
+    if [[ "$TEMPLATE" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo "exists"; fi
+    exit 0
+    ;;
+  run)
+    COUNT_FILE="$STATE_DIR/run_count"
+    COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+    COUNT=$((COUNT+1))
+    echo $COUNT > "$COUNT_FILE"
+    echo "true" > "$STATE_DIR/running"
+    echo "fake-id-$COUNT"
+    exit 0
+    ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) echo "removed" >> "$LOG"; echo "rm" > "$STATE_DIR/rm_called"; exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+
+    fs::create_dir_all(&cache).expect("cache");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    let _live = live_socket(&sock);
+    let out = run_ctl(&env, &["start"]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let rt_log = fs::read_to_string(&runtime_log).expect("rt log");
+    // Pre-launch rm must run before the single launch.
+    let rm_pos = rt_log.find("\nrm ").or_else(|| rt_log.find("rm "));
+    assert!(rm_pos.is_some(), "pre-launch rm missing: {rt_log}");
+    let run_pos = rt_log.find("\nrun ").or_else(|| rt_log.find("run "));
+    assert!(run_pos.is_some(), "run missing: {rt_log}");
+    assert!(rm_pos.unwrap() < run_pos.unwrap(), "rm before run: {rt_log}");
+    let run_count = fs::read_to_string(state.join("run_count")).expect("run_count");
+    assert_eq!(run_count.trim(), "1", "single launch after pre-launch rm: {rt_log}");
+}
+
 // ---------------------------------------------------------------------------
 // Stop idempotent; restart tolerates stopped
 // ---------------------------------------------------------------------------
@@ -921,6 +992,7 @@ fn stop_is_idempotent() {
     let mut env = HashMap::new();
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
     env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert("NCAP_TIMEOUT".into(), "2".into());
 
     let out = run_ctl(&env, &["stop"]);
     assert!(out.status.success(), "first stop: {}", String::from_utf8_lossy(&out.stderr));
@@ -1045,6 +1117,7 @@ fn runtime_selection_explicit_path_is_used() {
     let mut env = HashMap::new();
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
     env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert("NCAP_TIMEOUT".into(), "2".into());
     let out = run_ctl(&env, &["stop"]);
     assert!(out.status.success());
     let logged = fs::read_to_string(&log).expect("log");
@@ -1052,7 +1125,7 @@ fn runtime_selection_explicit_path_is_used() {
 }
 
 #[test]
-fn runtime_defaults_to_podman_on_path() {
+fn missing_runtime_is_an_error_naming_it() {
     let tmp = TempDir::new().expect("tempdir");
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -1065,7 +1138,8 @@ fn runtime_defaults_to_podman_on_path() {
 
     let mut env: HashMap<String, String> = HashMap::new();
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
-    // No NCAP_RUNTIME → default podman
+    env.insert("NCAP_TIMEOUT".into(), "2".into());
+    // No NCAP_RUNTIME → error naming it per the contract.
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.arg("stop");
     for var in NCAP_VARS {
@@ -1074,13 +1148,33 @@ fn runtime_defaults_to_podman_on_path() {
     for (key, value) in &env {
         cmd.env(key, value);
     }
-    // Prepend bin_dir to PATH so `podman` resolves
+    // Prepend bin_dir to PATH so `podman` would resolve if defaulted.
     let orig_path = std::env::var("PATH").unwrap_or_default();
     cmd.env("PATH", format!("{}:{orig_path}", bin_dir.display()));
     let out = cmd.output().expect("spawn");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
-    let logged = fs::read_to_string(&log).expect("log");
-    assert!(!logged.is_empty(), "default podman must have been invoked: log={logged}");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
+}
+
+#[test]
+fn invalid_runtime_is_rejected() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::write(state.join("running"), "false").expect("running");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let log = tmp.path().join("runtime.log");
+    fake_runtime(&runtime_bin, &state, &log);
+
+    let mut env: HashMap<String, String> = HashMap::new();
+    env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
+    env.insert("NCAP_RUNTIME".into(), "nerdctl".into());
+    env.insert("NCAP_TIMEOUT".into(), "2".into());
+    let out = run_ctl(&env, &["stop"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1616,7 +1710,7 @@ esac
     std::fs::write(state.join("running"), "false").expect("running");
 
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
-    env.insert("NCAP_HARDEN".into(), "1".into());
+    env.insert("NCAP_HARDEN".into(), "true".into());
     env.insert(
         "NCAP_WATCH_FILES".into(),
         r#"["flake.nix", "missing.nix"]"#.into(),

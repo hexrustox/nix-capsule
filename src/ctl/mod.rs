@@ -346,6 +346,12 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
 
     let rt = runtime::Runtime::new(cfg.runtime.clone());
 
+    // A container with the target name that exists but is not running is
+    // removed before launch (spec/ctl.md § start flow).
+    if !rt.is_running(&cfg.container).await && rt.exists(&cfg.container).await {
+        let _ = rt.remove(&cfg.container).await;
+    }
+
     let run_result = rt
         .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
         .await;
@@ -498,7 +504,8 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
     args.push(format!("{}:{}", log_dir.display(), log_dir.display()));
 
     let git_path = root.join(".git");
-    if git_path.is_dir() {
+    // Worktree gitfiles are files, not dirs — mount whenever the path exists.
+    if std::fs::symlink_metadata(&git_path).is_ok() {
         args.push("-v".to_owned());
         args.push(format!("{}:{}:ro", git_path.display(), git_path.display()));
     }
@@ -519,6 +526,15 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
     }
 
     Ok(args)
+}
+
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn expand_one(input: &str) -> Result<String, String> {
@@ -547,6 +563,12 @@ fn expand_one(input: &str) -> Result<String, String> {
                 }
                 if name.is_empty() {
                     out.push_str("${}");
+                    continue;
+                }
+                // Only ${NAME} expands; anything else stays literal per the
+                // name regex (e.g. ${5}, ${foo-bar}).
+                if !is_env_name(&name) {
+                    out.push_str(&format!("${{{name}}}"));
                     continue;
                 }
                 match std::env::var(&name) {
@@ -653,6 +675,18 @@ mod tests {
         assert_eq!(out3, "a-$5b");
     }
 
+    #[test]
+    fn expand_invalid_braced_names_stay_literal() {
+        for literal in ["${5}", "${foo-bar}", "${foo bar}", "${}", "$", "$$", "$-x"] {
+            let out = expand_one(literal).expect("literal stays");
+            assert_eq!(out, literal, "input={literal}");
+        }
+        // Invalid braced names never consult the environment and never error,
+        // even when the text inside names an unset variable.
+        unsafe { std::env::remove_var("NCAP_TEST_UNSET_XYZ") };
+        let out = expand_one("${5-NC AP}").expect("literal");
+        assert_eq!(out, "${5-NC AP}");
+    }
     #[test]
     fn expand_unset_is_error_naming_var() {
         unsafe { std::env::remove_var("NCAP_TEST_UNSET_XYZ") };
@@ -808,5 +842,53 @@ mod tests {
         );
         let err = build_runtime_args(&cfg).expect_err("must error on unset");
         assert!(err.contains("NCAP_TEST_UNSET_EXTRA"), "err={err}");
+    }
+
+    #[test]
+    fn build_args_mounts_gitfile_as_well_as_gitdir() {
+        for git_is_dir in [true, false] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path().join("proj");
+            std::fs::create_dir_all(&root).expect("root");
+            let git_path = root.join(".git");
+            if git_is_dir {
+                std::fs::create_dir_all(&git_path).expect("git dir");
+            } else {
+                // Worktree-style gitfile.
+                std::fs::write(&git_path, b"gitdir: /elsewhere").expect("gitfile");
+            }
+            assert!(std::fs::symlink_metadata(&git_path).is_ok());
+            let cache = tmp.path().join("cache");
+            let logs = tmp.path().join("logs");
+            std::fs::create_dir_all(&cache).expect("cache");
+            std::fs::create_dir_all(&logs).expect("logs");
+            let sock = tmp.path().join("sock/ncap.sock");
+            let cfg = cfg_with(&root, &sock, &cache, &logs, vec![], vec![], false);
+            let args = build_runtime_args(&cfg).expect("args");
+            let expected =
+                format!("{}:{}:ro", git_path.display(), git_path.display());
+            assert!(
+                args.contains(&expected),
+                "git_is_dir={git_is_dir} args={args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_args_skips_missing_git() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).expect("root");
+        let cache = tmp.path().join("cache");
+        let logs = tmp.path().join("logs");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let sock = tmp.path().join("sock/ncap.sock");
+        let cfg = cfg_with(&root, &sock, &cache, &logs, vec![], vec![], false);
+        let args = build_runtime_args(&cfg).expect("args");
+        assert!(
+            !args.iter().any(|a| a.contains(".git")),
+            "no .git mount when absent: {args:?}"
+        );
     }
 }

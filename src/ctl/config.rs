@@ -80,6 +80,10 @@ pub enum Error {
         #[source]
         source: std::num::ParseIntError,
     },
+    #[error("`NCAP_RUNTIME` must be `podman`, `docker`, or an absolute path, got `{value}`")]
+    BadRuntime { value: String },
+    #[error("`NCAP_HARDEN` must be `true` or `false`, got `{value}`")]
+    BadHarden { value: String },
     #[error(transparent)]
     NoHome(#[from] paths::NoHome),
     #[error(transparent)]
@@ -119,9 +123,49 @@ fn parse_watch_files(
     }
 }
 
-fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>) -> Result<u64, Error> {
+fn parse_runtime(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    cmd: Cmd,
+) -> Result<String, Error> {
+    let raw = demand(lookup, cmd, "NCAP_RUNTIME")?;
+    if raw == "podman" || raw == "docker" || raw.starts_with('/') {
+        Ok(raw)
+    } else {
+        Err(Error::BadRuntime { value: raw })
+    }
+}
+
+fn parse_env_forward(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, Error> {
+    match lookup_non_empty(lookup, "NCAP_ENV_FORWARD") {
+        None => Ok(Vec::new()),
+        Some(raw) => serde_json::from_str(&raw).map_err(|source| Error::NotJsonArray {
+            var: "NCAP_ENV_FORWARD",
+            source,
+        }),
+    }
+}
+
+/// Bare flake attr names get `.#` prefixed; URIs containing `:` or `#`, or
+/// starting with `.` or `/`, pass through (spec/ctl.md § NCAP_* contract).
+fn normalize_devshell(raw: &str) -> String {
+    if raw.contains(':') || raw.contains('#') || raw.starts_with('.') || raw.starts_with('/') {
+        raw.to_owned()
+    } else {
+        format!(".#{raw}")
+    }
+}
+
+fn parse_timeout(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    cmd: Cmd,
+) -> Result<u64, Error> {
     match lookup_non_empty(lookup, "NCAP_TIMEOUT") {
-        None => Ok(10),
+        None => Err(Error::Missing {
+            command: cmd.name(),
+            var: "NCAP_TIMEOUT",
+        }),
         Some(raw) => raw.parse().map_err(|source| Error::BadTimeout { source }),
     }
 }
@@ -136,13 +180,14 @@ fn parse_run_opts(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>
     }
 }
 
-fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> Result<bool, Error> {
     match lookup_non_empty(lookup, "NCAP_HARDEN") {
-        Some(raw) => {
-            let lower = raw.to_ascii_lowercase();
-            lower == "1" || lower == "true" || lower == "yes"
-        }
-        None => false,
+        None => Ok(false),
+        Some(raw) => match raw.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(Error::BadHarden { value: raw }),
+        },
     }
 }
 
@@ -179,11 +224,19 @@ pub fn resolve(
     cmd: Cmd,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Config, Error> {
-    // Runtime and timeout have defaults and are needed by every command that
-    // touches the runtime (init/start/restart/stop/status). Resolve them for
-    // all commands.
-    let runtime = lookup_non_empty(lookup, "NCAP_RUNTIME").unwrap_or_else(|| "podman".to_owned());
-    let timeout = parse_timeout(lookup)?;
+    // Runtime/timeout are demanded on every command (missing => error naming
+    // the var). JSON-array vars and harden are validated on every command
+    // (missing => default, malformed => error naming the var); `env_forward`
+    // is consumed by the Client, but ctl still rejects malformed values.
+    let runtime = parse_runtime(lookup, cmd)?;
+    let timeout = parse_timeout(lookup, cmd)?;
+    // Eagerly validate the JSON-array vars and harden on every command so
+    // malformed values error even where a command does not consume them.
+    // Individual branches reuse these results.
+    let default_watch_files = parse_watch_files(lookup)?;
+    let default_run_opts = parse_run_opts(lookup)?;
+    let _env_forward = parse_env_forward(lookup)?;
+    let default_harden = parse_harden(lookup)?;
 
     match cmd {
         Cmd::Init | Cmd::Restart => {
@@ -215,10 +268,11 @@ pub fn resolve(
                 let home = lookup_non_empty(lookup, "HOME");
                 paths::log_dir(&project, xdg.as_deref(), home.as_deref())?
             };
-            let watch_files = parse_watch_files(lookup)?;
-            let run_opts = parse_run_opts(lookup)?;
-            let harden = parse_harden(lookup);
-            let devshell = demand(lookup, cmd, "NCAP_DEVSHELL")?;
+            let watch_files = default_watch_files.clone();
+            let run_opts = default_run_opts.clone();
+            let harden = default_harden;
+            let devshell_raw = demand(lookup, cmd, "NCAP_DEVSHELL")?;
+            let devshell = normalize_devshell(&devshell_raw);
             let nix = demand(lookup, cmd, "NCAP_NIX")?;
             let image = demand(lookup, cmd, "NCAP_IMAGE")?;
             let server = demand(lookup, cmd, "NCAP_SERVER")?;
@@ -272,9 +326,9 @@ pub fn resolve(
                 let home = lookup_non_empty(lookup, "HOME");
                 paths::log_dir(&project, xdg.as_deref(), home.as_deref())?
             };
-            let watch_files = parse_watch_files(lookup)?;
-            let run_opts = parse_run_opts(lookup)?;
-            let harden = parse_harden(lookup);
+            let watch_files = default_watch_files.clone();
+            let run_opts = default_run_opts.clone();
+            let harden = default_harden;
             let image = demand(lookup, cmd, "NCAP_IMAGE")?;
             let server = demand(lookup, cmd, "NCAP_SERVER")?;
             let bash = demand(lookup, cmd, "NCAP_BASH")?;
@@ -300,7 +354,8 @@ pub fn resolve(
         }
         Cmd::Stop => {
             // Stop only needs the container name (plus runtime). Derive the
-            // container when NCAP_CONTAINER is absent.
+            // container when NCAP_CONTAINER is absent. JSON vars and harden
+            // are still validated above so malformed values error per contract.
             let container = if let Some(container) = lookup_non_empty(lookup, "NCAP_CONTAINER") {
                 container
             } else {
@@ -320,9 +375,9 @@ pub fn resolve(
                 log_dir: None,
                 runtime,
                 timeout,
-                watch_files: Vec::new(),
-                run_opts: Vec::new(),
-                harden: false,
+                watch_files: default_watch_files.clone(),
+                run_opts: default_run_opts.clone(),
+                harden: default_harden,
                 image: None,
                 server: None,
                 nix: None,
@@ -331,7 +386,7 @@ pub fn resolve(
             })
         }
         Cmd::Status => {
-            let watch_files = parse_watch_files(lookup)?;
+            let watch_files = default_watch_files.clone();
             let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
 
             let needs_project = lookup_non_empty(lookup, "NCAP_CONTAINER").is_none()
@@ -401,8 +456,8 @@ pub fn resolve(
                 root_opt
             };
 
-            let run_opts = parse_run_opts(lookup)?;
-            let harden = parse_harden(lookup);
+            let run_opts = default_run_opts.clone();
+            let harden = default_harden;
             Ok(Config {
                 cmd,
                 root,
@@ -464,9 +519,9 @@ pub fn resolve(
                 log_dir: None,
                 runtime,
                 timeout,
-                watch_files: Vec::new(),
-                run_opts: Vec::new(),
-                harden: false,
+                watch_files: default_watch_files.clone(),
+                run_opts: default_run_opts.clone(),
+                harden: default_harden,
                 image: None,
                 server: None,
                 nix: None,
@@ -510,9 +565,9 @@ pub fn resolve(
                 log_dir,
                 runtime,
                 timeout,
-                watch_files: Vec::new(),
-                run_opts: Vec::new(),
-                harden: false,
+                watch_files: default_watch_files.clone(),
+                run_opts: default_run_opts.clone(),
+                harden: default_harden,
                 image: None,
                 server: None,
                 nix: None,
@@ -586,9 +641,9 @@ pub fn resolve(
                 log_dir,
                 runtime,
                 timeout,
-                watch_files: Vec::new(),
-                run_opts: Vec::new(),
-                harden: false,
+                watch_files: default_watch_files.clone(),
+                run_opts: default_run_opts.clone(),
+                harden: default_harden,
                 image: None,
                 server: None,
                 nix: None,
@@ -598,7 +653,7 @@ pub fn resolve(
         }
         Cmd::ShowOptions => {
             // Show-options only needs NCAP_RUN_OPTS (optional, empty by default).
-            let run_opts = parse_run_opts(lookup)?;
+            let run_opts = default_run_opts.clone();
             let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
             let container = lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_default();
             Ok(Config {
@@ -611,9 +666,9 @@ pub fn resolve(
                 log_dir: None,
                 runtime,
                 timeout,
-                watch_files: Vec::new(),
+                watch_files: default_watch_files.clone(),
                 run_opts,
-                harden: false,
+                harden: default_harden,
                 image: None,
                 server: None,
                 nix: None,
@@ -733,19 +788,43 @@ mod tests {
     }
 
     #[test]
-    fn runtime_defaults_to_podman() {
+    fn missing_runtime_is_an_error_naming_it() {
         let mut pairs = full_init_env();
         pairs.retain(|(key, _)| *key != "NCAP_RUNTIME");
-        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
-        assert_eq!(cfg.runtime, "podman");
+        let err = resolve_with(Cmd::Init, &pairs).expect_err("must error");
+        assert!(err.to_string().contains("NCAP_RUNTIME"), "err={err}");
     }
 
     #[test]
-    fn timeout_defaults_to_ten() {
+    fn invalid_runtime_is_rejected() {
+        let mut pairs = full_init_env();
+        for (key, value) in &mut pairs {
+            if *key == "NCAP_RUNTIME" {
+                *value = "nerdctl";
+            }
+        }
+        let err = resolve_with(Cmd::Init, &pairs).expect_err("must error");
+        assert!(err.to_string().contains("NCAP_RUNTIME"), "err={err}");
+    }
+
+    #[test]
+    fn absolute_runtime_path_passes_through() {
+        let mut pairs = full_init_env();
+        for (key, value) in &mut pairs {
+            if *key == "NCAP_RUNTIME" {
+                *value = "/usr/local/bin/podman";
+            }
+        }
+        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
+        assert_eq!(cfg.runtime, "/usr/local/bin/podman");
+    }
+
+    #[test]
+    fn missing_timeout_is_an_error_naming_it() {
         let mut pairs = full_init_env();
         pairs.retain(|(key, _)| *key != "NCAP_TIMEOUT");
-        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
-        assert_eq!(cfg.timeout, 10);
+        let err = resolve_with(Cmd::Init, &pairs).expect_err("must error");
+        assert!(err.to_string().contains("NCAP_TIMEOUT"), "err={err}");
     }
 
     #[test]
@@ -819,20 +898,78 @@ mod tests {
 
     #[test]
     fn stop_with_only_container_succeeds() {
-        let cfg = resolve_with(Cmd::Stop, &[("NCAP_CONTAINER", "ncap-foo")]).expect("resolve");
+        let cfg = resolve_with(
+            Cmd::Stop,
+            &[
+                ("NCAP_CONTAINER", "ncap-foo"),
+                ("NCAP_RUNTIME", "podman"),
+                ("NCAP_TIMEOUT", "10"),
+            ],
+        )
+        .expect("resolve");
         assert_eq!(cfg.container, "ncap-foo");
     }
 
     #[test]
-    fn stop_without_anything_demands_project_root() {
+    fn stop_without_anything_demands_runtime_first() {
         let err = resolve_with(Cmd::Stop, &[]).expect_err("must error");
+        assert!(err.to_string().contains("NCAP_RUNTIME"), "err={err}");
+    }
+
+    #[test]
+    fn stop_without_container_demands_project_root() {
+        let err = resolve_with(
+            Cmd::Stop,
+            &[("NCAP_RUNTIME", "podman"), ("NCAP_TIMEOUT", "10")],
+        )
+        .expect_err("must error");
         assert!(err.to_string().contains("NCAP_PROJECT_ROOT"), "err={err}");
     }
 
     #[test]
     fn stop_with_project_derives_container_without_root() {
-        let cfg = resolve_with(Cmd::Stop, &[("NCAP_PROJECT", "myproj")]).expect("resolve");
+        let cfg = resolve_with(
+            Cmd::Stop,
+            &[
+                ("NCAP_PROJECT", "myproj"),
+                ("NCAP_RUNTIME", "podman"),
+                ("NCAP_TIMEOUT", "10"),
+            ],
+        )
+        .expect("resolve");
         assert_eq!(cfg.container, "ncap-myproj");
+    }
+
+    #[test]
+    fn stop_with_malformed_json_errors_naming_var() {
+        for var in ["NCAP_WATCH_FILES", "NCAP_RUN_OPTS", "NCAP_ENV_FORWARD"] {
+            let err = resolve_with(
+                Cmd::Stop,
+                &[
+                    ("NCAP_CONTAINER", "ncap-foo"),
+                    ("NCAP_RUNTIME", "podman"),
+                    ("NCAP_TIMEOUT", "10"),
+                    (var, "not json"),
+                ],
+            )
+            .expect_err("must error");
+            assert!(err.to_string().contains(var), "var={var} err={err}");
+        }
+    }
+
+    #[test]
+    fn stop_with_bad_harden_errors() {
+        let err = resolve_with(
+            Cmd::Stop,
+            &[
+                ("NCAP_CONTAINER", "ncap-foo"),
+                ("NCAP_RUNTIME", "podman"),
+                ("NCAP_TIMEOUT", "10"),
+                ("NCAP_HARDEN", "yes"),
+            ],
+        )
+        .expect_err("must error");
+        assert!(err.to_string().contains("NCAP_HARDEN"), "err={err}");
     }
 
     #[test]
@@ -844,10 +981,83 @@ mod tests {
                 ("NCAP_SOCKET", "/tmp/sock"),
                 ("NCAP_CACHE_DIR", "/tmp/cache"),
                 ("NCAP_WATCH_FILES", "[]"),
+                ("NCAP_RUNTIME", "podman"),
+                ("NCAP_TIMEOUT", "10"),
             ],
         )
         .expect("resolve");
         assert_eq!(cfg.container, "ncap-foo");
+    }
+
+    #[test]
+    fn devshell_bare_name_gets_dot_hash_prefix() {
+        let mut pairs = full_init_env();
+        for (key, value) in &mut pairs {
+            if *key == "NCAP_DEVSHELL" {
+                *value = "container";
+            }
+        }
+        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
+        assert_eq!(cfg.devshell.as_deref(), Some(".#container"));
+    }
+
+    #[test]
+    fn devshell_uris_pass_through() {
+        for uri in [
+            ".#container",
+            "./flake#container",
+            "../other",
+            "/abs/path",
+            "github:foo/bar",
+            "nixpkgs#hello",
+            ".",
+        ] {
+            let mut pairs = full_init_env();
+            // Replace devshell value via rebuild to satisfy borrow rules.
+            pairs.retain(|(key, _)| *key != "NCAP_DEVSHELL");
+            let owned_uri = uri.to_owned();
+            let leaked: &'static str = Box::leak(owned_uri.into_boxed_str());
+            pairs.push(("NCAP_DEVSHELL", leaked));
+            let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
+            assert_eq!(cfg.devshell.as_deref(), Some(uri), "uri={uri}");
+        }
+    }
+
+    #[test]
+    fn harden_strict_true_false() {
+        let mut pairs = full_init_env();
+        pairs.push(("NCAP_HARDEN", "true"));
+        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
+        assert!(cfg.harden);
+        let mut pairs = full_init_env();
+        pairs.push(("NCAP_HARDEN", "false"));
+        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
+        assert!(!cfg.harden);
+        for bad in ["1", "yes", "0", "TRUE", ""] {
+            // Empty string counts as unset => false, not an error.
+            if bad.is_empty() {
+                continue;
+            }
+            let mut pairs = full_init_env();
+            pairs.push(("NCAP_HARDEN", bad));
+            let err = resolve_with(Cmd::Init, &pairs).expect_err("must error");
+            assert!(err.to_string().contains("NCAP_HARDEN"), "bad={bad} err={err}");
+        }
+    }
+
+    #[test]
+    fn harden_missing_defaults_to_false() {
+        let pairs = full_init_env();
+        let cfg = resolve_with(Cmd::Init, &pairs).expect("resolve");
+        assert!(!cfg.harden);
+    }
+
+    #[test]
+    fn malformed_env_forward_is_an_error() {
+        let mut pairs = full_init_env();
+        pairs.push(("NCAP_ENV_FORWARD", "not json"));
+        let err = resolve_with(Cmd::Init, &pairs).expect_err("must error");
+        assert!(err.to_string().contains("NCAP_ENV_FORWARD"), "err={err}");
     }
 
     #[test]
