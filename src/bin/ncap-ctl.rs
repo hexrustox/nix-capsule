@@ -52,12 +52,7 @@ fn main() {
         Cmd::ShowOptions => block_on(CtlCmd::ShowOptions),
         Cmd::Completions { shell } => {
             let mut cmd = Cli::command();
-            clap_complete::generate(
-                shell,
-                &mut cmd,
-                "ncap-ctl",
-                &mut std::io::stdout(),
-            );
+            clap_complete::generate(shell, &mut cmd, "ncap-ctl", &mut std::io::stdout());
             0
         }
     };

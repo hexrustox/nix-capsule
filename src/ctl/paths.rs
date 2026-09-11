@@ -37,7 +37,10 @@ pub fn cache_dir(
     if let Some(dir) = xdg_cache_home.filter(|value| !value.is_empty()) {
         Ok(Path::new(dir).join("nix-capsule").join(project))
     } else if let Some(home) = home.filter(|value| !value.is_empty()) {
-        Ok(Path::new(home).join(".cache").join("nix-capsule").join(project))
+        Ok(Path::new(home)
+            .join(".cache")
+            .join("nix-capsule")
+            .join(project))
     } else {
         Err(NoHome {
             what: "cache dir",
@@ -53,7 +56,10 @@ pub fn log_dir(
     home: Option<&str>,
 ) -> Result<PathBuf, NoHome> {
     if let Some(dir) = xdg_state_home.filter(|value| !value.is_empty()) {
-        Ok(Path::new(dir).join("nix-capsule").join(project).join("logs"))
+        Ok(Path::new(dir)
+            .join("nix-capsule")
+            .join(project)
+            .join("logs"))
     } else if let Some(home) = home.filter(|value| !value.is_empty()) {
         Ok(Path::new(home)
             .join(".local")
@@ -135,10 +141,7 @@ mod tests {
     #[test]
     fn log_dir_falls_back_to_home_dot_local_state() {
         let dir = log_dir("proj", None, Some("/home/u")).expect("log dir");
-        assert_eq!(
-            dir,
-            Path::new("/home/u/.local/state/nix-capsule/proj/logs")
-        );
+        assert_eq!(dir, Path::new("/home/u/.local/state/nix-capsule/proj/logs"));
     }
 
     #[test]

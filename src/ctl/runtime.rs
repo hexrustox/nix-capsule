@@ -116,7 +116,11 @@ impl Runtime {
     /// `inspect <name>` succeeding. Used by the start flow to remove an
     /// exists-but-stopped container before launch.
     pub async fn exists(&self, name: &str) -> bool {
-        match Command::new(&self.bin).args(["inspect", name]).output().await {
+        match Command::new(&self.bin)
+            .args(["inspect", name])
+            .output()
+            .await
+        {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }

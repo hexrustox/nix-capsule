@@ -38,7 +38,10 @@ pub fn of(root: &Path, entries: &[String]) -> io::Result<String> {
         records.push(b'\0');
         records.extend_from_slice(&contents);
     }
-    Ok(format!("{:016x}", twox_hash::XxHash64::oneshot(0, &records)))
+    Ok(format!(
+        "{:016x}",
+        twox_hash::XxHash64::oneshot(0, &records)
+    ))
 }
 
 /// Compare the computed digest against the cached `<cache>/hash`: the env
@@ -144,8 +147,9 @@ mod tests {
         let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
         assert_eq!(digest.len(), 16, "digest={digest}");
         assert!(
-            digest.bytes().all(|byte| byte.is_ascii_hexdigit()
-                && !byte.is_ascii_uppercase()),
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
             "digest={digest}"
         );
     }

@@ -51,7 +51,12 @@ fn run_ctl(env: &HashMap<String, String>, args: &[&str]) -> Output {
     }
     // Ensure TMPDIR/XDG vars from test env win; if not set, remove ambient
     // so derivation tests see the unset state.
-    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+    for var in [
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ] {
         if !env.contains_key(var) {
             cmd.env_remove(var);
         }
@@ -192,17 +197,32 @@ fn base_env(
     nix_bin: &Path,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
-    env.insert("NCAP_PROJECT_ROOT".into(), project_root.to_string_lossy().into_owned());
-    env.insert("NCAP_CACHE_DIR".into(), cache_dir.to_string_lossy().into_owned());
-    env.insert("NCAP_LOG_DIR".into(), log_dir.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_PROJECT_ROOT".into(),
+        project_root.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "NCAP_CACHE_DIR".into(),
+        cache_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "NCAP_LOG_DIR".into(),
+        log_dir.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_SOCKET".into(), socket.to_string_lossy().into_owned());
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
     env.insert("NCAP_IMAGE".into(), "alpine:latest".into());
-    env.insert("NCAP_SERVER".into(), "/nix/store/fake/bin/ncap-server".into());
+    env.insert(
+        "NCAP_SERVER".into(),
+        "/nix/store/fake/bin/ncap-server".into(),
+    );
     env.insert("NCAP_NIX".into(), nix_bin.to_string_lossy().into_owned());
     env.insert("NCAP_BASH".into(), "/nix/store/fake/bin/bash".into());
     env.insert("NCAP_DEVSHELL".into(), ".#container".into());
-    env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_RUNTIME".into(),
+        runtime_bin.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
     // Keep HOME for XDG fallbacks where needed; tests override when testing fallback.
@@ -319,7 +339,10 @@ fn stop_refuses_without_container_or_derivation() {
 
     // No NCAP_CONTAINER, no NCAP_PROJECT, no root → must name NCAP_PROJECT_ROOT
     let mut env = HashMap::new();
-    env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_RUNTIME".into(),
+        runtime_bin.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
     let out = run_ctl(&env, &["stop"]);
     assert!(!out.status.success());
@@ -329,10 +352,17 @@ fn stop_refuses_without_container_or_derivation() {
     // With only NCAP_CONTAINER, stop succeeds (idempotent).
     let mut env2 = HashMap::new();
     env2.insert("NCAP_CONTAINER".into(), "ncap-foo".into());
-    env2.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env2.insert(
+        "NCAP_RUNTIME".into(),
+        runtime_bin.to_string_lossy().into_owned(),
+    );
     env2.insert("NCAP_TIMEOUT".into(), "2".into());
     let out2 = run_ctl(&env2, &["stop"]);
-    assert!(out2.status.success(), "stderr={}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        out2.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +403,11 @@ fn derived_project_name_is_used_and_empty_is_a_hard_error() {
     // Also remove socket/cache to exercise XDG derivation? Keep them explicit
     // so the test focuses on name derivation.
     let out = run_ctl(&env, &["init"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // The runtime log should contain the derived container name ncap-my-proj.
     let log = fs::read_to_string(&runtime_log).expect("runtime log");
     assert!(log.contains("ncap-my-proj"), "log={log}");
@@ -437,7 +471,11 @@ esac
     let _live = live_socket(&sock);
     // First init: stamp absent → written, then start (container down → eval + start)
     let out = run_ctl(&env, &["init"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stamp = fs::read_to_string(cache.join("project")).expect("stamp");
     assert_eq!(stamp, root_a.to_string_lossy().as_ref());
 
@@ -445,17 +483,27 @@ esac
     fs::write(state.join("running"), "true").expect("running");
     // Fresh cache so no eval needed
     let out2 = run_ctl(&env, &["init"]);
-    assert!(out2.status.success(), "stderr={}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        out2.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
 
     // Different root under same cache → hard error with hint
     let root_b = tmp.path().join("root-b");
     fs::create_dir_all(&root_b).expect("root-b");
-    env.insert("NCAP_PROJECT_ROOT".into(), root_b.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_PROJECT_ROOT".into(),
+        root_b.to_string_lossy().into_owned(),
+    );
     let out3 = run_ctl(&env, &["init"]);
     assert!(!out3.status.success());
     let stderr3 = String::from_utf8_lossy(&out3.stderr);
     assert!(stderr3.contains("set `project`"), "stderr={stderr3}");
-    assert!(stderr3.contains(&root_a.to_string_lossy().into_owned()), "stderr={stderr3}");
+    assert!(
+        stderr3.contains(&root_a.to_string_lossy().into_owned()),
+        "stderr={stderr3}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +551,11 @@ fn init_fresh_and_running_performs_zero_evals() {
     let _live = live_socket(&sock);
 
     let out = run_ctl(&env, &["init"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let nix_calls = fs::read_to_string(&nix_log).expect("nix log");
     assert!(
         !nix_calls.contains("print-dev-env"),
@@ -573,7 +625,11 @@ esac
 
     // Live but stale ⇒ re-eval, non-fatal stop, then start to readiness.
     let out = run_ctl(&env, &["init"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let nix_calls = fs::read_to_string(&nix_log).expect("nix log");
     assert!(
         nix_calls.contains("print-dev-env"),
@@ -647,9 +703,16 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["init"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let nix_calls = fs::read_to_string(&nix_log).expect("nix log");
-    assert!(nix_calls.contains("print-dev-env"), "down+missing must eval: {nix_calls}");
+    assert!(
+        nix_calls.contains("print-dev-env"),
+        "down+missing must eval: {nix_calls}"
+    );
     let rt_calls = fs::read_to_string(&runtime_log).expect("rt log");
     assert!(rt_calls.contains("run "), "down must start: {rt_calls}");
     assert!(cache.join("env").is_file(), "env must be cached");
@@ -755,8 +818,11 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
     fs::create_dir_all(&state).expect("state");
     // Never running
     fs::write(state.join("running"), "false").expect("running");
-    fs::write(state.join("state_json"), r#"{"Running":false,"Status":"exited","Error":"bad image"}"#)
-        .expect("state json");
+    fs::write(
+        state.join("state_json"),
+        r#"{"Running":false,"Status":"exited","Error":"bad image"}"#,
+    )
+    .expect("state json");
     let runtime_log = tmp.path().join("runtime.log");
     let nix_log = tmp.path().join("nix.log");
     let runtime_bin = tmp.path().join("fake-runtime");
@@ -773,16 +839,26 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
     // Seed a log file with a known tail
     fs::create_dir_all(&logs).expect("logs");
     fs::write(logs.join("ncap-server-100.log"), "old log line\n").expect("log");
-    fs::write(logs.join("ncap-server-999.log"), "line1\nline2\nEXPECTED_TAIL_MARKER\n").expect("newest log");
+    fs::write(
+        logs.join("ncap-server-999.log"),
+        "line1\nline2\nEXPECTED_TAIL_MARKER\n",
+    )
+    .expect("newest log");
 
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     env.insert("NCAP_TIMEOUT".into(), "1".into());
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
 
     let out = run_ctl(&env, &["start"]);
-    assert!(!out.status.success(), "start should fail when never Running");
+    assert!(
+        !out.status.success(),
+        "start should fail when never Running"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("exited") || stderr.contains("Running"), "stderr must contain inspect state: {stderr}");
+    assert!(
+        stderr.contains("exited") || stderr.contains("Running"),
+        "stderr must contain inspect state: {stderr}"
+    );
     assert!(
         stderr.contains("EXPECTED_TAIL_MARKER"),
         "stderr must contain log tail: {stderr}"
@@ -821,9 +897,16 @@ fn concurrent_start_peer_running_is_success() {
 
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "peer running ⇒ success: stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "peer running ⇒ success: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rt_log = fs::read_to_string(&runtime_log).expect("rt log");
-    assert!(!rt_log.contains("rm "), "peer running must not rm: {rt_log}");
+    assert!(
+        !rt_log.contains("rm "),
+        "peer running must not rm: {rt_log}"
+    );
 }
 
 #[test]
@@ -897,9 +980,16 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "peer dead ⇒ rm+retry ⇒ success: stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "peer dead ⇒ rm+retry ⇒ success: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rt_log = fs::read_to_string(&runtime_log).expect("rt log");
-    assert!(rt_log.contains("rm "), "must have removed dead container: {rt_log}");
+    assert!(
+        rt_log.contains("rm "),
+        "must have removed dead container: {rt_log}"
+    );
     // Exactly two run attempts
     let run_count = fs::read_to_string(state.join("run_count")).expect("run_count");
     assert_eq!(run_count.trim(), "2");
@@ -962,16 +1052,27 @@ esac
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rt_log = fs::read_to_string(&runtime_log).expect("rt log");
     // Pre-launch rm must run before the single launch.
     let rm_pos = rt_log.find("\nrm ").or_else(|| rt_log.find("rm "));
     assert!(rm_pos.is_some(), "pre-launch rm missing: {rt_log}");
     let run_pos = rt_log.find("\nrun ").or_else(|| rt_log.find("run "));
     assert!(run_pos.is_some(), "run missing: {rt_log}");
-    assert!(rm_pos.unwrap() < run_pos.unwrap(), "rm before run: {rt_log}");
+    assert!(
+        rm_pos.unwrap() < run_pos.unwrap(),
+        "rm before run: {rt_log}"
+    );
     let run_count = fs::read_to_string(state.join("run_count")).expect("run_count");
-    assert_eq!(run_count.trim(), "1", "single launch after pre-launch rm: {rt_log}");
+    assert_eq!(
+        run_count.trim(),
+        "1",
+        "single launch after pre-launch rm: {rt_log}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -991,15 +1092,26 @@ fn stop_is_idempotent() {
 
     let mut env = HashMap::new();
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
-    env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_RUNTIME".into(),
+        runtime_bin.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
 
     let out = run_ctl(&env, &["stop"]);
-    assert!(out.status.success(), "first stop: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "first stop: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Second stop: not running → still success
     let out2 = run_ctl(&env, &["stop"]);
-    assert!(out2.status.success(), "second stop idempotent: {}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        out2.status.success(),
+        "second stop idempotent: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
 }
 
 #[test]
@@ -1045,7 +1157,11 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["restart"]);
-    assert!(out.status.success(), "restart on stopped: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "restart on stopped: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,12 +1232,18 @@ fn runtime_selection_explicit_path_is_used() {
 
     let mut env = HashMap::new();
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
-    env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_RUNTIME".into(),
+        runtime_bin.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
     let out = run_ctl(&env, &["stop"]);
     assert!(out.status.success());
     let logged = fs::read_to_string(&log).expect("log");
-    assert!(!logged.is_empty(), "explicit runtime must have been invoked");
+    assert!(
+        !logged.is_empty(),
+        "explicit runtime must have been invoked"
+    );
 }
 
 #[test]
@@ -1226,16 +1348,28 @@ esac
     let xdg_fallback = tmpdir.clone();
 
     let mut env = HashMap::new();
-    env.insert("NCAP_PROJECT_ROOT".into(), root.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_PROJECT_ROOT".into(),
+        root.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_IMAGE".into(), "alpine:latest".into());
-    env.insert("NCAP_SERVER".into(), "/nix/store/fake/bin/ncap-server".into());
+    env.insert(
+        "NCAP_SERVER".into(),
+        "/nix/store/fake/bin/ncap-server".into(),
+    );
     env.insert("NCAP_NIX".into(), nix_bin.to_string_lossy().into_owned());
     env.insert("NCAP_BASH".into(), "/nix/store/fake/bin/bash".into());
     env.insert("NCAP_DEVSHELL".into(), ".#container".into());
-    env.insert("NCAP_RUNTIME".into(), runtime_bin.to_string_lossy().into_owned());
+    env.insert(
+        "NCAP_RUNTIME".into(),
+        runtime_bin.to_string_lossy().into_owned(),
+    );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
-    env.insert("HOME".into(), tmp.path().join("home").to_string_lossy().into_owned());
+    env.insert(
+        "HOME".into(),
+        tmp.path().join("home").to_string_lossy().into_owned(),
+    );
     env.insert("TMPDIR".into(), xdg_fallback.to_string_lossy().into_owned());
     // No XDG_RUNTIME_DIR, no NCAP_SOCKET/CACHE/LOG → derive
     // Also need to set HOME so XDG fallbacks have a base
@@ -1258,11 +1392,19 @@ esac
     let _live = live_socket(&derived_sock);
 
     let out = run_ctl(&env, &["init"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The derived runtime dir must exist with 0700
     let derived = xdg_fallback.join("nix-capsule").join("proj");
-    let mode = fs::metadata(&derived).expect("derived dir").permissions().mode() & 0o777;
+    let mode = fs::metadata(&derived)
+        .expect("derived dir")
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(mode, 0o700, "runtime dir must be 0700");
     let _ = (cache, logs);
 }
@@ -1322,7 +1464,11 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let log = fs::read_to_string(&runtime_log).expect("runtime log");
     // Find the run invocation line
@@ -1440,7 +1586,11 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let log = fs::read_to_string(&runtime_log).expect("log");
     let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
     let expected = format!("-v {}/.git:{}/.git:ro", root.display(), root.display());
@@ -1494,7 +1644,11 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let log = fs::read_to_string(&runtime_log).expect("log");
     let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
     assert!(
@@ -1557,7 +1711,12 @@ esac
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+    for var in [
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ] {
         if !env.contains_key(var) {
             cmd.env_remove(var);
         }
@@ -1620,10 +1779,7 @@ esac
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     // $TEST_EXPAND should expand to "/tmp/foo bar" containing a space; no word splitting means it stays one arg
     env.insert("TEST_EXPAND".into(), "/tmp/foo bar".into());
-    env.insert(
-        "NCAP_RUN_OPTS".into(),
-        r#"["-v $TEST_EXPAND:/mnt"]"#.into(),
-    );
+    env.insert("NCAP_RUN_OPTS".into(), r#"["-v $TEST_EXPAND:/mnt"]"#.into());
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.arg("start");
     for var in NCAP_VARS {
@@ -1632,7 +1788,12 @@ esac
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+    for var in [
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ] {
         if !env.contains_key(var) {
             cmd.env_remove(var);
         }
@@ -1642,7 +1803,11 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = cmd.output().expect("spawn");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let log = fs::read_to_string(&runtime_log).expect("log");
     // The expanded arg must appear as a single line "-v /tmp/foo bar:/mnt" not split
     assert!(
@@ -1651,7 +1816,10 @@ esac
     );
     // Ensure defaults still come before the extra option
     let lines: Vec<String> = log.lines().map(|s| s.to_string()).collect();
-    let nix_idx = lines.iter().position(|l| l == "/nix:/nix:ro").expect("nix mount");
+    let nix_idx = lines
+        .iter()
+        .position(|l| l == "/nix:/nix:ro")
+        .expect("nix mount");
     let extra_idx = lines
         .iter()
         .position(|l| l == "-v /tmp/foo bar:/mnt")
@@ -1712,7 +1880,11 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let log = std::fs::read_to_string(&runtime_log).expect("log");
     let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
     assert!(
@@ -1723,10 +1895,20 @@ esac
         run_line.contains("--security-opt=no-new-privileges"),
         "missing --security-opt: {run_line}"
     );
-    let expected = format!("-v {}/flake.nix:{}/flake.nix:ro", root.display(), root.display());
-    assert!(run_line.contains(&expected), "missing ro watch mount: {run_line}");
+    let expected = format!(
+        "-v {}/flake.nix:{}/flake.nix:ro",
+        root.display(),
+        root.display()
+    );
+    assert!(
+        run_line.contains(&expected),
+        "missing ro watch mount: {run_line}"
+    );
     let missing = format!("-v {}/missing.nix", root.display());
-    assert!(!run_line.contains(&missing), "missing entry must be skipped: {run_line}");
+    assert!(
+        !run_line.contains(&missing),
+        "missing entry must be skipped: {run_line}"
+    );
     // More-specific mount after root
     let root_mount = format!("-v {}:{}", root.display(), root.display());
     assert!(
@@ -1781,13 +1963,30 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let log = std::fs::read_to_string(&runtime_log).expect("log");
     let run_line = log.lines().find(|l| l.contains("run ")).unwrap();
-    assert!(!run_line.contains("--cap-drop"), "harden off must not emit cap-drop: {run_line}");
-    assert!(!run_line.contains("no-new-privileges"), "harden off must not emit security-opt: {run_line}");
-    let watch_mount = format!("-v {}/flake.nix:{}/flake.nix:ro", root.display(), root.display());
-    assert!(!run_line.contains(&watch_mount), "harden off must not mount watch file: {run_line}");
+    assert!(
+        !run_line.contains("--cap-drop"),
+        "harden off must not emit cap-drop: {run_line}"
+    );
+    assert!(
+        !run_line.contains("no-new-privileges"),
+        "harden off must not emit security-opt: {run_line}"
+    );
+    let watch_mount = format!(
+        "-v {}/flake.nix:{}/flake.nix:ro",
+        root.display(),
+        root.display()
+    );
+    assert!(
+        !run_line.contains(&watch_mount),
+        "harden off must not mount watch file: {run_line}"
+    );
 }
 
 #[test]
@@ -1833,7 +2032,8 @@ esac
     env.insert("NCAP_TEST_BRACED".into(), "braced-val".into());
     env.insert(
         "NCAP_RUN_OPTS".into(),
-        r#"["--braced=${NCAP_TEST_BRACED}", "literal-no-expand", "-v $NCAP_TEST_BRACED:/mnt"]"#.into(),
+        r#"["--braced=${NCAP_TEST_BRACED}", "literal-no-expand", "-v $NCAP_TEST_BRACED:/mnt"]"#
+            .into(),
     );
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.arg("start");
@@ -1843,7 +2043,12 @@ esac
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    for var in ["TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+    for var in [
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ] {
         if !env.contains_key(var) {
             cmd.env_remove(var);
         }
@@ -1852,9 +2057,22 @@ esac
     // Liveness needs a connectable socket: Running alone is not live.
     let _live = live_socket(&sock);
     let out = cmd.output().expect("spawn");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let log = std::fs::read_to_string(&runtime_log).expect("log");
-    assert!(log.contains("--braced=braced-val"), "braced expansion: {log}");
-    assert!(log.contains("literal-no-expand"), "literal passthrough: {log}");
-    assert!(log.contains("-v braced-val:/mnt"), "dollar expansion: {log}");
+    assert!(
+        log.contains("--braced=braced-val"),
+        "braced expansion: {log}"
+    );
+    assert!(
+        log.contains("literal-no-expand"),
+        "literal passthrough: {log}"
+    );
+    assert!(
+        log.contains("-v braced-val:/mnt"),
+        "dollar expansion: {log}"
+    );
 }

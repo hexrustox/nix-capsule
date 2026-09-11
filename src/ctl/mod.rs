@@ -168,10 +168,7 @@ async fn status(cfg: Config) -> Result<(), String> {
                 "missing"
             }
         } else {
-            let root = cfg
-                .root
-                .as_deref()
-                .unwrap_or_else(|| Path::new("/tmp"));
+            let root = cfg.root.as_deref().unwrap_or_else(|| Path::new("/tmp"));
             match digest::check(cache_dir, root, &cfg.watch_files) {
                 digest::Freshness::Fresh => "fresh",
                 digest::Freshness::Stale => "stale",
@@ -216,8 +213,8 @@ async fn enter(cfg: Config) -> Result<(), String> {
 
 async fn log(cfg: Config) -> Result<(), String> {
     let log_dir = cfg.log_dir.as_deref().expect("log demands log_dir");
-    let newest = newest_log_path(log_dir)
-        .ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
+    let newest =
+        newest_log_path(log_dir).ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
     let (prog, args) = pager_command();
     let mut cmd = tokio::process::Command::new(&prog);
     cmd.args(&args);
@@ -283,14 +280,20 @@ async fn show_options(cfg: Config) -> Result<(), String> {
 
 async fn ensure_cache(cfg: &Config) -> Result<(), String> {
     let root = cfg.root.as_deref().expect("ensure_cache demands root");
-    let cache_dir = cfg.cache_dir.as_deref().expect("ensure_cache demands cache_dir");
+    let cache_dir = cfg
+        .cache_dir
+        .as_deref()
+        .expect("ensure_cache demands cache_dir");
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
     if freshness == digest::Freshness::Fresh {
         return Ok(());
     }
     // Stale or missing → eval.
     let nix_bin = cfg.nix.as_deref().expect("ensure_cache demands nix");
-    let devshell = cfg.devshell.as_deref().expect("ensure_cache demands devshell");
+    let devshell = cfg
+        .devshell
+        .as_deref()
+        .expect("ensure_cache demands devshell");
     let profile = cache_dir.join("profile");
 
     fs::create_dir_all(cache_dir).map_err(|err| err.to_string())?;
@@ -313,7 +316,10 @@ async fn ensure_cache(cfg: &Config) -> Result<(), String> {
 }
 
 async fn start_inner(cfg: &Config) -> Result<(), String> {
-    let cache_dir = cfg.cache_dir.as_deref().expect("start_inner demands cache_dir");
+    let cache_dir = cfg
+        .cache_dir
+        .as_deref()
+        .expect("start_inner demands cache_dir");
     let socket = cfg.socket.as_deref().expect("start_inner demands socket");
     let log_dir = cfg.log_dir.as_deref().expect("start_inner demands log_dir");
     let server = cfg.server.as_deref().expect("start_inner demands server");
@@ -450,8 +456,7 @@ fn pager_command() -> (String, Vec<String>) {
     if let Ok(pager) = std::env::var("PAGER") {
         let trimmed = pager.trim();
         if !trimmed.is_empty() {
-            let parts: Vec<String> =
-                trimmed.split_whitespace().map(|s| s.to_owned()).collect();
+            let parts: Vec<String> = trimmed.split_whitespace().map(|s| s.to_owned()).collect();
             if !parts.is_empty() {
                 return (parts[0].clone(), parts[1..].to_vec());
             }
@@ -475,13 +480,13 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
         .cache_dir
         .as_deref()
         .expect("build mounts demands cache_dir");
-    let log_dir = cfg.log_dir.as_deref().expect("build mounts demands log_dir");
-    let socket_dir = socket.parent().ok_or_else(|| {
-        format!(
-            "socket path `{}` has no parent directory",
-            socket.display()
-        )
-    })?;
+    let log_dir = cfg
+        .log_dir
+        .as_deref()
+        .expect("build mounts demands log_dir");
+    let socket_dir = socket
+        .parent()
+        .ok_or_else(|| format!("socket path `{}` has no parent directory", socket.display()))?;
 
     let mut args = Vec::new();
 
@@ -499,7 +504,11 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
     args.push("-w".to_owned());
     args.push(root.display().to_string());
     args.push("-v".to_owned());
-    args.push(format!("{}:{}:ro", cache_dir.display(), cache_dir.display()));
+    args.push(format!(
+        "{}:{}:ro",
+        cache_dir.display(),
+        cache_dir.display()
+    ));
     args.push("-v".to_owned());
     args.push(format!("{}:{}", log_dir.display(), log_dir.display()));
 
@@ -747,7 +756,10 @@ mod tests {
         let args = build_runtime_args(&cfg).expect("args");
         // Find positions: defaults like /nix must come before extra
         let nix_pos = args.iter().position(|a| a == "/nix:/nix:ro").expect("nix");
-        let extra_pos = args.iter().position(|a| a == "--extra=extra-val").expect("extra");
+        let extra_pos = args
+            .iter()
+            .position(|a| a == "--extra=extra-val")
+            .expect("extra");
         assert!(nix_pos < extra_pos, "defaults before extra: {args:?}");
         // No harden flags when off
         assert!(!args.contains(&"--cap-drop=all".to_string()));
@@ -778,19 +790,42 @@ mod tests {
             true,
         );
         let args = build_runtime_args(&cfg).expect("args");
-        assert!(args.contains(&"--cap-drop=all".to_string()), "harden flags: {args:?}");
+        assert!(
+            args.contains(&"--cap-drop=all".to_string()),
+            "harden flags: {args:?}"
+        );
         assert!(
             args.contains(&"--security-opt=no-new-privileges".to_string()),
             "harden flags: {args:?}"
         );
-        let expected_mount = format!("{}:{}:ro", root.join("flake.nix").display(), root.join("flake.nix").display());
-        assert!(args.contains(&expected_mount), "present watch mount: {args:?}");
-        let missing_mount = format!("{}:{}:ro", root.join("missing.nix").display(), root.join("missing.nix").display());
-        assert!(!args.contains(&missing_mount), "missing must be skipped: {args:?}");
+        let expected_mount = format!(
+            "{}:{}:ro",
+            root.join("flake.nix").display(),
+            root.join("flake.nix").display()
+        );
+        assert!(
+            args.contains(&expected_mount),
+            "present watch mount: {args:?}"
+        );
+        let missing_mount = format!(
+            "{}:{}:ro",
+            root.join("missing.nix").display(),
+            root.join("missing.nix").display()
+        );
+        assert!(
+            !args.contains(&missing_mount),
+            "missing must be skipped: {args:?}"
+        );
         // Watch mounts must come after the project root mount (more-specific wins)
         let root_mount = format!("{}:{}", root.display(), root.display());
-        let root_pos = args.iter().position(|a| a == &root_mount).expect("root mount");
-        let watch_pos = args.iter().position(|a| a == &expected_mount).expect("watch mount");
+        let root_pos = args
+            .iter()
+            .position(|a| a == &root_mount)
+            .expect("root mount");
+        let watch_pos = args
+            .iter()
+            .position(|a| a == &expected_mount)
+            .expect("watch mount");
         assert!(root_pos < watch_pos, "watch mount after root: {args:?}");
     }
 
@@ -816,8 +851,15 @@ mod tests {
         );
         let args = build_runtime_args(&cfg).expect("args");
         assert!(!args.contains(&"--cap-drop=all".to_string()));
-        let watch_mount = format!("{}:{}:ro", root.join("flake.nix").display(), root.join("flake.nix").display());
-        assert!(!args.contains(&watch_mount), "harden off must not mount watch file: {args:?}");
+        let watch_mount = format!(
+            "{}:{}:ro",
+            root.join("flake.nix").display(),
+            root.join("flake.nix").display()
+        );
+        assert!(
+            !args.contains(&watch_mount),
+            "harden off must not mount watch file: {args:?}"
+        );
     }
 
     #[test]
@@ -865,8 +907,7 @@ mod tests {
             let sock = tmp.path().join("sock/ncap.sock");
             let cfg = cfg_with(&root, &sock, &cache, &logs, vec![], vec![], false);
             let args = build_runtime_args(&cfg).expect("args");
-            let expected =
-                format!("{}:{}:ro", git_path.display(), git_path.display());
+            let expected = format!("{}:{}:ro", git_path.display(), git_path.display());
             assert!(
                 args.contains(&expected),
                 "git_is_dir={git_is_dir} args={args:?}"

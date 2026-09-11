@@ -7,7 +7,11 @@ use tokio::process::Command;
 
 /// Invoke `nix print-dev-env --profile <profile> <devshell>` and return the
 /// captured stdout (the env dump).
-pub async fn print_dev_env(nix_bin: &Path, profile: &Path, devshell: &str) -> Result<Vec<u8>, String> {
+pub async fn print_dev_env(
+    nix_bin: &Path,
+    profile: &Path,
+    devshell: &str,
+) -> Result<Vec<u8>, String> {
     let output = Command::new(nix_bin)
         .args([
             "print-dev-env",
@@ -30,7 +34,12 @@ pub async fn print_dev_env(nix_bin: &Path, profile: &Path, devshell: &str) -> Re
 /// `nix profile wipe-history --profile <profile>`.
 pub async fn wipe_history(nix_bin: &Path, profile: &Path) -> Result<(), String> {
     let output = Command::new(nix_bin)
-        .args(["profile", "wipe-history", "--profile", &profile.to_string_lossy()])
+        .args([
+            "profile",
+            "wipe-history",
+            "--profile",
+            &profile.to_string_lossy(),
+        ])
         .output()
         .await
         .map_err(|err| err.to_string())?;

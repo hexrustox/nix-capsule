@@ -17,8 +17,9 @@ CLI: `--socket`, `--log-dir`, `--timeout` (drain grace, seconds).
   error out naming the path, leaving the owner untouched. Stale (connect
   fails) ⇒ remove the file and bind.
 - Logs to `<log-dir>/ncap-server-<epoch-millis>.log` (millisecond epochs keep
-  runs started in the same second apart). Every line is timestamped and
-  mirrored to stderr so the container runtime captures the same stream.
+  runs started in the same second apart). Every line is stamped with the UTC
+  time in compact RFC 3339 form (`[YYYY-MM-DDTHH:MM:SSZ]`) and mirrored to
+  stderr so the container runtime captures the same stream.
   Logging is best-effort and never disturbs the Connection it reports on.
 
 ## Connection handling

@@ -74,13 +74,9 @@ fn arb_message() -> impl Strategy<Value = Message> {
         // (`None`, `None` is the unknowable-status exception), so the
         // round-trip strategy excludes it; both-set rejection is pinned
         // below.
-        (
-            any::<Option<u8>>(),
-            any::<Option<u8>>(),
-        )
-            .prop_filter("not both set", |(code, signal)| !(
-                code.is_some() && signal.is_some()
-            ))
+        (any::<Option<u8>>(), any::<Option<u8>>(),)
+            .prop_filter("not both set", |(code, signal)| !(code.is_some()
+                && signal.is_some()))
             .prop_map(|(code, signal)| Message::Exit(Exit { code, signal })),
         ".*".prop_map(|message| Message::Error(ErrorMsg { message })),
         Just(Message::ServerStopping),

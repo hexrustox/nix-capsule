@@ -91,13 +91,7 @@ pub enum Error {
 }
 
 fn lookup_non_empty(lookup: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<String> {
-    lookup(var).and_then(|value| {
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
+    lookup(var).and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
 
 fn demand(
@@ -111,9 +105,7 @@ fn demand(
     })
 }
 
-fn parse_watch_files(
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> Result<Vec<String>, Error> {
+fn parse_watch_files(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, Error> {
     match lookup_non_empty(lookup, "NCAP_WATCH_FILES") {
         None => Ok(Vec::new()),
         Some(raw) => serde_json::from_str(&raw).map_err(|source| Error::NotJsonArray {
@@ -123,10 +115,7 @@ fn parse_watch_files(
     }
 }
 
-fn parse_runtime(
-    lookup: &dyn Fn(&str) -> Option<String>,
-    cmd: Cmd,
-) -> Result<String, Error> {
+fn parse_runtime(lookup: &dyn Fn(&str) -> Option<String>, cmd: Cmd) -> Result<String, Error> {
     let raw = demand(lookup, cmd, "NCAP_RUNTIME")?;
     if raw == "podman" || raw == "docker" || raw.starts_with('/') {
         Ok(raw)
@@ -135,9 +124,7 @@ fn parse_runtime(
     }
 }
 
-fn parse_env_forward(
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> Result<Vec<String>, Error> {
+fn parse_env_forward(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, Error> {
     match lookup_non_empty(lookup, "NCAP_ENV_FORWARD") {
         None => Ok(Vec::new()),
         Some(raw) => serde_json::from_str(&raw).map_err(|source| Error::NotJsonArray {
@@ -157,10 +144,7 @@ fn normalize_devshell(raw: &str) -> String {
     }
 }
 
-fn parse_timeout(
-    lookup: &dyn Fn(&str) -> Option<String>,
-    cmd: Cmd,
-) -> Result<u64, Error> {
+fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>, cmd: Cmd) -> Result<u64, Error> {
     match lookup_non_empty(lookup, "NCAP_TIMEOUT") {
         None => Err(Error::Missing {
             command: cmd.name(),
@@ -220,10 +204,7 @@ fn resolve_project(
 }
 
 /// Resolve the full configuration for `cmd` from `lookup`.
-pub fn resolve(
-    cmd: Cmd,
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> Result<Config, Error> {
+pub fn resolve(cmd: Cmd, lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error> {
     // Runtime/timeout are demanded on every command (missing => error naming
     // the var). JSON-array vars and harden are validated on every command
     // (missing => default, malformed => error naming the var); `env_forward`
@@ -358,8 +339,7 @@ pub fn resolve(
                 container
             } else {
                 // Need project; project may need root.
-                let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT")
-                    .map(PathBuf::from);
+                let root_opt = lookup_non_empty(lookup, "NCAP_PROJECT_ROOT").map(PathBuf::from);
                 let project = resolve_project(lookup, cmd, root_opt.as_deref())?;
                 format!("ncap-{project}")
             };
@@ -1037,7 +1017,10 @@ mod tests {
             let mut pairs = full_init_env();
             pairs.push(("NCAP_HARDEN", bad));
             let err = resolve_with(Cmd::Init, &pairs).expect_err("must error");
-            assert!(err.to_string().contains("NCAP_HARDEN"), "bad={bad} err={err}");
+            assert!(
+                err.to_string().contains("NCAP_HARDEN"),
+                "bad={bad} err={err}"
+            );
         }
     }
 

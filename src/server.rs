@@ -29,11 +29,7 @@ use crate::protocol::{CURRENT_VERSION, ErrorMsg, Exit, FrameCodec, Message, Vers
 /// `drain`, then the socket file's removal.
 pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io::Result<()> {
     let log = Arc::new(Log::start(&log_dir)?);
-    log.line(&format!(
-        "server starting on socket `{}` (pid {})",
-        socket.display(),
-        std::process::id()
-    ));
+    log.line(&format!("server starting (pid {})", std::process::id()));
     probe_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)?;
     log.line(&format!(
@@ -45,7 +41,7 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io:
     let connections: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let acceptor = tokio::spawn(accept_loop(
         listener,
-        stop_rx.clone(),
+        stop_rx,
         connections.clone(),
         log.clone(),
     ));
@@ -456,7 +452,7 @@ impl Log {
     /// Append one stamped line to the log file and stderr; logging is
     /// best-effort and never disturbs the connection it reports on.
     fn line(&self, message: &str) {
-        let line = format!("[{}] {message}\n", epoch_secs());
+        let line = format!("[{}] {message}\n", rfc3339_utc());
         if let Ok(mut file) = self.file.lock() {
             let _ = file.write_all(line.as_bytes());
         }
@@ -464,12 +460,44 @@ impl Log {
     }
 }
 
-/// Seconds since the Unix epoch, saturating at 0 for a clock set before it.
-fn epoch_secs() -> u64 {
-    SystemTime::now()
+/// The current UTC instant as `YYYY-MM-DDTHH:MM:SSZ` (compact RFC 3339,
+/// second precision). Saturates at the epoch for a clock set before it.
+fn rfc3339_utc() -> String {
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    format_utc(secs)
+}
+
+/// Format Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`. Days-to-date is the
+/// inverse of Howard Hinnant's `days_from_civil`, which stays correct
+/// across leap years.
+fn format_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let secs_of_day = secs % 86_400;
+
+    // Shift the civil era so the era math sees only positive values.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        m,
+        d,
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    )
 }
 
 /// Milliseconds since the Unix epoch, saturating at 0 like [`epoch_secs`].
@@ -495,8 +523,16 @@ mod tests {
         let pgid = child.id();
         assert!(child.wait().expect("wait").success());
 
-        let err = signal_group(pgid, 15).expect_err("a reaped group cannot be signalled");
+        let err = signal_group(pgid, libc::SIGTERM as u8)
+            .expect_err("a reaped group cannot be signalled");
 
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "err={err}");
+    }
+
+    #[test_case::test_case(0, "1970-01-01T00:00:00Z"; "epoch")]
+    #[test_case::test_case(86_399, "1970-01-01T23:59:59Z"; "end of day one")]
+    #[test_case::test_case(951_782_400, "2000-02-29T00:00:00Z"; "leap day 2000")]
+    fn rfc3339_utc_formats_known_instants(secs: u64, expected: &str) {
+        assert_eq!(format_utc(secs), expected);
     }
 }
