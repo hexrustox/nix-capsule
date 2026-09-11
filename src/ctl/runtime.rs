@@ -23,8 +23,9 @@ impl Runtime {
     }
 
     /// `inspect -f {{.State.Running}} <name>` — `true` means the container's
-    /// init process (the server) is live. Any spawn or parse failure is
-    /// treated as not-running.
+    /// init process (the server) is reportedly running. This alone is not
+    /// liveness (see `is_live`): any spawn or parse failure is treated as
+    /// not-running.
     pub async fn is_running(&self, name: &str) -> bool {
         let output = Command::new(&self.bin)
             .args(["inspect", "-f", "{{.State.Running}}", name])
@@ -36,8 +37,19 @@ impl Runtime {
         }
     }
 
+    /// Liveness predicate (§ Liveness): `Running` AND socket-connectable.
+    /// One predicate serves both the `init` liveness probe and the `start`
+    /// readiness poll. `Running` alone is not live (the container is still
+    /// sourcing the Env dump ahead of the Server's bind).
+    pub async fn is_live(&self, name: &str, socket: &Path) -> bool {
+        if !self.is_running(name).await {
+            return false;
+        }
+        tokio::net::UnixStream::connect(socket).await.is_ok()
+    }
+
     /// Raw `State` JSON via `inspect -f {{json .State}} <name>`, for the
-    /// "never reaching Running" failure report.
+    /// "never became live" failure report.
     pub async fn inspect_state(&self, name: &str) -> String {
         let output = Command::new(&self.bin)
             .args(["inspect", "-f", "{{json .State}}", name])

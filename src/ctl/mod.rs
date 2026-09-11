@@ -56,10 +56,11 @@ async fn init(cfg: Config) -> Result<(), String> {
     stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
 
     let rt = runtime::Runtime::new(cfg.runtime.clone());
-    let running = rt.is_running(&cfg.container).await;
+    let socket = cfg.socket.as_deref().expect("init demands socket");
+    let live = rt.is_live(&cfg.container, socket).await;
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
 
-    match (running, freshness) {
+    match (live, freshness) {
         (true, digest::Freshness::Fresh) => {
             eprintln!("container `{}` is already running and fresh", cfg.container);
             Ok(())
@@ -85,7 +86,8 @@ async fn start(cfg: Config) -> Result<(), String> {
     stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
 
     let rt = runtime::Runtime::new(cfg.runtime.clone());
-    if rt.is_running(&cfg.container).await {
+    let socket = cfg.socket.as_deref().expect("start demands socket");
+    if rt.is_live(&cfg.container, socket).await {
         eprintln!("container `{}` is already running", cfg.container);
         return Ok(());
     }
@@ -292,10 +294,10 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
         unreachable!();
     }
 
-    // Poll until State.Running within the deadline.
+    // Poll the liveness predicate until live within the deadline.
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout);
     loop {
-        if rt.is_running(&cfg.container).await {
+        if rt.is_live(&cfg.container, socket).await {
             eprintln!("container `{}` is running", cfg.container);
             return Ok(());
         }
@@ -308,7 +310,7 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     let state = rt.inspect_state(&cfg.container).await;
     let tail = newest_log_tail(log_dir);
     Err(format!(
-        "container `{}` never reached Running within {}s (state: {state})\n{tail}",
+        "container `{}` never became live within {}s (state: {state})\n{tail}",
         cfg.container, cfg.timeout
     ))
 }

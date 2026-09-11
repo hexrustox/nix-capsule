@@ -70,9 +70,18 @@ fn write_stub(path: &Path, content: &str) {
     make_executable(path);
 }
 
+/// Bind a listener on `sock` so the socket half of the liveness predicate
+/// (§ Liveness: Running AND connectable) holds. The caller must hold the
+/// return value until the ctl invocation completes — dropping it closes the
+/// socket and the container counts as not live again.
+fn live_socket(sock: &Path) -> std::os::unix::net::UnixListener {
+    fs::create_dir_all(sock.parent().unwrap()).expect("sock dir");
+    std::os::unix::net::UnixListener::bind(sock).expect("bind socket")
+}
+
 fn fake_runtime(dir: &Path, state_dir: &Path, runtime_log: &Path) {
     let script = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -137,7 +146,7 @@ fn fake_nix(path: &Path, nix_log: &Path, env_content: &str) {
     let env_file = path.with_extension("env");
     fs::write(&env_file, env_content).expect("write nix env file");
     let script = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 ENV_SRC="{}"
 echo "$@" >> "$LOG"
@@ -357,6 +366,8 @@ fn derived_project_name_is_used_and_empty_is_a_hard_error() {
     // Remove explicit container/project so derivation is exercised.
     env.remove("NCAP_CONTAINER");
     env.remove("NCAP_PROJECT");
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     // Also remove socket/cache to exercise XDG derivation? Keep them explicit
     // so the test focuses on name derivation.
     let out = run_ctl(&env, &["init"]);
@@ -396,7 +407,7 @@ fn stamp_guard_same_root_passes_absent_written_different_is_error() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -420,6 +431,8 @@ esac
     let root_a = tmp.path().join("root-a");
     fs::create_dir_all(&root_a).expect("root-a");
     let mut env = base_env(&root_a, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     // First init: stamp absent → written, then start (container down → eval + start)
     let out = run_ctl(&env, &["init"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
@@ -484,6 +497,8 @@ fn init_fresh_and_running_performs_zero_evals() {
     // Clear logs
     fs::write(&runtime_log, "").expect("clear");
     fs::write(&nix_log, "").expect("clear");
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
 
     let out = run_ctl(&env, &["init"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
@@ -516,7 +531,29 @@ fn init_running_but_stale_triggers_reeval_and_restart() {
     let nix_log = tmp.path().join("nix.log");
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
-    fake_runtime(&runtime_bin, &state, &runtime_log);
+    // The fake's `run` sets running true so the restart's readiness poll
+    // can observe the new container; `stop` clears it like the real stop.
+    let stub = format!(
+        r#"#!/usr/bin/env bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect)
+    TEMPLATE="$3"
+    if [[ "$TEMPLATE" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi
+    exit 0
+    ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; echo "stopped"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
     fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
 
     fs::create_dir_all(&cache).expect("cache");
@@ -529,29 +566,26 @@ fn init_running_but_stale_triggers_reeval_and_restart() {
     env.insert("NCAP_WATCH_FILES".into(), r#"["flake.nix"]"#.into());
     fs::write(&runtime_log, "").expect("clear");
     fs::write(&nix_log, "").expect("clear");
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
 
+    // Live but stale ⇒ re-eval, non-fatal stop, then start to readiness.
     let out = run_ctl(&env, &["init"]);
-    // After re-eval, the fake runtime's inspect still says running; the
-    // flow does stop+start. Our fake `stop` sets running to false, so the
-    // subsequent start's poll will see false until... hmm, our fake always
-    // returns the file's content. After stop, running is false, so start's
-    // poll would fail. To make this test pass, we need the fake to return
-    // true after start. Our `run` stub doesn't touch the running file;
-    // `stop` sets it false. So for this test we need to handle the stale
-    // path differently: don't rely on poll after restart. Instead, the test's
-    // fake should keep running true after run. We can make the fake's `run`
-    // set running to true.
-    // For now, assert that an eval happened.
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let nix_calls = fs::read_to_string(&nix_log).expect("nix log");
     assert!(
         nix_calls.contains("print-dev-env"),
         "stale must re-eval: nix log={nix_calls}"
     );
-    // The init may have failed on readiness (since we didn't set running true
-    // after start). That's okay — the eval part is what we assert. If it
-    // did fail, the test still proves eval happened. A more precise test
-    // would make the fake set running true on run.
-    let _ = out;
+    let rt_calls = fs::read_to_string(&runtime_log).expect("rt log");
+    assert!(
+        rt_calls.contains("stop "),
+        "stale must stop before restarting: rt log={rt_calls}"
+    );
+    assert!(
+        rt_calls.contains("run "),
+        "stale must start after re-eval: rt log={rt_calls}"
+    );
 }
 
 #[test]
@@ -571,7 +605,7 @@ fn init_down_triggers_ensure_cache_and_start() {
     let nix_bin = tmp.path().join("fake-nix");
     // Make `run` set running to true so the readiness poll succeeds.
     let run_sets_running = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -608,6 +642,8 @@ esac
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
     // No cache yet
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["init"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let nix_calls = fs::read_to_string(&nix_log).expect("nix log");
@@ -615,6 +651,90 @@ esac
     let rt_calls = fs::read_to_string(&runtime_log).expect("rt log");
     assert!(rt_calls.contains("run "), "down must start: {rt_calls}");
     assert!(cache.join("env").is_file(), "env must be cached");
+}
+
+// ---------------------------------------------------------------------------
+// Liveness: Running without a connectable socket is not live
+// ---------------------------------------------------------------------------
+
+#[test]
+fn running_without_socket_is_not_live() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    // Deliberately no listener on this socket path.
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::write(state.join("running"), "true").expect("running");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let stub = format!(
+        r#"#!/usr/bin/env bash
+LOG="{}"
+STATE_DIR="{}"
+echo "$@" >> "$LOG"
+case "$1" in
+  inspect)
+    TEMPLATE="$3"
+    if [[ "$TEMPLATE" == *'State.Running'* ]]; then cat "$STATE_DIR/running" 2>/dev/null || echo "false"; else echo '{{"Running":false}}'; fi
+    exit 0
+    ;;
+  run) echo "true" > "$STATE_DIR/running"; echo "fake-id"; exit 0 ;;
+  stop) echo "false" > "$STATE_DIR/running"; exit 0 ;;
+  rm) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        runtime_log.display(),
+        state.display()
+    );
+    write_stub(&runtime_bin, &stub);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+
+    // Fresh cache: a live container would make init return early with
+    // "already running and fresh" and zero evals.
+    fs::create_dir_all(&cache).expect("cache");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+
+    let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    env.insert("NCAP_TIMEOUT".into(), "1".into());
+    env.insert("NCAP_WATCH_FILES".into(), "[]".into());
+
+    // init must not take the live+fresh early return: it must attempt a
+    // start (visible as a `run` invocation), which then fails readiness
+    // because the socket never becomes connectable.
+    let out = run_ctl(&env, &["init"]);
+    assert!(
+        !out.status.success(),
+        "Running without a connectable socket must not count as live"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("never became live"), "stderr={stderr}");
+    let rt_calls = fs::read_to_string(&runtime_log).expect("rt log");
+    assert!(
+        rt_calls.contains("run "),
+        "not-live init must attempt start: {rt_calls}"
+    );
+
+    // start must not report "already running" either: it must attempt a run.
+    fs::write(&runtime_log, "").expect("clear");
+    let out2 = run_ctl(&env, &["start"]);
+    assert!(
+        !out2.status.success(),
+        "Running without a connectable socket must not count as live"
+    );
+    let rt_calls2 = fs::read_to_string(&runtime_log).expect("rt log");
+    assert!(
+        rt_calls2.contains("run "),
+        "not-live start must attempt run: {rt_calls2}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -725,7 +845,7 @@ fn concurrent_start_peer_dead_removes_and_retries_once() {
     let nix_bin = tmp.path().join("fake-nix");
     // Custom stub that flips running to true on the second run
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -772,6 +892,8 @@ esac
     fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
 
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
     assert!(out.status.success(), "peer dead ⇒ rm+retry ⇒ success: stderr={}", String::from_utf8_lossy(&out.stderr));
     let rt_log = fs::read_to_string(&runtime_log).expect("rt log");
@@ -824,7 +946,7 @@ fn restart_tolerates_a_stopped_container() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -848,6 +970,8 @@ esac
     fs::write(state.join("running"), "false").expect("running");
 
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["restart"]);
     assert!(out.status.success(), "restart on stopped: {}", String::from_utf8_lossy(&out.stderr));
 }
@@ -980,7 +1104,7 @@ fn runtime_dir_is_created_with_0700() {
     let nix_bin = tmp.path().join("fake-nix");
     // run sets running true
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1023,6 +1147,24 @@ esac
     // Also need to set HOME so XDG fallbacks have a base
     fs::create_dir_all(tmp.path().join("home")).expect("home");
 
+    // Liveness needs a connectable socket: Running alone is not live. The
+    // socket path is derived (no NCAP_SOCKET), so rebuild it here; its
+    // parent is pre-created mode 0700 so the assertion below holds (the ctl
+    // leaves an existing dir untouched).
+    let uid_sock = unsafe { libc::getuid() };
+    let derived_sock = xdg_fallback
+        .join(format!("nix-capsule-{uid_sock}"))
+        .join("nix-capsule")
+        .join("proj")
+        .join("ncap.sock");
+    fs::create_dir_all(derived_sock.parent().unwrap()).expect("sock dir");
+    fs::set_permissions(
+        derived_sock.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("sock dir mode");
+    let _live = live_socket(&derived_sock);
+
     let out = run_ctl(&env, &["init"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
 
@@ -1062,7 +1204,7 @@ fn start_assembles_exact_default_mount_set_and_launch_command() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1089,6 +1231,8 @@ esac
     assert!(!root.join(".git").exists());
 
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
 
@@ -1185,7 +1329,7 @@ fn git_mount_present_readonly_when_git_dir_exists() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1205,6 +1349,8 @@ esac
     fs::write(state.join("running"), "false").expect("running");
 
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let log = fs::read_to_string(&runtime_log).expect("log");
@@ -1237,7 +1383,7 @@ fn git_mount_absent_without_error_outside_git_repo() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1257,6 +1403,8 @@ esac
     fs::write(state.join("running"), "false").expect("running");
 
     let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let log = fs::read_to_string(&runtime_log).expect("log");
@@ -1287,7 +1435,7 @@ fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1362,7 +1510,7 @@ fn extra_options_expansion_sets_var_is_passed_and_no_word_splitting() {
     let nix_bin = tmp.path().join("fake-nix");
     // Use a stub that logs each arg on its own line to check word-splitting
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 printf "%s\n" "$@" >> "$LOG"
@@ -1403,6 +1551,8 @@ esac
     }
     // Ensure TEST_EXPAND is set for the child
     cmd.env("TEST_EXPAND", "/tmp/foo bar");
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = cmd.output().expect("spawn");
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let log = fs::read_to_string(&runtime_log).expect("log");
@@ -1446,7 +1596,7 @@ fn harden_adds_security_flags_and_ro_mounts_for_present_watch_files_skips_missin
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1471,6 +1621,8 @@ esac
         "NCAP_WATCH_FILES".into(),
         r#"["flake.nix", "missing.nix"]"#.into(),
     );
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let log = std::fs::read_to_string(&runtime_log).expect("log");
@@ -1516,7 +1668,7 @@ fn harden_off_emits_no_flags_nor_extra_mounts() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 echo "$@" >> "$LOG"
@@ -1538,6 +1690,8 @@ esac
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     // No NCAP_HARDEN set (default off)
     env.insert("NCAP_WATCH_FILES".into(), r#"["flake.nix"]"#.into());
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = run_ctl(&env, &["start"]);
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let log = std::fs::read_to_string(&runtime_log).expect("log");
@@ -1568,7 +1722,7 @@ fn extra_options_braced_expansion_and_literal_passthrough() {
     let runtime_bin = tmp.path().join("fake-runtime");
     let nix_bin = tmp.path().join("fake-nix");
     let stub = format!(
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 LOG="{}"
 STATE_DIR="{}"
 printf "%s\n" "$@" >> "$LOG"
@@ -1607,6 +1761,8 @@ esac
         }
     }
     cmd.env("NCAP_TEST_BRACED", "braced-val");
+    // Liveness needs a connectable socket: Running alone is not live.
+    let _live = live_socket(&sock);
     let out = cmd.output().expect("spawn");
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let log = std::fs::read_to_string(&runtime_log).expect("log");
