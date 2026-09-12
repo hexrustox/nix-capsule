@@ -3,7 +3,6 @@
 
 pub mod config;
 pub mod digest;
-pub mod names;
 pub mod nix;
 pub mod paths;
 pub mod runtime;
@@ -54,13 +53,13 @@ pub async fn run(cmd: Cmd) -> i32 {
 
 async fn init(cfg: Config) -> Result<(), String> {
     // Stamp guard first.
-    let root = cfg.root.as_deref().expect("init demands root");
-    let cache_dir = cfg.cache_dir.as_deref().expect("init demands cache_dir");
-    let project = cfg.project.as_deref().expect("init demands project");
+    let root = &cfg.root;
+    let cache_dir = &cfg.cache_dir;
+    let project = &cfg.project;
     stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
 
     let rt = runtime::Runtime::new(cfg.runtime.clone());
-    let socket = cfg.socket.as_deref().expect("init demands socket");
+    let socket = &cfg.socket;
     let live = rt.is_live(&cfg.container, socket).await;
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
 
@@ -84,13 +83,13 @@ async fn init(cfg: Config) -> Result<(), String> {
 }
 
 async fn start(cfg: Config) -> Result<(), String> {
-    let root = cfg.root.as_deref().expect("start demands root");
-    let cache_dir = cfg.cache_dir.as_deref().expect("start demands cache_dir");
-    let project = cfg.project.as_deref().expect("start demands project");
+    let root = &cfg.root;
+    let cache_dir = &cfg.cache_dir;
+    let project = &cfg.project;
     stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
 
     let rt = runtime::Runtime::new(cfg.runtime.clone());
-    let socket = cfg.socket.as_deref().expect("start demands socket");
+    let socket = &cfg.socket;
     if rt.is_live(&cfg.container, socket).await {
         eprintln!("container `{}` is already running", cfg.container);
         return Ok(());
@@ -134,39 +133,12 @@ async fn status(cfg: Config) -> Result<(), String> {
     let rt = runtime::Runtime::new(cfg.runtime.clone());
     let running = rt.is_running(&cfg.container).await;
 
-    let socket_connectable = if let Some(socket) = cfg.socket.as_deref() {
-        UnixStream::connect(socket).await.is_ok()
-    } else {
-        false
-    };
+    let socket_connectable = UnixStream::connect(&cfg.socket).await.is_ok();
 
-    let cache_status = if let Some(cache_dir) = cfg.cache_dir.as_deref() {
-        // For status, the root may be None when watch files are empty and
-        // paths were explicit. Use the cache check only when we can compute
-        // the digest; otherwise fall back to env-file existence.
-        if cfg.watch_files.is_empty() && cfg.root.is_none() {
-            if cache_dir.join("env").is_file() {
-                // No watch files to hash — treat as fresh when env exists and
-                // hash file matches empty digest, else stale.
-                let empty_digest = digest::of(Path::new("/"), &[]).unwrap_or_default();
-                match fs::read_to_string(cache_dir.join("hash")) {
-                    Ok(cached) if cached.trim() == empty_digest => "fresh",
-                    Ok(_) => "stale",
-                    Err(_) => "stale",
-                }
-            } else {
-                "missing"
-            }
-        } else {
-            let root = cfg.root.as_deref().unwrap_or_else(|| Path::new("/tmp"));
-            match digest::check(cache_dir, root, &cfg.watch_files) {
-                digest::Freshness::Fresh => "fresh",
-                digest::Freshness::Stale => "stale",
-                digest::Freshness::Missing => "missing",
-            }
-        }
-    } else {
-        "missing"
+    let cache_status = match digest::check(&cfg.cache_dir, &cfg.root, &cfg.watch_files) {
+        digest::Freshness::Fresh => "fresh",
+        digest::Freshness::Stale => "stale",
+        digest::Freshness::Missing => "missing",
     };
 
     if running {
@@ -174,20 +146,18 @@ async fn status(cfg: Config) -> Result<(), String> {
     } else {
         println!("container: not running");
     }
-    if let Some(socket) = cfg.socket.as_deref() {
-        if socket_connectable {
-            println!("socket: connectable ({})", socket.display());
-        } else {
-            println!("socket: unreachable ({})", socket.display());
-        }
+    if socket_connectable {
+        println!("socket: connectable ({})", cfg.socket.display());
+    } else {
+        println!("socket: unreachable ({})", cfg.socket.display());
     }
     println!("cache: {cache_status}");
     Ok(())
 }
 
 async fn enter(cfg: Config) -> Result<(), String> {
-    let cache_dir = cfg.cache_dir.as_deref().expect("enter demands cache_dir");
-    let bash = cfg.bash.as_deref().expect("enter demands bash");
+    let cache_dir = &cfg.cache_dir;
+    let bash = &cfg.bash;
     if !cache_dir.join("env").is_file() {
         return Err("no cached dev environment found; run `ncap-ctl init` first".to_owned());
     }
@@ -202,7 +172,7 @@ async fn enter(cfg: Config) -> Result<(), String> {
 }
 
 async fn log(cfg: Config) -> Result<(), String> {
-    let log_dir = cfg.log_dir.as_deref().expect("log demands log_dir");
+    let log_dir = &cfg.log_dir;
     let newest =
         newest_log_path(log_dir).ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
     let (prog, args) = pager_command();
@@ -231,21 +201,15 @@ async fn clean(cfg: Config) -> Result<(), String> {
     }
     let _ = rt.remove(&cfg.container).await;
 
-    if let Some(cache_dir) = cfg.cache_dir.as_deref() {
-        remove_dir_all_if_exists(cache_dir)?;
-    }
-    if let Some(log_dir) = cfg.log_dir.as_deref() {
-        remove_dir_all_if_exists(log_dir)?;
-    }
-    if let Some(socket) = cfg.socket.as_deref()
-        && let Some(parent) = socket.parent()
-    {
+    remove_dir_all_if_exists(&cfg.cache_dir)?;
+    remove_dir_all_if_exists(&cfg.log_dir)?;
+    if let Some(parent) = cfg.socket.parent() {
         // Delete the socket file itself, then best-effort remove the parent
         // dir if empty. Never `remove_dir_all` the parent: an explicit
         // NCAP_SOCKET may point into a shared dir (e.g. `/tmp/x.sock`),
         // where a recursive delete would destroy unrelated files. Parent
         // removal failure is non-fatal (non-empty, permission, ...).
-        match fs::remove_file(socket) {
+        match fs::remove_file(&cfg.socket) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err.to_string()),
@@ -269,21 +233,15 @@ async fn show_options(cfg: Config) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 async fn ensure_cache(cfg: &Config) -> Result<(), String> {
-    let root = cfg.root.as_deref().expect("ensure_cache demands root");
-    let cache_dir = cfg
-        .cache_dir
-        .as_deref()
-        .expect("ensure_cache demands cache_dir");
+    let root = &cfg.root;
+    let cache_dir = &cfg.cache_dir;
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
     if freshness == digest::Freshness::Fresh {
         return Ok(());
     }
     // Stale or missing → eval.
-    let nix_bin = cfg.nix.as_deref().expect("ensure_cache demands nix");
-    let devshell = cfg
-        .devshell
-        .as_deref()
-        .expect("ensure_cache demands devshell");
+    let nix_bin = &cfg.nix;
+    let devshell = &cfg.devshell;
     let profile = cache_dir.join("profile");
 
     fs::create_dir_all(cache_dir).map_err(|err| err.to_string())?;
@@ -306,15 +264,12 @@ async fn ensure_cache(cfg: &Config) -> Result<(), String> {
 }
 
 async fn start_inner(cfg: &Config) -> Result<(), String> {
-    let cache_dir = cfg
-        .cache_dir
-        .as_deref()
-        .expect("start_inner demands cache_dir");
-    let socket = cfg.socket.as_deref().expect("start_inner demands socket");
-    let log_dir = cfg.log_dir.as_deref().expect("start_inner demands log_dir");
-    let server = cfg.server.as_deref().expect("start_inner demands server");
-    let bash = cfg.bash.as_deref().expect("start_inner demands bash");
-    let image = cfg.image.as_deref().expect("start_inner demands image");
+    let cache_dir = &cfg.cache_dir;
+    let socket = &cfg.socket;
+    let log_dir = &cfg.log_dir;
+    let server = &cfg.server;
+    let bash = &cfg.bash;
+    let image = &cfg.image;
 
     // The env dump must exist — otherwise the container cannot source it.
     if !cache_dir.join("env").is_file() {
@@ -352,8 +307,8 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
         .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
         .await;
 
-    let run_ok = match run_result {
-        Ok(_) => true,
+    match run_result {
+        Ok(_) => {}
         Err(stderr) if runtime::is_name_in_use(&stderr) => {
             // Concurrent-start race: re-inspect.
             if rt.is_running(&cfg.container).await {
@@ -366,7 +321,7 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
                 .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
                 .await
             {
-                Ok(_) => true,
+                Ok(_) => {}
                 Err(stderr) => return Err(format!("{} run failed: {stderr}", rt.bin())),
             }
         }
@@ -374,10 +329,6 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
             return Err(format!("{} run failed: {stderr}", rt.bin()));
         }
     };
-
-    if !run_ok {
-        unreachable!();
-    }
 
     // Poll the liveness predicate until live within the deadline.
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout);
@@ -389,11 +340,11 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
         if Instant::now() >= deadline {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     let state = rt.inspect_state(&cfg.container).await;
-    let tail = newest_log_tail(log_dir);
+    let tail = newest_log_tail(&cfg.log_dir);
     Err(format!(
         "container `{}` never became live within {}s (state: {state})\n{tail}",
         cfg.container, cfg.timeout
@@ -401,28 +352,18 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
 }
 
 fn newest_log_tail(log_dir: &Path) -> String {
-    let dir = match fs::read_dir(log_dir) {
-        Ok(dir) => dir,
-        Err(_) => return "(no log dir)".to_owned(),
+    let Some(path) = newest_log_path(log_dir) else {
+        return "no log file".to_owned();
     };
-    let mut entries: Vec<(u64, PathBuf)> = Vec::new();
-    for entry in dir.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(epoch) = parse_log_epoch(&name) {
-            entries.push((epoch, entry.path()));
-        }
-    }
-    if entries.is_empty() {
-        return "(no log file)".to_owned();
-    }
-    entries.sort_by_key(|(epoch, _)| *epoch);
-    let newest = &entries.last().unwrap().1;
-    let content = fs::read_to_string(newest).unwrap_or_default();
+    let Ok(content) = fs::read_to_string(&path) else {
+        return "log file unreadable".to_owned();
+    };
     let lines: Vec<&str> = content.lines().collect();
     let tail_start = lines.len().saturating_sub(20);
     lines[tail_start..].join("\n")
 }
 
+// TODO sync with server
 fn parse_log_epoch(name: &str) -> Option<u64> {
     let rest = name.strip_prefix("ncap-server-")?;
     let epoch = rest.strip_suffix(".log")?;
@@ -464,16 +405,10 @@ fn remove_dir_all_if_exists(dir: &Path) -> Result<(), String> {
 }
 
 fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
-    let root = cfg.root.as_deref().expect("build mounts demands root");
-    let socket = cfg.socket.as_deref().expect("build mounts demands socket");
-    let cache_dir = cfg
-        .cache_dir
-        .as_deref()
-        .expect("build mounts demands cache_dir");
-    let log_dir = cfg
-        .log_dir
-        .as_deref()
-        .expect("build mounts demands log_dir");
+    let root = &cfg.root;
+    let socket = &cfg.socket;
+    let cache_dir = &cfg.cache_dir;
+    let log_dir = &cfg.log_dir;
     let socket_dir = socket
         .parent()
         .ok_or_else(|| format!("socket path `{}` has no parent directory", socket.display()))?;
@@ -537,6 +472,10 @@ fn is_env_name(name: &str) -> bool {
 }
 
 fn expand_one(input: &str) -> Result<String, String> {
+    expand_with(input, &|name| std::env::var(name).ok())
+}
+
+fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
     let mut out = String::new();
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -570,9 +509,9 @@ fn expand_one(input: &str) -> Result<String, String> {
                     out.push_str(&format!("${{{name}}}"));
                     continue;
                 }
-                match std::env::var(&name) {
-                    Ok(val) => out.push_str(&val),
-                    Err(_) => {
+                match lookup(&name) {
+                    Some(val) => out.push_str(&val),
+                    None => {
                         return Err(format!("referenced unset variable `{name}`"));
                     }
                 }
@@ -586,9 +525,9 @@ fn expand_one(input: &str) -> Result<String, String> {
                         break;
                     }
                 }
-                match std::env::var(&name) {
-                    Ok(val) => out.push_str(&val),
-                    Err(_) => {
+                match lookup(&name) {
+                    Some(val) => out.push_str(&val),
+                    None => {
                         return Err(format!("referenced unset variable `{name}`"));
                     }
                 }
@@ -605,320 +544,56 @@ fn expand_one(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctl::config::Config;
-    use std::path::PathBuf;
+    use test_case::test_case;
 
-    fn cfg_with(
-        root: &std::path::Path,
-        socket: &std::path::Path,
-        cache: &std::path::Path,
-        logs: &std::path::Path,
-        watch_files: Vec<String>,
-        run_opts: Vec<String>,
-        harden: bool,
-    ) -> Config {
-        Config {
-            root: Some(root.to_path_buf()),
-            project: Some("proj".into()),
-            container: "ncap-test".into(),
-            socket: Some(socket.to_path_buf()),
-            cache_dir: Some(cache.to_path_buf()),
-            log_dir: Some(logs.to_path_buf()),
-            runtime: "podman".into(),
-            timeout: 2,
-            watch_files,
-            run_opts,
-            harden,
-            image: Some("alpine:latest".into()),
-            server: Some(PathBuf::from("/nix/store/fake/bin/ncap-server")),
-            nix: None,
-            bash: Some(PathBuf::from("/nix/store/fake/bin/bash")),
-            devshell: None,
+    /// A lookup over literal pairs, standing in for the process environment.
+    /// Absent names yield `None`, the same signal `expand_one` gets from
+    /// `std::env::var(..).ok()`.
+    fn lookup_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
         }
     }
 
-    #[test]
-    fn expand_dollar_var() {
-        unsafe { std::env::set_var("NCAP_TEST_EXPAND_A", "hello") };
-        let out = expand_one("prefix-$NCAP_TEST_EXPAND_A-suffix").expect("expand");
-        assert_eq!(out, "prefix-hello-suffix");
-        unsafe { std::env::remove_var("NCAP_TEST_EXPAND_A") };
+    #[test_case("prefix-$A-suffix", &[("A", "hello")], "prefix-hello-suffix" ; "dollar_var_mid_string")]
+    #[test_case("a-${A}-b", &[("A", "world")], "a-world-b" ; "braced_var_mid_string")]
+    #[test_case("$A:$A", &[("A", "/tmp/cargo")], "/tmp/cargo:/tmp/cargo" ; "dollar_var_repeats")]
+    #[test_case("${A}:${A}", &[("A", "/tmp/cargo")], "/tmp/cargo:/tmp/cargo" ; "braced_var_repeats")]
+    #[test_case("a-$A-b", &[("A", "")], "a--b" ; "empty_value_is_empty_not_error")]
+    #[test_case("a-${A}-b", &[("A", "")], "a--b" ; "braced_empty_value_is_empty_not_error")]
+    #[test_case("-v $A:/mnt", &[("A", "/tmp/foo bar")], "-v /tmp/foo bar:/mnt" ; "space_value_stays_one_arg")]
+    fn expands_set_vars(template: &str, env: &[(&str, &str)], want: &str) {
+        let out = expand_with(template, &lookup_of(env)).expect("expand succeeds");
+        assert_eq!(out, want, "template={template}");
     }
 
-    #[test]
-    fn expand_braced_var() {
-        unsafe { std::env::set_var("NCAP_TEST_EXPAND_B", "world") };
-        let out = expand_one("a-${NCAP_TEST_EXPAND_B}-b").expect("expand");
-        assert_eq!(out, "a-world-b");
-        unsafe { std::env::remove_var("NCAP_TEST_EXPAND_B") };
-    }
-
-    #[test]
-    fn expand_multiple_vars_in_one_arg() {
-        unsafe { std::env::set_var("NCAP_TEST_CARGO", "/tmp/cargo") };
-        let out = expand_one("$NCAP_TEST_CARGO:$NCAP_TEST_CARGO").expect("expand");
-        assert_eq!(out, "/tmp/cargo:/tmp/cargo");
-        let out2 = expand_one("${NCAP_TEST_CARGO}:${NCAP_TEST_CARGO}").expect("expand");
-        assert_eq!(out2, "/tmp/cargo:/tmp/cargo");
-        unsafe { std::env::remove_var("NCAP_TEST_CARGO") };
-    }
-
-    #[test]
-    fn expand_literal_passthrough() {
-        let out = expand_one("literal-no-dollar").expect("expand");
-        assert_eq!(out, "literal-no-dollar");
-        let out2 = expand_one("price $ 5").expect("expand");
-        assert_eq!(out2, "price $ 5");
-        let out3 = expand_one("a-$5b").expect("expand");
-        assert_eq!(out3, "a-$5b");
-    }
-
-    #[test]
-    fn expand_invalid_braced_names_stay_literal() {
-        for literal in ["${5}", "${foo-bar}", "${foo bar}", "${}", "$", "$$", "$-x"] {
-            let out = expand_one(literal).expect("literal stays");
-            assert_eq!(out, literal, "input={literal}");
-        }
+    #[test_case("literal-no-dollar" ; "plain_text")]
+    #[test_case("price $ 5" ; "lone_dollar_stays")]
+    #[test_case("a-$5b" ; "dollar_digit_is_not_a_name")]
+    #[test_case("${5}" ; "braced_digit_stays_literal")]
+    #[test_case("${foo-bar}" ; "braced_dash_stays_literal")]
+    #[test_case("${foo bar}" ; "braced_space_stays_literal")]
+    #[test_case("${}" ; "braced_empty_stays_literal")]
+    #[test_case("$" ; "bare_dollar")]
+    #[test_case("$$" ; "double_dollar")]
+    #[test_case("$-x" ; "dollar_dash_is_not_a_name")]
+    #[test_case("${5-NC AP}" ; "invalid_name_never_consults_env")]
+    fn leaves_non_names_literal(input: &str) {
         // Invalid braced names never consult the environment and never error,
-        // even when the text inside names an unset variable.
-        unsafe { std::env::remove_var("NCAP_TEST_UNSET_XYZ") };
-        let out = expand_one("${5-NC AP}").expect("literal");
-        assert_eq!(out, "${5-NC AP}");
-    }
-    #[test]
-    fn expand_unset_is_error_naming_var() {
-        unsafe { std::env::remove_var("NCAP_TEST_UNSET_XYZ") };
-        let err = expand_one("x-$NCAP_TEST_UNSET_XYZ-y").expect_err("must error");
-        assert!(err.contains("NCAP_TEST_UNSET_XYZ"), "err={err}");
-        let err2 = expand_one("x-${NCAP_TEST_UNSET_XYZ}-y").expect_err("must error");
-        assert!(err2.contains("NCAP_TEST_UNSET_XYZ"), "err={err2}");
+        // even when the text inside names a variable set to another value.
+        let out =
+            expand_with(input, &lookup_of(&[("5", "set"), ("foo", "set")])).expect("literal stays");
+        assert_eq!(out, input);
     }
 
-    #[test]
-    fn expand_unset_dollar_braced_is_error() {
-        unsafe { std::env::remove_var("NCAP_TEST_UNSET2") };
-        let err = expand_one("${NCAP_TEST_UNSET2}").expect_err("must error");
-        assert!(err.contains("NCAP_TEST_UNSET2"), "err={err}");
-    }
-
-    #[test]
-    fn expand_empty_value_is_empty_not_error() {
-        unsafe { std::env::set_var("NCAP_TEST_EMPTY", "") };
-        let out = expand_one("a-$NCAP_TEST_EMPTY-b").expect("expand");
-        assert_eq!(out, "a--b");
-        let out2 = expand_one("a-${NCAP_TEST_EMPTY}-b").expect("expand");
-        assert_eq!(out2, "a--b");
-        unsafe { std::env::remove_var("NCAP_TEST_EMPTY") };
-    }
-
-    #[test]
-    fn expand_with_space_value_has_no_word_splitting() {
-        unsafe { std::env::set_var("NCAP_TEST_SPACE", "/tmp/foo bar") };
-        let out = expand_one("-v $NCAP_TEST_SPACE:/mnt").expect("expand");
-        assert_eq!(out, "-v /tmp/foo bar:/mnt");
-        // Ensure the result is a single string, not split.
-        assert_eq!(out.split(' ').count(), 3); // "-v", "/tmp/foo", "bar:/mnt" would be 3 words but we keep as one arg; we check the whole string
-        assert!(out.contains("/tmp/foo bar:/mnt"));
-        unsafe { std::env::remove_var("NCAP_TEST_SPACE") };
-    }
-
-    #[test]
-    fn build_args_defaults_before_extra_and_harden_flags_prepended() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("proj");
-        std::fs::create_dir_all(&root).expect("root");
-        let cache = tmp.path().join("cache");
-        let logs = tmp.path().join("logs");
-        std::fs::create_dir_all(&cache).expect("cache");
-        std::fs::create_dir_all(&logs).expect("logs");
-        let sock = tmp.path().join("sock/ncap.sock");
-        unsafe { std::env::set_var("NCAP_TEST_EXTRA", "extra-val") };
-        let cfg = cfg_with(
-            &root,
-            &sock,
-            &cache,
-            &logs,
-            vec![],
-            vec!["--extra=$NCAP_TEST_EXTRA".into()],
-            false,
-        );
-        let args = build_runtime_args(&cfg).expect("args");
-        // Find positions: defaults like /nix must come before extra
-        let nix_pos = args.iter().position(|a| a == "/nix:/nix:ro").expect("nix");
-        let extra_pos = args
-            .iter()
-            .position(|a| a == "--extra=extra-val")
-            .expect("extra");
-        assert!(nix_pos < extra_pos, "defaults before extra: {args:?}");
-        // No harden flags when off
-        assert!(!args.contains(&"--cap-drop=all".to_string()));
-        assert!(!args.contains(&"--security-opt=no-new-privileges".to_string()));
-        unsafe { std::env::remove_var("NCAP_TEST_EXTRA") };
-    }
-
-    #[test]
-    fn build_args_harden_adds_flags_and_present_watch_mounts_skips_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("proj");
-        std::fs::create_dir_all(&root).expect("root");
-        let cache = tmp.path().join("cache");
-        let logs = tmp.path().join("logs");
-        std::fs::create_dir_all(&cache).expect("cache");
-        std::fs::create_dir_all(&logs).expect("logs");
-        let sock = tmp.path().join("sock/ncap.sock");
-        // Create one watch file, leave another missing
-        std::fs::write(root.join("flake.nix"), b"x").expect("flake");
-        // do not create "missing.nix"
-        let cfg = cfg_with(
-            &root,
-            &sock,
-            &cache,
-            &logs,
-            vec!["flake.nix".into(), "missing.nix".into()],
-            vec![],
-            true,
-        );
-        let args = build_runtime_args(&cfg).expect("args");
-        assert!(
-            args.contains(&"--cap-drop=all".to_string()),
-            "harden flags: {args:?}"
-        );
-        assert!(
-            args.contains(&"--security-opt=no-new-privileges".to_string()),
-            "harden flags: {args:?}"
-        );
-        let expected_mount = format!(
-            "{}:{}:ro",
-            root.join("flake.nix").display(),
-            root.join("flake.nix").display()
-        );
-        assert!(
-            args.contains(&expected_mount),
-            "present watch mount: {args:?}"
-        );
-        let missing_mount = format!(
-            "{}:{}:ro",
-            root.join("missing.nix").display(),
-            root.join("missing.nix").display()
-        );
-        assert!(
-            !args.contains(&missing_mount),
-            "missing must be skipped: {args:?}"
-        );
-        // Watch mounts must come after the project root mount (more-specific wins)
-        let root_mount = format!("{}:{}", root.display(), root.display());
-        let root_pos = args
-            .iter()
-            .position(|a| a == &root_mount)
-            .expect("root mount");
-        let watch_pos = args
-            .iter()
-            .position(|a| a == &expected_mount)
-            .expect("watch mount");
-        assert!(root_pos < watch_pos, "watch mount after root: {args:?}");
-    }
-
-    #[test]
-    fn build_args_harden_off_emits_no_extra_mounts() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("proj");
-        std::fs::create_dir_all(&root).expect("root");
-        std::fs::write(root.join("flake.nix"), b"x").expect("flake");
-        let cache = tmp.path().join("cache");
-        let logs = tmp.path().join("logs");
-        std::fs::create_dir_all(&cache).expect("cache");
-        std::fs::create_dir_all(&logs).expect("logs");
-        let sock = tmp.path().join("sock/ncap.sock");
-        let cfg = cfg_with(
-            &root,
-            &sock,
-            &cache,
-            &logs,
-            vec!["flake.nix".into()],
-            vec![],
-            false,
-        );
-        let args = build_runtime_args(&cfg).expect("args");
-        assert!(!args.contains(&"--cap-drop=all".to_string()));
-        let watch_mount = format!(
-            "{}:{}:ro",
-            root.join("flake.nix").display(),
-            root.join("flake.nix").display()
-        );
-        assert!(
-            !args.contains(&watch_mount),
-            "harden off must not mount watch file: {args:?}"
-        );
-    }
-
-    #[test]
-    fn build_args_unset_extra_is_error_before_runtime() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("proj");
-        std::fs::create_dir_all(&root).expect("root");
-        let cache = tmp.path().join("cache");
-        let logs = tmp.path().join("logs");
-        std::fs::create_dir_all(&cache).expect("cache");
-        std::fs::create_dir_all(&logs).expect("logs");
-        let sock = tmp.path().join("sock/ncap.sock");
-        unsafe { std::env::remove_var("NCAP_TEST_UNSET_EXTRA") };
-        let cfg = cfg_with(
-            &root,
-            &sock,
-            &cache,
-            &logs,
-            vec![],
-            vec!["$NCAP_TEST_UNSET_EXTRA".into()],
-            false,
-        );
-        let err = build_runtime_args(&cfg).expect_err("must error on unset");
-        assert!(err.contains("NCAP_TEST_UNSET_EXTRA"), "err={err}");
-    }
-
-    #[test]
-    fn build_args_mounts_gitfile_as_well_as_gitdir() {
-        for git_is_dir in [true, false] {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let root = tmp.path().join("proj");
-            std::fs::create_dir_all(&root).expect("root");
-            let git_path = root.join(".git");
-            if git_is_dir {
-                std::fs::create_dir_all(&git_path).expect("git dir");
-            } else {
-                // Worktree-style gitfile.
-                std::fs::write(&git_path, b"gitdir: /elsewhere").expect("gitfile");
-            }
-            assert!(std::fs::symlink_metadata(&git_path).is_ok());
-            let cache = tmp.path().join("cache");
-            let logs = tmp.path().join("logs");
-            std::fs::create_dir_all(&cache).expect("cache");
-            std::fs::create_dir_all(&logs).expect("logs");
-            let sock = tmp.path().join("sock/ncap.sock");
-            let cfg = cfg_with(&root, &sock, &cache, &logs, vec![], vec![], false);
-            let args = build_runtime_args(&cfg).expect("args");
-            let expected = format!("{}:{}:ro", git_path.display(), git_path.display());
-            assert!(
-                args.contains(&expected),
-                "git_is_dir={git_is_dir} args={args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn build_args_skips_missing_git() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("proj");
-        std::fs::create_dir_all(&root).expect("root");
-        let cache = tmp.path().join("cache");
-        let logs = tmp.path().join("logs");
-        std::fs::create_dir_all(&cache).expect("cache");
-        std::fs::create_dir_all(&logs).expect("logs");
-        let sock = tmp.path().join("sock/ncap.sock");
-        let cfg = cfg_with(&root, &sock, &cache, &logs, vec![], vec![], false);
-        let args = build_runtime_args(&cfg).expect("args");
-        assert!(
-            !args.iter().any(|a| a.contains(".git")),
-            "no .git mount when absent: {args:?}"
-        );
+    #[test_case("x-$UNSET-y", "UNSET" ; "dollar_unset_names_var")]
+    #[test_case("x-${UNSET}-y", "UNSET" ; "braced_unset_names_var")]
+    #[test_case("${UNSET}", "UNSET" ; "braced_alone_names_var")]
+    fn unset_var_is_an_error_naming_it(template: &str, name: &str) {
+        let err = expand_with(template, &lookup_of(&[])).expect_err("unset must error");
+        assert!(err.contains(name), "err={err}");
     }
 }

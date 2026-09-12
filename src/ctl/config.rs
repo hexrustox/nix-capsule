@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ctl::{names, paths};
+use crate::ctl::paths;
 
 /// A `ncap-ctl` subcommand: the variant selects the control flow and the
 /// demand set.
@@ -35,22 +35,22 @@ pub enum Cmd {
 /// there is a programmer bug, not a user error.
 #[derive(Debug)]
 pub struct Config {
-    pub root: Option<PathBuf>,
-    pub project: Option<String>,
+    pub root: PathBuf,
+    pub project: String,
     pub container: String,
-    pub socket: Option<PathBuf>,
-    pub cache_dir: Option<PathBuf>,
-    pub log_dir: Option<PathBuf>,
+    pub socket: PathBuf,
+    pub cache_dir: PathBuf,
+    pub log_dir: PathBuf,
     pub runtime: String,
     pub timeout: u64,
     pub watch_files: Vec<String>,
     pub run_opts: Vec<String>,
     pub harden: bool,
-    pub image: Option<String>,
-    pub server: Option<PathBuf>,
-    pub nix: Option<PathBuf>,
-    pub bash: Option<PathBuf>,
-    pub devshell: Option<String>,
+    pub image: String,
+    pub server: PathBuf,
+    pub nix: PathBuf,
+    pub bash: PathBuf,
+    pub devshell: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +127,32 @@ fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> Result<bool, Error> 
     }
 }
 
+/// Sanitize a basename into a project name: every non-ASCII-alphanumeric
+/// character joins the surrounding run into a single `-`, leading and
+/// trailing `-` are stripped. `None` when nothing survives — the caller
+/// turns that into the hard "set `project`" error.
+fn sanitize(basename: &str) -> Option<String> {
+    let mut name = String::with_capacity(basename.len());
+    let mut run = false;
+    for ch in basename.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if run && !name.is_empty() {
+                name.push('-');
+            }
+            name.push(ch);
+            run = false;
+        } else {
+            run = true;
+        }
+    }
+    let trimmed = name.trim_matches('-').to_owned();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 fn resolve_project(
     lookup: &dyn Fn(&str) -> Option<String>,
     root: Option<&Path>,
@@ -147,7 +173,7 @@ fn resolve_project(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    match names::sanitize(basename) {
+    match sanitize(basename) {
         Some(name) => Ok(name),
         None => Err(Error::EmptyProjectName { root: root_str }),
     }
@@ -192,22 +218,22 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
     let server = demand(lookup, "NCAP_SERVER")?;
     let bash = demand(lookup, "NCAP_BASH")?;
     Ok(Config {
-        root: Some(root),
-        project: Some(project),
+        root,
+        project,
         container,
-        socket: Some(socket),
-        cache_dir: Some(cache_dir),
-        log_dir: Some(log_dir),
+        socket,
+        cache_dir,
+        log_dir,
         runtime,
         timeout,
         watch_files,
         run_opts,
         harden,
-        image: Some(image),
-        server: Some(PathBuf::from(server)),
-        nix: Some(PathBuf::from(nix)),
-        bash: Some(PathBuf::from(bash)),
-        devshell: Some(devshell),
+        image,
+        server: PathBuf::from(server),
+        nix: PathBuf::from(nix),
+        bash: PathBuf::from(bash),
+        devshell,
     })
 }
 
@@ -299,5 +325,21 @@ mod tests {
         root: Option<&Path>,
     ) -> Result<String, Error> {
         resolve_project(&single("NCAP_PROJECT", project), root)
+    }
+
+    #[test_case("hello" => matches Some(name) if name == "hello" ; "clean_basename_passes_through")]
+    #[test_case("my_project" => matches Some(name) if name == "my-project" ; "underscore_run_collapses_to_one_dash")]
+    #[test_case("a..b" => matches Some(name) if name == "a-b" ; "dot_run_collapses_to_one_dash")]
+    #[test_case("a.-.b" => matches Some(name) if name == "a-b" ; "mixed_run_collapses_to_one_dash")]
+    #[test_case("v1.2" => matches Some(name) if name == "v1-2" ; "version_dot_collapses_to_one_dash")]
+    #[test_case("-lead-" => matches Some(name) if name == "lead" ; "leading_and_trailing_dashes_are_stripped")]
+    #[test_case(".dot." => matches Some(name) if name == "dot" ; "leading_and_trailing_dots_are_stripped")]
+    #[test_case("My.App" => matches Some(name) if name == "My-App" ; "case_is_preserved")]
+    #[test_case("münchen" => matches Some(name) if name == "m-nchen" ; "non_ascii_letters_are_not_alphanumeric")]
+    #[test_case("###" => matches None ; "nothing_surviving_is_none")]
+    #[test_case("" => matches None ; "empty_basename_is_none")]
+    #[test_case("---" => matches None ; "dashes_only_is_none")]
+    fn sanitize_cases(basename: &str) -> Option<String> {
+        sanitize(basename)
     }
 }

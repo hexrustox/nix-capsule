@@ -1,7 +1,6 @@
 //! Runtime adapter: podman or docker. Both
 //! runtimes share the same argument surface; probes use Go-template `inspect`.
 
-use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -230,10 +229,4 @@ fn shell_quote(value: &str) -> String {
     }
     out.push('\'');
     out
-}
-
-#[allow(dead_code)]
-fn _unused_osstr_hint(_: &dyn AsRef<OsStr>) {}
-fn _unused_stdio_hint() {
-    let _ = Stdio::piped();
 }

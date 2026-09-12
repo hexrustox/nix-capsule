@@ -16,6 +16,7 @@ pub enum Freshness {
     Missing,
 }
 
+// TODO use hash builder
 /// xxhash64 (seed 0) over one record per entry, entries sorted by relative
 /// path: `(relative path, NUL, exists flag, NUL, contents-or-empty)`. Missing
 /// files contribute their absence flag, so a file appearing or disappearing
@@ -63,6 +64,7 @@ pub fn store(cache_dir: &Path, digest: &str) -> io::Result<()> {
     fs::write(cache_dir.join("hash"), digest)
 }
 
+// TODO centralize
 /// The cached env dump the freshness state gates.
 pub fn env_file(cache_dir: &Path) -> PathBuf {
     cache_dir.join("env")
