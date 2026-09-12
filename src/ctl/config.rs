@@ -176,24 +176,15 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
     let socket = if let Some(socket) = lookup_non_empty(lookup, "NCAP_SOCKET") {
         PathBuf::from(socket)
     } else {
-        let xdg = lookup_non_empty(lookup, "XDG_RUNTIME_DIR");
-        let tmpdir = lookup_non_empty(lookup, "TMPDIR");
-        let dir = paths::runtime_dir(&project, xdg.as_deref(), tmpdir.as_deref());
-        paths::socket_path(&dir)
+        paths::socket_path(&project)
     };
-    let cache_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
-        PathBuf::from(dir)
-    } else {
-        let xdg = lookup_non_empty(lookup, "XDG_CACHE_HOME");
-        let home = lookup_non_empty(lookup, "HOME");
-        paths::cache_dir(&project, xdg.as_deref(), home.as_deref())?
+    let cache_dir = match lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => paths::cache_dir(&project)?,
     };
-    let log_dir = if let Some(dir) = lookup_non_empty(lookup, "NCAP_LOG_DIR") {
-        PathBuf::from(dir)
-    } else {
-        let xdg = lookup_non_empty(lookup, "XDG_STATE_HOME");
-        let home = lookup_non_empty(lookup, "HOME");
-        paths::log_dir(&project, xdg.as_deref(), home.as_deref())?
+    let log_dir = match lookup_non_empty(lookup, "NCAP_LOG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => paths::log_dir(&project)?,
     };
     let devshell = demand(lookup, "NCAP_DEVSHELL")?;
     let nix = demand(lookup, "NCAP_NIX")?;

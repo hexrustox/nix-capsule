@@ -1,5 +1,7 @@
 //! XDG layout with the `$TMPDIR` fallback for the runtime dir.
 
+use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -13,66 +15,41 @@ pub struct NoHome {
     pub var: &'static str,
 }
 
-/// The per-project runtime dir that holds the socket.
-pub fn runtime_dir(project: &str, xdg_runtime_dir: Option<&str>, tmpdir: Option<&str>) -> PathBuf {
-    if let Some(dir) = xdg_runtime_dir.filter(|value| !value.is_empty()) {
-        Path::new(dir).join("nix-capsule").join(project)
-    } else {
-        let base = tmpdir.filter(|value| !value.is_empty()).unwrap_or("/tmp");
-        Path::new(base).join("nix-capsule").join(project)
-    }
-}
-
-/// The socket file inside `runtime_dir`.
-pub fn socket_path(runtime_dir: &Path) -> PathBuf {
+/// The per-project runtime dir that holds the socket: `$XDG_RUNTIME_DIR`
+/// (absolute, per the XDG spec), else `$TMPDIR` — defaulting to `/tmp` —
+/// per the flat fallback of ADR-0001. `dirs` knows nothing of `$TMPDIR`,
+/// so the fallback stays here.
+pub fn socket_path(project: &str) -> PathBuf {
+    let runtime_dir = match dirs::runtime_dir() {
+        Some(dir) => dir.join("nix-capsule").join(project),
+        None => {
+            let base = env::var_os("TMPDIR")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| OsString::from("/tmp"));
+            Path::new(&base).join("nix-capsule").join(project)
+        }
+    };
     runtime_dir.join("ncap.sock")
 }
 
-/// The per-project cache dir.
-pub fn cache_dir(
-    project: &str,
-    xdg_cache_home: Option<&str>,
-    home: Option<&str>,
-) -> Result<PathBuf, NoHome> {
-    if let Some(dir) = xdg_cache_home.filter(|value| !value.is_empty()) {
-        Ok(Path::new(dir).join("nix-capsule").join(project))
-    } else if let Some(home) = home.filter(|value| !value.is_empty()) {
-        Ok(Path::new(home)
-            .join(".cache")
-            .join("nix-capsule")
-            .join(project))
-    } else {
-        Err(NoHome {
+/// The per-project cache dir: `$XDG_CACHE_HOME`, else `$HOME/.cache`.
+pub fn cache_dir(project: &str) -> Result<PathBuf, NoHome> {
+    dirs::cache_dir()
+        .map(|dir| dir.join("nix-capsule").join(project))
+        .ok_or(NoHome {
             what: "cache dir",
             var: "XDG_CACHE_HOME",
         })
-    }
 }
 
-/// The per-project log dir.
-pub fn log_dir(
-    project: &str,
-    xdg_state_home: Option<&str>,
-    home: Option<&str>,
-) -> Result<PathBuf, NoHome> {
-    if let Some(dir) = xdg_state_home.filter(|value| !value.is_empty()) {
-        Ok(Path::new(dir)
-            .join("nix-capsule")
-            .join(project)
-            .join("logs"))
-    } else if let Some(home) = home.filter(|value| !value.is_empty()) {
-        Ok(Path::new(home)
-            .join(".local")
-            .join("state")
-            .join("nix-capsule")
-            .join(project)
-            .join("logs"))
-    } else {
-        Err(NoHome {
+/// The per-project log dir: `$XDG_STATE_HOME`, else `$HOME/.local/state`.
+pub fn log_dir(project: &str) -> Result<PathBuf, NoHome> {
+    dirs::state_dir()
+        .map(|dir| dir.join("nix-capsule").join(project).join("logs"))
+        .ok_or(NoHome {
             what: "log dir",
             var: "XDG_STATE_HOME",
         })
-    }
 }
 
 /// Ensure `dir` exists, creating it with mode 0700 when it is newly created.

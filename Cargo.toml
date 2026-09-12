@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 futures-util = { version = "0.3", features = ["sink"] }
 libc = "0.2.189"
 twox-hash = "2.1.2"
+dirs = "7.0.0"
 
 [dev-dependencies]
 proptest = "1.11.0"
