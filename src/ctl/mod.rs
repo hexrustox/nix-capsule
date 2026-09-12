@@ -158,9 +158,6 @@ async fn status(cfg: Config) -> Result<(), String> {
 async fn enter(cfg: Config) -> Result<(), String> {
     let cache_dir = &cfg.cache_dir;
     let bash = &cfg.bash;
-    if !cache_dir.join("env").is_file() {
-        return Err("no cached dev environment found; run `ncap-ctl init` first".to_owned());
-    }
     let rt = runtime::Runtime::new(cfg.runtime.clone());
     if !rt.is_running(&cfg.container).await {
         return Err(format!(
@@ -287,10 +284,10 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
 
     let exec_cmd = format!(
         "source {} && exec {} --socket {} --log-dir {} --timeout {}",
-        cache_dir.join("env").display(),
-        server.display(),
-        socket.display(),
-        log_dir.display(),
+        &cache_dir.join("env").to_string_lossy(),
+        &server.to_string_lossy(),
+        &socket.to_string_lossy(),
+        &log_dir.to_string_lossy(),
         cfg.timeout
     );
 
@@ -449,8 +446,12 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
     args.push(format!("{}:{}", log_dir.display(), log_dir.display()));
 
     let git_path = root.join(".git");
-    // Worktree gitfiles are files, not dirs — mount whenever the path exists.
-    if std::fs::symlink_metadata(&git_path).is_ok() {
+    // Only a real directory mounts: worktree gitfiles (plain files) and
+    // symlinks (even to dirs) do not. `symlink_metadata` so a symlink is
+    // judged itself, never followed.
+    if std::fs::symlink_metadata(&git_path)
+        .is_ok_and(|meta| meta.file_type().is_dir() && !meta.file_type().is_symlink())
+    {
         args.push("-v".to_owned());
         args.push(format!("{}:{}:ro", git_path.display(), git_path.display()));
     }

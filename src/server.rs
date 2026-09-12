@@ -251,8 +251,20 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
     };
     let pgid = child.id().expect("freshly spawned child has a pid");
 
-    if bridge(&mut framed, &mut child, pgid, stopping, &log).await {
-        let status = match child.wait().await {
+    if bridge(&mut framed, &mut child, pgid, stopping.clone(), &log).await {
+        // Shutdown may land in the post-drain wait window (pipes drained,
+        // child not yet reaped). Select on `stopping` so every live
+        // Connection still gets `ServerStopping` before its terminal `Exit`
+        // (spec/server.md § Shutdown).
+        let status = tokio::select! {
+            status = child.wait() => status,
+            _ = stopping_signalled(stopping.clone()) => {
+                // Best-effort: the client may already be gone.
+                send(&mut framed, Message::ServerStopping).await;
+                child.wait().await
+            }
+        };
+        let status = match status {
             Ok(status) => status,
             Err(err) => {
                 send_error(

@@ -53,8 +53,15 @@ pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
     if !cache_dir.join("env").is_file() {
         return Freshness::Missing;
     }
-    match fs::read_to_string(cache_dir.join("hash")) {
-        Ok(cached) if cached.trim() == of(root, entries).unwrap_or_default() => Freshness::Fresh,
+    let cached = match fs::read_to_string(cache_dir.join("hash")) {
+        Ok(cached) => cached,
+        Err(_) => return Freshness::Stale,
+    };
+    match of(root, entries) {
+        Ok(digest) if cached.trim() == digest => Freshness::Fresh,
+        // Computed-error (e.g. permission-denied watched file) is Stale,
+        // never Fresh: an empty `unwrap_or_default()` digest must not match
+        // an empty cached hash.
         _ => Freshness::Stale,
     }
 }
@@ -213,6 +220,24 @@ mod tests {
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Fresh,
             "a trailing newline must read as fresh, matching `status`"
+        );
+    }
+
+    #[test]
+    fn a_computed_error_reads_stale_never_fresh() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().expect("tempdir");
+        // A directory at a watched path makes `of()` fail with a
+        // non-NotFound error even as root (permission bits are ignored
+        // for root, so chmod-based fixtures would be flaky here).
+        fs::create_dir_all(root.path().join("w.txt")).expect("watched dir");
+        assert!(of(root.path(), &entries(&["w.txt"])).is_err());
+        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
+        fs::write(cache.path().join("hash"), b"").expect("empty hash");
+        assert_eq!(
+            check(cache.path(), root.path(), &entries(&["w.txt"])),
+            Freshness::Stale,
+            "computed-error plus empty cached hash must not read as fresh"
         );
     }
 }

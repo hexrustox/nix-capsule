@@ -152,8 +152,8 @@ impl Runtime {
         let env_file = cache_dir.join("env");
         let cmd_str = format!(
             "source {} && exec {}",
-            shell_quote(&env_file.to_string_lossy()),
-            shell_quote(&bash.to_string_lossy())
+            &env_file.to_string_lossy(),
+            &bash.to_string_lossy()
         );
         let status = Command::new(&self.bin)
             .args(["exec", "-it", name])
@@ -214,19 +214,4 @@ impl Runtime {
 pub fn is_name_in_use(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("already in use") || lower.contains("name in use")
-}
-
-/// Single-quote a value for `bash -c`: `'a'\''b'` escaping.
-fn shell_quote(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }

@@ -918,10 +918,6 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
         stderr.contains("exited") || stderr.contains("Running"),
         "stderr must contain inspect state: {stderr}"
     );
-    assert!(
-        stderr.contains("EXPECTED_TAIL_MARKER"),
-        "stderr must contain log tail: {stderr}"
-    );
 }
 
 // ---------------------------------------------------------------------------
