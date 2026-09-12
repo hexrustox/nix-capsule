@@ -33,6 +33,7 @@ const NCAP_VARS: &[&str] = &[
     "NCAP_NIX",
     "NCAP_BASH",
     "NCAP_TIMEOUT",
+    "NCAP_HARDEN",
     "NCAP_DEVSHELL",
     "NCAP_ENV_FORWARD",
     "NCAP_CACHE",
@@ -270,6 +271,8 @@ fn base_env(
     );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
+    env.insert("NCAP_RUN_OPTS".into(), "[]".into());
+    env.insert("NCAP_HARDEN".into(), "false".into());
     // Keep HOME for XDG fallbacks where needed; tests override when testing fallback.
     if let Ok(home) = std::env::var("HOME") {
         env.insert("HOME".into(), home);
@@ -307,6 +310,11 @@ fn init_refuses_when_a_demanded_var_is_missing() {
         "NCAP_NIX",
         "NCAP_BASH",
         "NCAP_DEVSHELL",
+        "NCAP_RUNTIME",
+        "NCAP_TIMEOUT",
+        "NCAP_WATCH_FILES",
+        "NCAP_RUN_OPTS",
+        "NCAP_HARDEN",
     ];
     for var in demanded {
         let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
@@ -387,6 +395,9 @@ fn stop_refuses_without_container_or_derivation() {
         runtime_bin.to_string_lossy().into_owned(),
     );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
+    env.insert("NCAP_WATCH_FILES".into(), "[]".into());
+    env.insert("NCAP_RUN_OPTS".into(), "[]".into());
+    env.insert("NCAP_HARDEN".into(), "false".into());
     let out = run_ctl(&env, &["stop"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -400,6 +411,9 @@ fn stop_refuses_without_container_or_derivation() {
         runtime_bin.to_string_lossy().into_owned(),
     );
     env2.insert("NCAP_TIMEOUT".into(), "2".into());
+    env2.insert("NCAP_WATCH_FILES".into(), "[]".into());
+    env2.insert("NCAP_RUN_OPTS".into(), "[]".into());
+    env2.insert("NCAP_HARDEN".into(), "false".into());
     let out2 = run_ctl(&env2, &["stop"]);
     assert!(
         !out2.status.success(),
@@ -1439,6 +1453,8 @@ esac
     );
     env.insert("NCAP_TIMEOUT".into(), "2".into());
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
+    env.insert("NCAP_RUN_OPTS".into(), "[]".into());
+    env.insert("NCAP_HARDEN".into(), "false".into());
     env.insert(
         "HOME".into(),
         tmp.path().join("home").to_string_lossy().into_owned(),

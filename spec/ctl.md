@@ -135,18 +135,20 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 | `NCAP_TIMEOUT` | `-` | Seconds (`0` allowed: no drain grace / immediate readiness deadline); bounds start readiness and the Server's drain grace. Set by `timeout`. |
 | `NCAP_HARDEN` | `-` | `true`/`false` enables harden (§ Harden). Set by `harden`. |
 
-Empty-string values count as unset. A JSON-array var consumed by `ctl`
-(`NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`) that is set but is not a
-JSON array of strings is an error naming the var. `NCAP_ENV_FORWARD`
-is validated by the Client only.
-
-Resolution is uniform: every command demands the full `ctl` set
-(`NCAP_PROJECT_ROOT`, the project derivation, `NCAP_CONTAINER`,
+Empty-string values count as unset. Every command demands the full `ctl`
+set: `NCAP_PROJECT_ROOT`, the project derivation, `NCAP_CONTAINER`,
 `NCAP_SOCKET`, `NCAP_CACHE_DIR`, `NCAP_LOG_DIR`, `NCAP_IMAGE`,
 `NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_BASH`,
-`NCAP_TIMEOUT`, plus `NCAP_WATCH_FILES`/`NCAP_RUN_OPTS`/`NCAP_HARDEN`
-validation). In practice `lib.nix` sets all of these, so a missing var
-is a broken environment rather than a per-command usage error.
+`NCAP_TIMEOUT`, `NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`, and
+`NCAP_HARDEN`. A missing var is an error naming the var, and a set
+`NCAP_WATCH_FILES`/`NCAP_RUN_OPTS` that is not a JSON array of strings
+is an error naming the var; a `NCAP_HARDEN` that is not `true`/`false`
+is likewise an error. `NCAP_ENV_FORWARD` is validated by the Client
+only.
+
+These are env-contract demands, not per-command usage errors: in
+practice `lib.nix` sets all of them, so a missing var is a broken
+environment rather than a usage error.
 
 Precedence: explicit env wins, else the ctl-derived value per `Derive`,
 else an error naming the var. Ctl never overrides a set value. A missing
