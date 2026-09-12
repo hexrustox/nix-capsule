@@ -26,14 +26,7 @@ let
 
   checkBool = opt: v: if builtins.isBool v then v else throwOpt opt "bool" v;
 
-  checkTimeout = opt: v: if builtins.isInt v && v > 0 then v else throwOpt opt "positive integer" v;
-
-  checkRuntime =
-    opt: v:
-    if builtins.isString v && (v == "podman" || v == "docker") then
-      v
-    else
-      throwOpt opt "one of `podman`, `docker`" v;
+  checkInt = opt: v: if builtins.isInt v then v else throwOpt opt "integer" v;
 
   # ---- list-of-strings check (returns the list on success) -------------------
   checkStringList =
@@ -137,7 +130,7 @@ in
       checkedWrappers = checkWrappers "wrappers" wrappers;
       checkedExtraOptions = checkStringList "extraOptions" extraOptions;
       checkedHarden = checkBool "harden" harden;
-      checkedTimeout = checkTimeout "timeout" timeout;
+      checkedTimeout = checkInt "timeout" timeout;
       checkedSocketPath = checkNullOrString "socketPath" socketPath;
       checkedContainerName = checkNullOrString "containerName" containerName;
       checkedCacheDir = checkNullOrString "cacheDir" cacheDir;
@@ -145,7 +138,7 @@ in
       checkedPreShellHook = checkString "preShellHook" preShellHook;
       checkedPostShellHook = checkString "postShellHook" postShellHook;
       checkedAutoStart = checkBool "autoStart" autoStart;
-      checkedRuntime = checkRuntime "runtime" runtime;
+      checkedRuntime = checkString "runtime" runtime;
 
       # Force all checks before building the shell. deepSeq catches lazy
       # list entries (plain seq only forces the list spine).

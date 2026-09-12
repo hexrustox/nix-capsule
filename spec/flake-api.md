@@ -99,13 +99,14 @@ Every option is checked when `mkShell` is evaluated, before
 the option, the expected shape, and the received type/value. `null`
 is accepted only where the table default is `null`. No coercions: a
 value of the wrong type is an error, never silently converted.
+`lib.nix` performs type checks only; value transformation and
+validation (runtime names, timeout range, devshell shape) is `ctl`'s job.
 
 Checked shapes: `project` null or string; `image`, `devShell`,
-`containerName`, `runtime` strings (`runtime` is one of `podman`,
-`docker`); `watchFiles`, `envForward`, `extraOptions` lists of
+`containerName`, `runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
 strings; `wrappers` a list of strings or attrsets (§ Wrappers);
-`harden`, `autoStart` bools; `timeout` a positive integer number of
-seconds; `socketPath`, `cacheDir`, `logDir` null or strings;
+`harden`, `autoStart` bools; `timeout` integer number;
+`socketPath`, `cacheDir`, `logDir` null or strings;
 `preShellHook`, `postShellHook` strings. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
 null or string.

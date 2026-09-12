@@ -21,7 +21,7 @@ use config::{Cmd, Config};
 /// dispatch. Returns the exit code the process should report.
 pub async fn run(cmd: Cmd) -> i32 {
     let lookup = |var: &str| std::env::var(var).ok();
-    let cfg = match config::resolve(cmd, &lookup) {
+    let cfg = match config::resolve(&lookup) {
         Ok(cfg) => cfg,
         Err(err) => {
             eprintln!("ncap-ctl: {err}");
@@ -123,21 +123,11 @@ async fn stop(cfg: Config) -> Result<(), String> {
 }
 
 async fn restart(cfg: Config) -> Result<(), String> {
-    // Non-fatal stop, then init.
+    // Non-fatal stop, then init. Resolution is uniform, so the Restart cfg
+    // already carries Init's fields — dispatch directly.
     let rt = runtime::Runtime::new(cfg.runtime.clone());
     let _ = rt.stop(&cfg.container).await;
-    // Re-resolve as Init so the demand set is Init's (includes nix/devshell).
-    // Reuse the same env; just dispatch to init with the same cfg fields
-    // re-resolved. For simplicity, call init with a re-resolved Init config
-    // when the current cfg came from Restart. The Restart cfg already has
-    // Init's fields (root, project, etc.), so we can just call init directly
-    // on the same cfg after adjusting the cmd tag.
-    let mut init_cfg = cfg;
-    init_cfg.cmd = Cmd::Init;
-    // Ensure the Restart cfg has all Init fields; if resolve gave us Restart
-    // with Init's fields, they're present. Re-check if devshell/nix were
-    // missing (Restart demands them, so they are present).
-    init(init_cfg).await
+    init(cfg).await
 }
 
 async fn status(cfg: Config) -> Result<(), String> {
@@ -615,7 +605,7 @@ fn expand_one(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctl::config::{Cmd, Config};
+    use crate::ctl::config::Config;
     use std::path::PathBuf;
 
     fn cfg_with(
@@ -628,7 +618,6 @@ mod tests {
         harden: bool,
     ) -> Config {
         Config {
-            cmd: Cmd::Start,
             root: Some(root.to_path_buf()),
             project: Some("proj".into()),
             container: "ncap-test".into(),

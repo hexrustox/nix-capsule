@@ -104,8 +104,8 @@ hardening stays opt-in.
 
 ## Runtime adapter
 
-`NCAP_RUNTIME` names the OCI runtime: `podman`, `docker`, or an
-absolute path (option default `podman`; missing ⇒ error naming it).
+`NCAP_RUNTIME` names the OCI runtime: `podman` or `docker`
+(any other value ⇒ error naming `NCAP_RUNTIME`).
 Both runtimes speak the same argument surface; state probes
 use Go-template `inspect` (`State.Running`, the JSON `State` for failure
 reports). Rootless operation is the assumption.
@@ -125,18 +125,28 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 | `NCAP_CONTAINER` | `ncap-<project>` (§ Project name) | Container name. Set by `containerName`. |
 | `NCAP_IMAGE` | `-` | OCI image; provides only the kernel/userland sandbox. Set by `image`. |
 | `NCAP_RUNTIME` | `-` | OCI runtime (§ Runtime adapter). Set by `runtime`. |
-| `NCAP_DEVSHELL` | `-` | Flake URI of the Container shell. Set by `devShell`. |
+| `NCAP_DEVSHELL` | `-` | Complete flake URI of the Container shell; no bare-name `.#` prefixing is performed. Set by `devShell`. |
 | `NCAP_RUN_OPTS` | `-` | JSON array of extra runtime args, appended after the default mounts (§ Mounts). Set by `extraOptions`. |
 | `NCAP_WATCH_FILES` | `-` | JSON array of project-root-relative watched files hashed for freshness (§ Freshness and the digest); also emitted as direnv `watch_file` calls (spec/flake-api.md § Freshness triggers). Set by `watchFiles`. |
-| `NCAP_ENV_FORWARD` | `-` | JSON array of forwarded variable names (additionally consumed by the Client). Set by `envForward`. |
+| `NCAP_ENV_FORWARD` | `-` | JSON array of forwarded variable names (validated by the Client only, not by `ctl`; additionally consumed by the Client). Set by `envForward`. |
 | `NCAP_SERVER` | `-` | Store path of `ncap-server`. No option: pkgs-provided. |
 | `NCAP_NIX` | `-` | Store path of `nix`. No option: pkgs-provided. |
 | `NCAP_BASH` | `-` | Store path of devshell bash. No option: pkgs-provided. |
-| `NCAP_TIMEOUT` | `-` | Seconds; bounds start readiness and the Server's drain grace. Set by `timeout`. |
+| `NCAP_TIMEOUT` | `-` | Seconds (`0` allowed: no drain grace / immediate readiness deadline); bounds start readiness and the Server's drain grace. Set by `timeout`. |
 | `NCAP_HARDEN` | `-` | `true`/`false` enables harden (§ Harden). Set by `harden`. |
 
-Empty-string values count as unset. A JSON-array var that is set but is not a
-JSON array of strings is an error naming the var.
+Empty-string values count as unset. A JSON-array var consumed by `ctl`
+(`NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`) that is set but is not a
+JSON array of strings is an error naming the var. `NCAP_ENV_FORWARD`
+is validated by the Client only.
+
+Resolution is uniform: every command demands the full `ctl` set
+(`NCAP_PROJECT_ROOT`, the project derivation, `NCAP_CONTAINER`,
+`NCAP_SOCKET`, `NCAP_CACHE_DIR`, `NCAP_LOG_DIR`, `NCAP_IMAGE`,
+`NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_BASH`,
+`NCAP_TIMEOUT`, plus `NCAP_WATCH_FILES`/`NCAP_RUN_OPTS`/`NCAP_HARDEN`
+validation). In practice `lib.nix` sets all of these, so a missing var
+is a broken environment rather than a per-command usage error.
 
 Precedence: explicit env wins, else the ctl-derived value per `Derive`,
 else an error naming the var. Ctl never overrides a set value. A missing

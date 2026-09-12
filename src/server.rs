@@ -66,12 +66,14 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io:
         .drain(..)
         .collect();
     log.line(&format!("draining connections within {}s", drain.as_secs()));
-    let _ = tokio::time::timeout(drain, async {
-        for handle in handles {
-            let _ = handle.await;
-        }
-    })
-    .await;
+    if drain > Duration::from_secs(0) {
+        let _ = tokio::time::timeout(drain, async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
+    }
     let _ = std::fs::remove_file(&socket);
     log.line("socket removed; server stopped");
     Ok(())

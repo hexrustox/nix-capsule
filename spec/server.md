@@ -84,7 +84,9 @@ One Connection = one Child; connections are handled concurrently.
   `ServerStopping` is terminal for the Client but non-terminal here: each
   bridge keeps running, so a Child that finishes inside the drain grace
   still delivers its terminal frame (spec/protocol.md § Guarantees).
-- Drain all connections within `--timeout` seconds. Connections that miss the
+- Drain all connections within `--timeout` seconds. `--timeout 0` skips
+  awaiting entirely: the socket file is removed immediately and
+  connections are dropped with container teardown. Connections that miss the
   deadline are dropped when the container tears down, as the Server — the
   container's init process — exits.
 - Remove the socket file and exit. The socket's parent directory stays.

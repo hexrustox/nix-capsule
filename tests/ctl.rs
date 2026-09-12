@@ -46,7 +46,15 @@ fn run_ctl(env: &HashMap<String, String>, args: &[&str]) -> Output {
     }
     // Preserve a few ambient vars the child may need (PATH, HOME, etc.)
     // but remove NCAP_* above. Then set the test's env.
-    for (key, value) in env {
+    //
+    // Uniform resolve + strict `NCAP_RUNTIME` (`podman`/`docker` only) mean
+    // absolute-path fake runtimes can no longer be passed through. Tests
+    // still create stub executables at arbitrary tmp paths: translate an
+    // absolute `NCAP_RUNTIME` into a `podman` shim on PATH so the child
+    // validates while invoking the same stub.
+    let mut owned_env = env.clone();
+    shim_runtime_env(&mut owned_env);
+    for (key, value) in &owned_env {
         cmd.env(key, value);
     }
     // Ensure TMPDIR/XDG vars from test env win; if not set, remove ambient
@@ -62,6 +70,43 @@ fn run_ctl(env: &HashMap<String, String>, args: &[&str]) -> Output {
         }
     }
     cmd.output().expect("spawn ncap-ctl")
+}
+
+fn shim_runtime_env(env: &mut HashMap<String, String>) {
+    let Some(rt) = env.get("NCAP_RUNTIME").cloned() else {
+        return;
+    };
+    if !rt.starts_with('/') {
+        return;
+    }
+    let rt_path = PathBuf::from(&rt);
+    if !rt_path.is_file() {
+        return;
+    }
+    let Some(parent) = rt_path.parent() else {
+        return;
+    };
+    let shim = parent.join("podman");
+    if !shim.exists() {
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(&rt_path, &shim);
+        if !shim.exists() {
+            let _ = fs::copy(&rt_path, &shim);
+        }
+    }
+    let parent_str = parent.to_string_lossy().into_owned();
+    let base_path = env
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    let joined = if base_path.is_empty() {
+        parent_str
+    } else {
+        format!("{parent_str}:{base_path}")
+    };
+    env.insert("PATH".into(), joined);
+    env.insert("NCAP_RUNTIME".into(), "podman".into());
 }
 
 fn make_executable(path: &Path) {
@@ -279,7 +324,7 @@ fn init_refuses_when_a_demanded_var_is_missing() {
 }
 
 #[test]
-fn start_does_not_demand_nix_or_devshell_but_demands_image() {
+fn start_demands_full_env_including_nix_devshell_and_image() {
     let tmp = TempDir::new().expect("tempdir");
     let cache = tmp.path().join("cache");
     let logs = tmp.path().join("logs");
@@ -301,21 +346,19 @@ fn start_does_not_demand_nix_or_devshell_but_demands_image() {
     fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
     fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
 
-    // Start without NCAP_NIX should succeed (or at least not refuse NCAP_NIX).
+    // Uniform resolve: start without NCAP_NIX/NCAP_DEVSHELL must refuse.
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     env.remove("NCAP_NIX");
     env.remove("NCAP_DEVSHELL");
     let out = run_ctl(&env, &["start"]);
-    // Start should not complain about NCAP_NIX/NCAP_DEVSHELL; it may succeed
-    // or fail for other reasons, but stderr must not name those vars.
+    assert!(
+        !out.status.success(),
+        "start without nix/devshell must fail"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !stderr.contains("NCAP_NIX"),
-        "start must not demand NCAP_NIX: stderr={stderr}"
-    );
-    assert!(
-        !stderr.contains("NCAP_DEVSHELL"),
-        "start must not demand NCAP_DEVSHELL: stderr={stderr}"
+        stderr.contains("NCAP_NIX") || stderr.contains("NCAP_DEVSHELL"),
+        "start must demand NCAP_NIX/NCAP_DEVSHELL: stderr={stderr}"
     );
 
     // Start without NCAP_IMAGE must refuse naming it.
@@ -349,7 +392,7 @@ fn stop_refuses_without_container_or_derivation() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("NCAP_PROJECT_ROOT"), "stderr={stderr}");
 
-    // With only NCAP_CONTAINER, stop succeeds (idempotent).
+    // With only NCAP_CONTAINER, uniform resolve still demands the full env.
     let mut env2 = HashMap::new();
     env2.insert("NCAP_CONTAINER".into(), "ncap-foo".into());
     env2.insert(
@@ -359,10 +402,12 @@ fn stop_refuses_without_container_or_derivation() {
     env2.insert("NCAP_TIMEOUT".into(), "2".into());
     let out2 = run_ctl(&env2, &["stop"]);
     assert!(
-        out2.status.success(),
-        "stderr={}",
+        !out2.status.success(),
+        "minimal stop must fail under uniform resolve: stderr={}",
         String::from_utf8_lossy(&out2.stderr)
     );
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(stderr2.contains("NCAP_PROJECT_ROOT"), "stderr={stderr2}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,21 +1127,24 @@ esac
 #[test]
 fn stop_is_idempotent() {
     let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
     let state = tmp.path().join("state");
     fs::create_dir_all(&state).expect("state");
     let runtime_log = tmp.path().join("runtime.log");
     let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    let nix_log = tmp.path().join("nix.log");
     // First: running true → stop succeeds
     fs::write(state.join("running"), "true").expect("running");
     fake_runtime(&runtime_bin, &state, &runtime_log);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
 
-    let mut env = HashMap::new();
-    env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
-    env.insert(
-        "NCAP_RUNTIME".into(),
-        runtime_bin.to_string_lossy().into_owned(),
-    );
-    env.insert("NCAP_TIMEOUT".into(), "2".into());
+    // Uniform resolve: stop needs the full env, not just container+runtime.
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
 
     let out = run_ctl(&env, &["stop"]);
     assert!(
@@ -1221,7 +1269,7 @@ fn status_reports_all_three_dimensions() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn runtime_selection_explicit_path_is_used() {
+fn runtime_selection_absolute_path_is_rejected() {
     let tmp = TempDir::new().expect("tempdir");
     let runtime_bin = tmp.path().join("my-runtime");
     let state = tmp.path().join("state");
@@ -1230,20 +1278,45 @@ fn runtime_selection_explicit_path_is_used() {
     let log = tmp.path().join("runtime.log");
     fake_runtime(&runtime_bin, &state, &log);
 
-    let mut env = HashMap::new();
-    env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
-    env.insert(
-        "NCAP_RUNTIME".into(),
-        runtime_bin.to_string_lossy().into_owned(),
+    // Absolute runtime paths are rejected by ctl validation; only
+    // `podman`/`docker` (resolved via PATH) are accepted.
+    let mut cmd = Command::new(bin_path("ncap-ctl"));
+    cmd.arg("stop");
+    for var in NCAP_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.env("NCAP_CONTAINER", "ncap-test");
+    cmd.env(
+        "NCAP_PROJECT_ROOT",
+        tmp.path().join("proj").to_string_lossy().into_owned(),
     );
-    env.insert("NCAP_TIMEOUT".into(), "2".into());
-    let out = run_ctl(&env, &["stop"]);
-    assert!(out.status.success());
-    let logged = fs::read_to_string(&log).expect("log");
-    assert!(
-        !logged.is_empty(),
-        "explicit runtime must have been invoked"
+    cmd.env(
+        "NCAP_SOCKET",
+        tmp.path()
+            .join("sock/ncap.sock")
+            .to_string_lossy()
+            .into_owned(),
     );
+    cmd.env(
+        "NCAP_CACHE_DIR",
+        tmp.path().join("cache").to_string_lossy().into_owned(),
+    );
+    cmd.env(
+        "NCAP_LOG_DIR",
+        tmp.path().join("logs").to_string_lossy().into_owned(),
+    );
+    cmd.env("NCAP_IMAGE", "alpine:latest");
+    cmd.env("NCAP_SERVER", "/nix/store/fake/bin/ncap-server");
+    cmd.env("NCAP_NIX", "/nix/store/fake/bin/nix");
+    cmd.env("NCAP_BASH", "/nix/store/fake/bin/bash");
+    cmd.env("NCAP_DEVSHELL", ".#container");
+    cmd.env("NCAP_RUNTIME", runtime_bin.to_string_lossy().into_owned());
+    cmd.env("NCAP_TIMEOUT", "2");
+    cmd.env("NCAP_WATCH_FILES", "[]");
+    let out = cmd.output().expect("spawn");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
 }
 
 #[test]
@@ -1702,6 +1775,7 @@ esac
         "NCAP_RUN_OPTS".into(),
         r#"["-v $UNSET_NCAP_XYZ:/mnt"]"#.into(),
     );
+    shim_runtime_env(&mut env);
     // Ensure the variable is not set in the child's env
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.arg("start");
@@ -1780,6 +1854,7 @@ esac
     // $TEST_EXPAND should expand to "/tmp/foo bar" containing a space; no word splitting means it stays one arg
     env.insert("TEST_EXPAND".into(), "/tmp/foo bar".into());
     env.insert("NCAP_RUN_OPTS".into(), r#"["-v $TEST_EXPAND:/mnt"]"#.into());
+    shim_runtime_env(&mut env);
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.arg("start");
     for var in NCAP_VARS {
@@ -2035,6 +2110,7 @@ esac
         r#"["--braced=${NCAP_TEST_BRACED}", "literal-no-expand", "-v $NCAP_TEST_BRACED:/mnt"]"#
             .into(),
     );
+    shim_runtime_env(&mut env);
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.arg("start");
     for var in NCAP_VARS {

@@ -1,4 +1,4 @@
-//! Runtime adapter: podman (default), docker, or an absolute path. Both
+//! Runtime adapter: podman or docker. Both
 //! runtimes share the same argument surface; probes use Go-template `inspect`.
 
 use std::ffi::OsStr;
