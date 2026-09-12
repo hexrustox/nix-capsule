@@ -16,7 +16,7 @@ contract).
 | `enter` | `<runtime> exec -it <name> <bash> -c "source <cache>/env && exec <bash>"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Container running? Socket connectable (§ Liveness)? Cache fresh/stale/missing (§ Freshness and the digest)? |
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
-| `clean` | Stop the Container, remove the (stopped) container, and delete this project's Cache, log, and socket dirs — stamp included. |
+| `clean` | Stop the Container, remove the (stopped) container, clear this project's Cache and log contents (best-effort dir removal, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
 
 ## Liveness
@@ -138,7 +138,7 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 Empty-string values count as unset. Every command demands the full `ctl`
 set: `NCAP_PROJECT_ROOT`, the project derivation, `NCAP_CONTAINER`,
 `NCAP_SOCKET`, `NCAP_CACHE_DIR`, `NCAP_LOG_DIR`, `NCAP_IMAGE`,
-`NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_BASH`,
+`NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_SERVER`, `NCAP_BASH`,
 `NCAP_TIMEOUT`, `NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`, and
 `NCAP_HARDEN`. A missing var is an error naming the var, and a set
 `NCAP_WATCH_FILES`/`NCAP_RUN_OPTS` that is not a JSON array of strings
@@ -191,8 +191,10 @@ The first thing `init`/`start`/`restart` do with the Cache: read
 error — "project name `<name>` is already keyed to root `<path>`; set
 `project`" — two checkouts of one repo must never share a
 socket/container/cache. Absent ⇒ write it (creating the Cache dir if
-needed). The same root passes silently. `clean` deletes the whole
-project-keyed Cache, log, and socket dirs, stamp included.
+needed). The same root passes silently. `clean` clears the project-keyed
+Cache and log contents (best-effort dir removal) and deletes the socket
+file + best-effort parent dir, stamp included — never recursive on an
+explicit path that may be shared.
 
 ## Freshness and the digest
 

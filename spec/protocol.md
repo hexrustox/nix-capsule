@@ -64,7 +64,9 @@ JSON conventions:
   the Client's stderr and in the Server's log — never a rejection. Comparison
   is exact string equality. The Client compares the `Version` frame against
   its own and warns when no `Version` frame arrived before the terminal
-  frame; the Server compares `Request.version` against its own and warns in
+  `Exit`/`Error` frame; the `ServerStopping` bail and a clean close without
+  a terminal frame emit no missing-version warning. The Server compares
+  `Request.version` against its own and warns in
   its log.
 - **Ordering:** per-stream FIFO is guaranteed; interleaving between `Stdout`
   and `Stderr` is not (independent forwarding).
@@ -74,7 +76,9 @@ JSON conventions:
   Connection stays open so a later `Signal` frame still flows.
 - **Disconnect before the terminal frame:** a failed send is the Server's
   only disconnect notice — on it the Child's process group is TERMed and
-  reaped (spec/server.md § Disconnect before the terminal frame). A read-side
+  reaped (spec/server.md § Disconnect before the terminal frame). An
+  undecodable or codec-error frame mid-bridge sends terminal `Error` first,
+  then TERMs and reaps the same way. A read-side
   close means stdin EOF, never a disconnect; a silent Child of a vanished
   Client runs to completion (accepted limitation).
 - **ServerStopping:** terminal for the Client, non-terminal for the Server.

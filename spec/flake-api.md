@@ -102,11 +102,11 @@ value of the wrong type is an error, never silently converted.
 `lib.nix` performs type checks only; value transformation and
 validation (runtime names, timeout range, devshell shape) is `ctl`'s job.
 
-Checked shapes: `project` null or string; `image`, `devShell`,
-`containerName`, `runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
+Checked shapes: `image`, `devShell`,
+`runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
 strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `harden`, `autoStart` bools; `timeout` integer number;
-`socketPath`, `cacheDir`, `logDir` null or strings;
+`project`, `containerName`, `socketPath`, `cacheDir`, `logDir` null or strings;
 `preShellHook`, `postShellHook` strings. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
 null or string.

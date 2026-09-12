@@ -56,7 +56,10 @@ it directly. The protocol is the only path.
 - **Signal relay:** on SIGINT or SIGTERM the Client sends
   `Signal { signal }` verbatim — one frame per event, repeated signals
   forwarded repeatedly — and keeps streaming until the terminal frame, then
-  exits per the Child's outcome. The Child may trap and clean up after, or
+  exits per the Child's outcome. A `Signal`-frame send failure (the Server
+  already closed the Connection) is a local transport failure: the Client
+  prints `ncap: …` and exits `1` — the next-loop clean-close `143` is
+  unreachable in that race. The Child may trap and clean up after, or
   ignore it; that grace is the Child's, not the Client's. The Client never
   interprets a signal.
 - Every other signal keeps its default disposition (accepted limitation):
@@ -70,8 +73,9 @@ it directly. The protocol is the only path.
 
 - A `Version` frame naming a different version than the Client's own is a
   warning on stderr, naming both versions.
-- Reaching the terminal frame without ever receiving a `Version` frame is a
-  warning on stderr.
+- Reaching a terminal `Exit`/`Error` frame without ever receiving a `Version`
+  frame is a warning on stderr. The `ServerStopping` bail and a clean close
+  without a terminal frame (both exit `143`) emit no missing-version warning.
 - Neither is ever a rejection.
 
 ## Exit codes
@@ -83,7 +87,7 @@ it directly. The protocol is the only path.
 | Terminal `Exit` carries code `127` (spawn `ENOENT`, or a Child's own 127) | prints `ncap: <command>: command not found` to stderr; exits `127` |
 | Terminal `Exit` carries code `126` (spawn `EACCES`, or a Child's own 126) | prints `ncap: <command>: permission denied` to stderr; exits `126` |
 | Terminal `Exit` with neither field set (status unknowable) | warning on stderr, then `1` |
-| Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`, invalid `--env`) | `1` |
+| Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`, invalid `--env`, a `Signal`-frame send failure) | `1` |
 | `ServerStopping` received — the Client bails immediately and stops streaming — or the socket closed without a terminal frame | `143` (128 + SIGTERM) |
 
 `ServerStopping` is terminal for the Client but non-terminal server-side:

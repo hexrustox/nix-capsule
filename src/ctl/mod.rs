@@ -201,8 +201,11 @@ async fn clean(cfg: Config) -> Result<(), String> {
     }
     let _ = rt.remove(&cfg.container).await;
 
-    remove_dir_all_if_exists(&cfg.cache_dir)?;
-    remove_dir_all_if_exists(&cfg.log_dir)?;
+    // Clear cache/log contents entry-by-entry, then best-effort remove the
+    // dirs themselves when empty. Never `remove_dir_all` the top dirs: an
+    // explicit `NCAP_CACHE_DIR`/`NCAP_LOG_DIR` may point into a shared dir.
+    remove_dir_contents(&cfg.cache_dir)?;
+    remove_dir_contents(&cfg.log_dir)?;
     if let Some(parent) = cfg.socket.parent() {
         // Delete the socket file itself, then best-effort remove the parent
         // dir if empty. Never `remove_dir_all` the parent: an explicit
@@ -216,7 +219,7 @@ async fn clean(cfg: Config) -> Result<(), String> {
         }
         let _ = fs::remove_dir(parent);
     }
-    eprintln!("cleaned project `{}`", cfg.container);
+    eprintln!("cleaned project `{}`", cfg.project);
     Ok(())
 }
 
@@ -344,23 +347,10 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     }
 
     let state = rt.inspect_state(&cfg.container).await;
-    let tail = newest_log_tail(&cfg.log_dir);
     Err(format!(
-        "container `{}` never became live within {}s (state: {state})\n{tail}",
+        "container `{}` never became live within {}s (state: {state})",
         cfg.container, cfg.timeout
     ))
-}
-
-fn newest_log_tail(log_dir: &Path) -> String {
-    let Some(path) = newest_log_path(log_dir) else {
-        return "no log file".to_owned();
-    };
-    let Ok(content) = fs::read_to_string(&path) else {
-        return "log file unreadable".to_owned();
-    };
-    let lines: Vec<&str> = content.lines().collect();
-    let tail_start = lines.len().saturating_sub(20);
-    lines[tail_start..].join("\n")
 }
 
 // TODO sync with server
@@ -396,12 +386,33 @@ fn pager_command() -> (String, Vec<String>) {
     ("less".to_owned(), vec!["-R".to_owned()])
 }
 
-fn remove_dir_all_if_exists(dir: &Path) -> Result<(), String> {
-    match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.to_string()),
+/// Clear the entries inside `dir`, then best-effort remove `dir` itself when
+/// empty. Never `remove_dir_all` the top dir: an explicit `NCAP_CACHE_DIR`
+/// or `NCAP_LOG_DIR` may point into a shared dir, where a recursive delete
+/// would destroy unrelated files — the same rationale as the socket parent
+/// in `clean`. Removal failure of the (now-empty) dir itself is non-fatal.
+fn remove_dir_contents(dir: &Path) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        // `symlink_metadata` so a symlink inside is removed itself, never
+        // followed; only real directories recurse (one level, on the child).
+        let file_type = fs::symlink_metadata(&path)
+            .map_err(|err| err.to_string())?
+            .file_type();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(&path).map_err(|err| err.to_string())?;
+        } else {
+            fs::remove_file(&path).map_err(|err| err.to_string())?;
+        }
     }
+    let _ = fs::remove_dir(dir);
+    Ok(())
 }
 
 fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {

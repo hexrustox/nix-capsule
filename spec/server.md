@@ -69,7 +69,9 @@ One Connection = one Child; connections are handled concurrently.
 - The Child is not orphaned — the only notice is a failed send, on which the
   Server TERMs the Child's process group and then awaits it, however long it
   takes: the grace after the TERM is the Child's, not the Server's, so there
-  is no KILL escalation. Other connections keep being served.
+  is no KILL escalation. An undecodable or codec-error frame mid-bridge
+  likewise sends terminal `Error` first, then TERMs the Child's process
+  group and awaits it (same cleanup). Other connections keep being served.
 - Accepted limitation: a silent Child — no output, stdin already EOF'd — of a
   vanished Client runs to completion; nothing observable triggers detection.
 - No Child accumulates as a zombie: every spawned Child is awaited, including
