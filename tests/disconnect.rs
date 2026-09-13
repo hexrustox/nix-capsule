@@ -9,20 +9,17 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
-use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request};
+use futures_util::SinkExt;
+use nix_capsule::protocol::{Exit, Message};
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
-use tokio::time::sleep;
-use tokio_util::codec::Framed;
 
 use common::Server;
-
-/// Upper bound on one frame-collection phase; generous enough that a red run
-/// fails on the assertion, never on the harness itself.
-const PHASE_LIMIT: Duration = Duration::from_secs(20);
+use common::probe::{
+    PHASE_LIMIT, poll_until, read_frames_until, send_request, stdout_of, terminal_of,
+    wait_for_marker,
+};
 
 /// How long the group has to die once the client vanished: the TERM goes out
 /// as soon as the child's next output trips over the dead socket. The marker
@@ -36,91 +33,6 @@ const REAP_LIMIT: Duration = Duration::from_secs(5);
 /// post-TERM heartbeats must keep arriving — a KILL escalation would silence
 /// them.
 const GRACE_LIMIT: Duration = Duration::from_secs(8);
-
-type Raw = Framed<UnixStream, FrameCodec>;
-
-async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
-    let request = Request {
-        command: "sh".into(),
-        args: vec!["-c".into(), script.into()],
-        cwd: cwd.to_string_lossy().into_owned(),
-        env: Vec::new(),
-        version: Some(CURRENT_VERSION.into()),
-    };
-    framed
-        .send(
-            Message::Request(request)
-                .into_frame()
-                .expect("encode request"),
-        )
-        .await
-        .expect("send request");
-}
-
-/// Read frames until `done` matches one (which is included) or `limit`
-/// elapses; returns everything seen. A timeout shows up as a short list, so
-/// assertions name the missing frame instead of hanging the suite.
-async fn read_frames_until(
-    framed: &mut Raw,
-    limit: Duration,
-    mut done: impl FnMut(&Message) -> bool,
-) -> Vec<Message> {
-    let mut frames = Vec::new();
-    let _ = tokio::time::timeout(limit, async {
-        while let Some(frame) = framed.next().await {
-            let message = Message::from_frame(frame.expect("frame transport")).expect("decode");
-            let finished = done(&message);
-            frames.push(message);
-            if finished {
-                break;
-            }
-        }
-    })
-    .await;
-    frames
-}
-
-/// All stdout bytes carried by `frames`.
-fn stdout_of(frames: &[Message]) -> String {
-    frames
-        .iter()
-        .filter_map(|message| match message {
-            Message::Stdout(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The terminal frame, if one arrived.
-fn terminal_of(frames: &[Message]) -> Option<&Message> {
-    frames
-        .iter()
-        .find(|message| matches!(message, Message::Exit(_) | Message::Error(_)))
-}
-
-/// Poll a synchronous predicate every 25 ms until it holds or `limit`
-/// elapses; `false` means the deadline passed with the predicate still
-/// failing.
-async fn poll_until(limit: Duration, mut predicate: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + limit;
-    loop {
-        if predicate() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        sleep(Duration::from_millis(25)).await;
-    }
-}
-
-/// Poll `marker` until it contains `needle`, via [`poll_until`].
-async fn wait_for_marker(marker: &Path, needle: &str, limit: Duration) -> bool {
-    poll_until(limit, || {
-        fs::read_to_string(marker).is_ok_and(|content| content.contains(needle))
-    })
-    .await
-}
 
 /// The script for a child that announces READY, ticks every 300 ms, and
 /// announces its own death in `marker` from the TERM trap the disconnect

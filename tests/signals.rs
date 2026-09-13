@@ -5,46 +5,20 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
-use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
+use futures_util::SinkExt;
+use nix_capsule::protocol::{Exit, Message, SignalMsg};
 use test_case::test_case;
-use tokio::net::UnixStream;
-use tokio::time::timeout;
-use tokio_util::codec::Framed;
 
 use common::Server;
-
-/// Upper bound on one frame-collection phase; generous enough that a red run
-/// fails on the assertion, never on the harness itself.
-const PHASE_LIMIT: Duration = Duration::from_secs(20);
+use common::probe::{
+    PHASE_LIMIT, Raw, read_frames_until, send_request, stdout_of, terminal_of, wait_for_flag,
+};
 
 /// Bound for group-wide delivery: the signal must clear the whole group well
 /// before a survivor's own 30-second `sleep` would end on its own.
 const GROUP_LIMIT: Duration = Duration::from_secs(10);
-
-type Raw = Framed<UnixStream, FrameCodec>;
-
-async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
-    let request = Request {
-        command: "sh".into(),
-        args: vec!["-c".into(), script.into()],
-        cwd: cwd.to_string_lossy().into_owned(),
-        env: Vec::new(),
-        version: Some(CURRENT_VERSION.into()),
-    };
-    framed
-        .send(
-            Message::Request(request)
-                .into_frame()
-                .expect("encode request"),
-        )
-        .await
-        .expect("send request");
-}
 
 /// Send one `Signal` frame with `number`.
 async fn send_signal(framed: &mut Raw, number: u8) {
@@ -56,47 +30,6 @@ async fn send_signal(framed: &mut Raw, number: u8) {
         )
         .await
         .expect("send signal");
-}
-
-/// Read frames until `done` matches one (which is included) or `limit`
-/// elapses; returns everything seen. A timeout shows up as a short list, so
-/// assertions name the missing frame instead of hanging the suite.
-async fn read_frames_until(
-    framed: &mut Raw,
-    limit: Duration,
-    mut done: impl FnMut(&Message) -> bool,
-) -> Vec<Message> {
-    let mut frames = Vec::new();
-    let _ = timeout(limit, async {
-        while let Some(frame) = framed.next().await {
-            let message = Message::from_frame(frame.expect("frame transport")).expect("decode");
-            let finished = done(&message);
-            frames.push(message);
-            if finished {
-                break;
-            }
-        }
-    })
-    .await;
-    frames
-}
-
-/// All stdout bytes carried by `frames`.
-fn stdout_of(frames: &[Message]) -> String {
-    frames
-        .iter()
-        .filter_map(|message| match message {
-            Message::Stdout(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The terminal frame, if one arrived.
-fn terminal_of(frames: &[Message]) -> Option<&Message> {
-    frames
-        .iter()
-        .find(|message| matches!(message, Message::Exit(_) | Message::Error(_)))
 }
 
 /// A failed kill or a vanished child must never surface as an `Error` frame.
@@ -307,17 +240,6 @@ async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame
 
 // ---------------------------------------------------- client relay (ticket 04c)
 
-/// Poll until `name` exists in the server's tempdir — the child's cwd — or
-/// panic; children write flag files as observable progress markers.
-fn wait_for_flag(server: &Server, name: &str) {
-    let flag = server.path().join(name);
-    let deadline = Instant::now() + PHASE_LIMIT;
-    while !flag.exists() {
-        assert!(Instant::now() < deadline, "{name} never appeared");
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn sigint_to_the_client_runs_a_trapping_childs_cleanup_and_exits_with_its_code() {
     let server = Server::builder().start().await;
@@ -326,7 +248,7 @@ async fn sigint_to_the_client_runs_a_trapping_childs_cleanup_and_exits_with_its_
         "-c",
         "trap 'echo CLEANUP; exit 0' INT; touch ready.flag; sleep 30",
     ]);
-    wait_for_flag(&server, "ready.flag");
+    wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGINT);
     let out = client.wait();
     server.stop();
@@ -343,7 +265,7 @@ async fn sigint_with_a_non_trapping_child_dies_by_signal_and_the_client_exits_13
             .client()
             .cwd(server.path())
             .spawn(&["sh", "-c", "touch ready.flag; sleep 30"]);
-    wait_for_flag(&server, "ready.flag");
+    wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGINT);
     let out = client.wait();
     server.stop();
@@ -365,7 +287,7 @@ async fn sigterm_is_relayed_like_sigint(traps: bool, expected: i32) {
         .client()
         .cwd(server.path())
         .spawn(&["sh", "-c", script]);
-    wait_for_flag(&server, "ready.flag");
+    wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGTERM);
     let out = client.wait();
     server.stop();
@@ -384,11 +306,11 @@ async fn repeated_sigints_forward_one_frame_each() {
         "-c",
         "trap 'c=$((c+1)); echo COUNT=$c; touch count-$c.flag' INT; touch ready.flag; while :; do sleep 0.2; done",
     ]);
-    wait_for_flag(&server, "ready.flag");
+    wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGINT);
-    wait_for_flag(&server, "count-1.flag");
+    wait_for_flag(&server, "count-1.flag").await;
     client.signal(libc::SIGINT);
-    wait_for_flag(&server, "count-2.flag");
+    wait_for_flag(&server, "count-2.flag").await;
     // End the run: the child has no TERM trap, so it dies by signal.
     client.signal(libc::SIGTERM);
     let out = client.wait();
@@ -407,7 +329,7 @@ async fn output_produced_after_the_signal_still_streams_before_the_terminal_fram
         "-c",
         "trap 'echo AFTER-1; sleep 1; echo AFTER-2; exit 0' INT; touch ready.flag; sleep 30",
     ]);
-    wait_for_flag(&server, "ready.flag");
+    wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGINT);
     let out = client.wait();
     server.stop();
