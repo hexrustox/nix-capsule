@@ -196,6 +196,7 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
     let timeout = parse_timeout(lookup)?;
     // Eagerly validate the JSON-array vars and harden on every command so
     // malformed values error even where a command does not consume them.
+    // TODO check is relative path
     let watch_files = parse_watch_files(lookup)?;
     let run_opts = parse_run_opts(lookup)?;
     let harden = parse_harden(lookup)?;

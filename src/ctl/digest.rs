@@ -1,9 +1,12 @@
 //! Freshness digest: xxhash64 over the watched files, cached as lowercase
 //! hex so `init` can decide between "no Nix evaluation" and "re-eval".
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::io::{self, Write};
 use std::path::Path;
+
+use twox_hash::XxHash64;
 
 use super::paths::{env_file, hash_file};
 
@@ -18,33 +21,46 @@ pub enum Freshness {
     Missing,
 }
 
-// TODO use hash builder
 /// xxhash64 (seed 0) over one record per entry, entries sorted by relative
 /// path: `(relative path, NUL, exists flag, NUL, contents-or-empty)`. Missing
 /// files contribute their absence flag, so a file appearing or disappearing
-/// flips the digest; a mtime-only touch does not. Returned as lowercase hex
-/// without a trailing newline.
-pub fn of(root: &Path, entries: &[String]) -> io::Result<String> {
+/// flips the digest; a mtime-only touch does not. File contents stream into
+/// the hasher, so large watched files are never fully buffered. Returned as
+/// lowercase hex without a trailing newline.
+pub fn compute(root: &Path, entries: &[String]) -> io::Result<String> {
     let mut sorted: Vec<&String> = entries.iter().collect();
     sorted.sort();
-    let mut records = Vec::new();
+    let mut hasher = BuildHasherDefault::<XxHash64>::default().build_hasher();
     for entry in sorted {
-        let path = root.join(entry);
-        let (exists, contents) = match fs::read(&path) {
-            Ok(contents) => (true, contents),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => (false, Vec::new()),
+        let (exists, contents) = match File::open(root.join(entry)) {
+            Ok(file) => (true, Some(file)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (false, None),
             Err(err) => return Err(err),
         };
-        records.extend_from_slice(entry.as_bytes());
-        records.push(b'\0');
-        records.extend_from_slice(if exists { b"1" } else { b"0" });
-        records.push(b'\0');
-        records.extend_from_slice(&contents);
+        hasher.write(entry.as_bytes());
+        hasher.write(b"\0");
+        hasher.write(if exists { b"1" } else { b"0" });
+        hasher.write(b"\0");
+        if let Some(contents) = contents {
+            io::copy(&mut { contents }, &mut HashWriter(&mut hasher))?;
+        }
     }
-    Ok(format!(
-        "{:016x}",
-        twox_hash::XxHash64::oneshot(0, &records)
-    ))
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+/// Forwards every written byte into the hasher so `io::copy` can stream
+/// file contents through it.
+struct HashWriter<'a>(&'a mut <BuildHasherDefault<XxHash64> as BuildHasher>::Hasher);
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Compare the computed digest against the cached `<cache>/hash`: the env
@@ -59,7 +75,7 @@ pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
         Ok(cached) => cached,
         Err(_) => return Freshness::Stale,
     };
-    match of(root, entries) {
+    match compute(root, entries) {
         Ok(digest) if cached.trim() == digest => Freshness::Fresh,
         // Computed-error (e.g. permission-denied watched file) is Stale,
         // never Fresh: an empty `unwrap_or_default()` digest must not match
@@ -91,7 +107,7 @@ mod tests {
     #[test]
     fn empty_watch_list_is_the_empty_input_xxhash64_vector() {
         let root = tempfile::tempdir().expect("tempdir");
-        let digest = of(root.path(), &[]).expect("digest");
+        let digest = compute(root.path(), &[]).expect("digest");
         assert_eq!(digest, "ef46db3751d8e999");
     }
 
@@ -100,8 +116,8 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("a.txt"), b"alpha");
         write(&root.path().join("b.txt"), b"beta");
-        let one = of(root.path(), &entries(&["a.txt", "b.txt"])).expect("digest");
-        let two = of(root.path(), &entries(&["b.txt", "a.txt"])).expect("digest");
+        let one = compute(root.path(), &entries(&["a.txt", "b.txt"])).expect("digest");
+        let two = compute(root.path(), &entries(&["b.txt", "a.txt"])).expect("digest");
         assert_eq!(one, two);
     }
 
@@ -109,18 +125,18 @@ mod tests {
     fn a_content_change_flips_the_digest() {
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"before");
-        let before = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let before = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         write(&root.path().join("w.txt"), b"after");
-        let after = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let after = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         assert_ne!(before, after);
     }
 
     #[test]
     fn a_file_appearing_or_disappearing_flips_the_digest() {
         let root = tempfile::tempdir().expect("tempdir");
-        let absent = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let absent = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         write(&root.path().join("w.txt"), b"");
-        let empty_but_present = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let empty_but_present = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         assert_ne!(absent, empty_but_present);
     }
 
@@ -129,9 +145,9 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("w.txt");
         write(&path, b"same");
-        let first = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let first = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         write(&path, b"same");
-        let second = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let second = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         assert_eq!(first, second);
     }
 
@@ -139,9 +155,9 @@ mod tests {
     fn nested_entries_hash_under_their_relative_path() {
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("dir/w.txt"), b"same");
-        let flat = of(root.path(), &entries(&["dir/w.txt"])).expect("digest");
+        let flat = compute(root.path(), &entries(&["dir/w.txt"])).expect("digest");
         write(&root.path().join("other/w.txt"), b"same");
-        let moved = of(root.path(), &entries(&["other/w.txt"])).expect("digest");
+        let moved = compute(root.path(), &entries(&["other/w.txt"])).expect("digest");
         assert_ne!(flat, moved, "the relative path is part of the record");
     }
 
@@ -149,7 +165,7 @@ mod tests {
     fn digest_is_lowercase_hex_without_a_newline() {
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"contents");
-        let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         assert_eq!(digest.len(), 16, "digest={digest}");
         assert!(
             digest
@@ -164,7 +180,7 @@ mod tests {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"x");
-        let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         store(cache.path(), &digest).expect("store hash");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
@@ -177,7 +193,7 @@ mod tests {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"x");
-        let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
@@ -209,7 +225,7 @@ mod tests {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"x");
-        let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
+        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
         fs::write(hash_file(cache.path()), format!("{digest}\n")).expect("hash with newline");
         assert_eq!(
@@ -227,7 +243,7 @@ mod tests {
         // non-NotFound error even as root (permission bits are ignored
         // for root, so chmod-based fixtures would be flaky here).
         fs::create_dir_all(root.path().join("w.txt")).expect("watched dir");
-        assert!(of(root.path(), &entries(&["w.txt"])).is_err());
+        assert!(compute(root.path(), &entries(&["w.txt"])).is_err());
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
         fs::write(hash_file(cache.path()), b"").expect("empty hash");
         assert_eq!(

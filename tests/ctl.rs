@@ -604,7 +604,8 @@ fn init_fresh_and_running_performs_zero_evals() {
     // Compute expected hash via the lib's digest (to avoid tautology, could
     // hardcode but this is the same code the binary uses — the point is the
     // binary writes it and we compare).
-    let digest = nix_capsule::ctl::digest::of(&root, &["flake.nix".to_owned()]).expect("digest");
+    let digest =
+        nix_capsule::ctl::digest::compute(&root, &["flake.nix".to_owned()]).expect("digest");
     fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
     fs::write(cache.join("hash"), &digest).expect("hash");
     fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");

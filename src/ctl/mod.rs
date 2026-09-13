@@ -276,7 +276,7 @@ async fn ensure_cache(cfg: &Config) -> Result<(), String> {
     // Prune profile history; non-fatal.
     let _ = nix::wipe_history(nix_bin, &profile).await;
 
-    let digest_hex = digest::of(root, &cfg.watch_files).map_err(|err| err.to_string())?;
+    let digest_hex = digest::compute(root, &cfg.watch_files).map_err(|err| err.to_string())?;
     digest::store(cache_dir, &digest_hex).map_err(|err| err.to_string())?;
     Ok(())
 }
