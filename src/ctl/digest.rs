@@ -3,7 +3,9 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use super::paths::{env_file, hash_file};
 
 /// Whether the cached env dump still matches the watched files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,10 +52,10 @@ pub fn of(root: &Path, entries: &[String]) -> io::Result<String> {
 /// `Stale`. The cached hash is trimmed before comparing so a trailing newline
 /// (spec: stored with no trailing newline) reads as fresh, matching `status`.
 pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
-    if !cache_dir.join("env").is_file() {
+    if !env_file(cache_dir).is_file() {
         return Freshness::Missing;
     }
-    let cached = match fs::read_to_string(cache_dir.join("hash")) {
+    let cached = match fs::read_to_string(hash_file(cache_dir)) {
         Ok(cached) => cached,
         Err(_) => return Freshness::Stale,
     };
@@ -68,13 +70,7 @@ pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
 
 /// Write `digest` to `<cache>/hash`, lowercase hex with no trailing newline.
 pub fn store(cache_dir: &Path, digest: &str) -> io::Result<()> {
-    fs::write(cache_dir.join("hash"), digest)
-}
-
-// TODO centralize
-/// The cached env dump the freshness state gates.
-pub fn env_file(cache_dir: &Path) -> PathBuf {
-    cache_dir.join("env")
+    fs::write(hash_file(cache_dir), digest)
 }
 
 #[cfg(test)]
@@ -204,7 +200,7 @@ mod tests {
     fn the_stored_hash_has_no_trailing_newline() {
         let cache = tempfile::tempdir().expect("tempdir");
         store(cache.path(), "0123456789abcdef").expect("store");
-        let raw = fs::read(cache.path().join("hash")).expect("hash file");
+        let raw = fs::read(hash_file(cache.path())).expect("hash file");
         assert_eq!(raw, b"0123456789abcdef");
     }
 
@@ -215,7 +211,7 @@ mod tests {
         write(&root.path().join("w.txt"), b"x");
         let digest = of(root.path(), &entries(&["w.txt"])).expect("digest");
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        fs::write(cache.path().join("hash"), format!("{digest}\n")).expect("hash with newline");
+        fs::write(hash_file(cache.path()), format!("{digest}\n")).expect("hash with newline");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Fresh,
@@ -233,7 +229,7 @@ mod tests {
         fs::create_dir_all(root.path().join("w.txt")).expect("watched dir");
         assert!(of(root.path(), &entries(&["w.txt"])).is_err());
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        fs::write(cache.path().join("hash"), b"").expect("empty hash");
+        fs::write(hash_file(cache.path()), b"").expect("empty hash");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale,

@@ -6,6 +6,8 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
+use super::paths::env_file;
+
 /// The OCI runtime executable.
 #[derive(Clone, Debug)]
 pub struct Runtime {
@@ -150,7 +152,7 @@ impl Runtime {
         bash: &Path,
         cache_dir: &Path,
     ) -> Result<(), String> {
-        let env_file = cache_dir.join("env");
+        let env_file = env_file(cache_dir);
         let cmd_str = format!(
             "source {} && exec {}",
             &env_file.to_string_lossy(),

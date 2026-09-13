@@ -21,6 +21,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
+use crate::ctl::paths::server_log_path;
 use crate::protocol::{CURRENT_VERSION, ErrorMsg, Exit, FrameCodec, Message, VersionMsg};
 
 /// Bind `socket` and serve connections until the process is stopped. A
@@ -453,10 +454,9 @@ struct Log {
 
 impl Log {
     /// Create `dir` when missing and open this run's epoch-stamped log file.
-    /// Millisecond epochs keep runs started in the same second apart.
     fn start(dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let path = dir.join(format!("ncap-server-{}.log", epoch_millis()));
+        let path = server_log_path(dir, epoch_millis());
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             file: Mutex::new(file),

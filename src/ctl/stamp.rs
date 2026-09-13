@@ -4,11 +4,13 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::paths::project_stamp_file;
+
 /// Read `<cache>/project`; absent means "first claim" and is written, a
 /// different root is a hard error with the "set `project`" hint, the same
 /// root passes silently.
 pub fn guard(cache_dir: &Path, project: &str, current_root: &Path) -> io::Result<()> {
-    let stamp = cache_dir.join("project");
+    let stamp = project_stamp_file(cache_dir);
     match fs::read_to_string(&stamp) {
         Ok(existing) => {
             let existing = existing.trim_end_matches(['\n', '\r']);
@@ -42,7 +44,7 @@ mod tests {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = Path::new("/tmp/my-root");
         guard(cache.path(), "proj", root).expect("guard");
-        let stored = fs::read_to_string(cache.path().join("project")).expect("stamp file");
+        let stored = fs::read_to_string(project_stamp_file(cache.path())).expect("stamp file");
         assert_eq!(stored, "/tmp/my-root");
     }
 

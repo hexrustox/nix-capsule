@@ -9,12 +9,13 @@ pub mod runtime;
 pub mod stamp;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
 
 use config::{Cmd, Config};
+use paths::{env_file, profile_file};
 
 /// Entry point from the binary: resolve `cmd` from the process environment and
 /// dispatch. Returns the exit code the process should report.
@@ -186,8 +187,8 @@ async fn enter(cfg: Config) -> Result<(), String> {
 
 async fn log(cfg: Config) -> Result<(), String> {
     let log_dir = &cfg.log_dir;
-    let newest =
-        newest_log_path(log_dir).ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
+    let newest = paths::newest_server_log_path(log_dir)
+        .ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
     let (prog, args) = pager_command();
     let mut cmd = tokio::process::Command::new(&prog);
     cmd.args(&args);
@@ -259,7 +260,7 @@ async fn ensure_cache(cfg: &Config) -> Result<(), String> {
     // Stale or missing → eval.
     let nix_bin = &cfg.nix;
     let devshell = &cfg.devshell;
-    let profile = cache_dir.join("profile");
+    let profile = profile_file(cache_dir);
 
     fs::create_dir_all(cache_dir).map_err(|err| err.to_string())?;
 
@@ -268,8 +269,8 @@ async fn ensure_cache(cfg: &Config) -> Result<(), String> {
         .await
         .map_err(|err| format!("nix print-dev-env failed: {err}"))?;
 
-    let env_file = digest::env_file(cache_dir);
-    fs::write(&env_file, &output).map_err(|err| err.to_string())?;
+    let env_path = env_file(cache_dir);
+    fs::write(&env_path, &output).map_err(|err| err.to_string())?;
     eprintln!("devshell cached");
 
     // Prune profile history; non-fatal.
@@ -289,7 +290,7 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     let image = &cfg.image;
 
     // The env dump must exist — otherwise the container cannot source it.
-    if !cache_dir.join("env").is_file() {
+    if !env_file(cache_dir).is_file() {
         return Err("no cached dev environment found; run `ncap-ctl init` first".to_owned());
     }
 
@@ -301,7 +302,7 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
 
     let exec_cmd = format!(
         "source {} && exec {} --socket {} --log-dir {} --timeout {}",
-        &cache_dir.join("env").to_string_lossy(),
+        &env_file(cache_dir).to_string_lossy(),
         &server.to_string_lossy(),
         &socket.to_string_lossy(),
         &log_dir.to_string_lossy(),
@@ -365,26 +366,6 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
         "container `{}` never became live within {}s (state: {state})",
         cfg.container, cfg.timeout
     ))
-}
-
-// TODO sync with server
-fn parse_log_epoch(name: &str) -> Option<u64> {
-    let rest = name.strip_prefix("ncap-server-")?;
-    let epoch = rest.strip_suffix(".log")?;
-    epoch.parse().ok()
-}
-
-fn newest_log_path(log_dir: &Path) -> Option<PathBuf> {
-    let dir = fs::read_dir(log_dir).ok()?;
-    let mut entries: Vec<(u64, PathBuf)> = Vec::new();
-    for entry in dir.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(epoch) = parse_log_epoch(&name) {
-            entries.push((epoch, entry.path()));
-        }
-    }
-    entries.sort_by_key(|(epoch, _)| *epoch);
-    entries.pop().map(|(_, path)| path)
 }
 
 fn pager_command() -> (String, Vec<String>) {
