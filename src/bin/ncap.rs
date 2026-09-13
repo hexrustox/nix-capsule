@@ -7,6 +7,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    // TODO optional, fallback value same as ctl
     /// Unix socket path of the project's server
     #[arg(short, long, value_name = "PATH", env = "NCAP_SOCKET")]
     socket: PathBuf,

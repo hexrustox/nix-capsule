@@ -69,13 +69,13 @@ attr, any name.
 
 ## Options
 
-A `null` option leaves its `NCAP_*` unset in `mkShell` (no eval-time
-derivation); Ctl falls back per spec/ctl.md § NCAP_* contract. The flake
-side makes no guarantee about the derived value.
+An empty-string option leaves its `NCAP_*` empty in `mkShell`; Ctl
+falls back per spec/ctl.md § NCAP_* contract. The flake side makes no
+guarantee about the derived value.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `project` | string | `null` | Sets `NCAP_PROJECT`. |
+| `project` | string | `""` | Sets `NCAP_PROJECT`. |
 | `image` | string | `"alpine:latest"` | Sets `NCAP_IMAGE`. |
 | `devShell` | string | `".#container"` | Sets `NCAP_DEVSHELL`. |
 | `watchFiles` | list of strings | `[ "flake.nix" "flake.lock" ]` | Sets `NCAP_WATCH_FILES`. |
@@ -84,10 +84,10 @@ side makes no guarantee about the derived value.
 | `extraOptions` | list of strings | `[ ]` | Sets `NCAP_RUN_OPTS`. |
 | `harden` | bool | `false` | Sets `NCAP_HARDEN`. |
 | `timeout` | int | `10` | Sets `NCAP_TIMEOUT`. |
-| `socketPath` | string | `null` | Sets `NCAP_SOCKET`. |
-| `containerName` | string | `null` | Sets `NCAP_CONTAINER`. |
-| `cacheDir` | string | `null` | Sets `NCAP_CACHE_DIR`. |
-| `logDir` | string | `null` | Sets `NCAP_LOG_DIR`. |
+| `socketPath` | string | `""` | Sets `NCAP_SOCKET`. |
+| `containerName` | string | `""` | Sets `NCAP_CONTAINER`. |
+| `cacheDir` | string | `""` | Sets `NCAP_CACHE_DIR`. |
+| `logDir` | string | `""` | Sets `NCAP_LOG_DIR`. |
 | `preShellHook` / `postShellHook` | strings | `""` | Extra shellHook fragments, run before/after the capsule fragments. |
 | `autoStart` | bool | `true` | Run `ncap-ctl init` from the shellHook. |
 | `runtime` | string | `"podman"` | Sets `NCAP_RUNTIME`. |
@@ -96,8 +96,8 @@ side makes no guarantee about the derived value.
 
 Every option is checked when `mkShell` is evaluated, before
 `mkShellNoCC` runs. A mismatch throws at eval time; the error names
-the option, the expected shape, and the received type/value. `null`
-is accepted only where the table default is `null`. No coercions: a
+the option, the expected shape, and the received type/value. No
+coercions: a
 value of the wrong type is an error, never silently converted.
 `lib.nix` performs type checks only; value transformation and
 validation (runtime names, timeout range, devshell shape) is `ctl`'s job.
@@ -106,7 +106,7 @@ Checked shapes: `image`, `devShell`,
 `runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
 strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `harden`, `autoStart` bools; `timeout` integer number;
-`project`, `containerName`, `socketPath`, `cacheDir`, `logDir` null or strings;
+`project`, `containerName`, `socketPath`, `cacheDir`, `logDir` strings;
 `preShellHook`, `postShellHook` strings. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
 null or string.

@@ -10,7 +10,7 @@
   };
 
   outputs =
-    { flake-parts, ... }@inputs:
+    { self, flake-parts, ... }@inputs:
     let
       rustVersion = "1.95.0";
     in
@@ -21,15 +21,10 @@
         overlays.default =
           final: prev:
           let
-            rust = prev.rust-bin.${rustVersion}.default;
+            system = prev.stdenv.targetPlatform.system;
           in
           {
-            ncap = prev.callPackage ./package.nix {
-              rustPlatform = prev.makeRustPlatform {
-                cargo = rust;
-                rustc = rust;
-              };
-            };
+            ncap = self.packages.${system}.default;
           };
 
       };
@@ -50,6 +45,24 @@
         in
         {
           apps.default = capsule-lib.app;
+          packages =
+            let
+              pkgs = import inputs.nixpkgs {
+                inherit system;
+                overlays = [
+                  inputs.rust-overlay.overlays.default
+                ];
+              };
+              rust = pkgs.rust-bin.stable.${rustVersion}.default;
+            in
+            {
+              default = pkgs.callPackage ./package.nix {
+                rustPlatform = pkgs.makeRustPlatform {
+                  cargo = rust;
+                  rustc = rust;
+                };
+              };
+            };
           devShells = {
             default = capsule-lib.mkShell {
               socketPath = "/tmp/nix-capsule/ncap-socket";
@@ -94,6 +107,7 @@
                     # "llvm-tools-preview"
                   ];
                 })
+                git
               ];
             };
           };

@@ -21,9 +21,6 @@ let
   # ---- scalar checks (return the value on success) ---------------------------
   checkString = opt: v: if builtins.isString v then v else throwOpt opt "string" v;
 
-  checkNullOrString =
-    opt: v: if v == null || builtins.isString v then v else throwOpt opt "null or string" v;
-
   checkBool = opt: v: if builtins.isBool v then v else throwOpt opt "bool" v;
 
   checkInt = opt: v: if builtins.isInt v then v else throwOpt opt "integer" v;
@@ -95,7 +92,7 @@ in
 {
   mkShell =
     {
-      project ? null,
+      project ? "",
       image ? "alpine:latest",
       devShell ? ".#container",
       watchFiles ? [
@@ -107,10 +104,10 @@ in
       extraOptions ? [ ],
       harden ? false,
       timeout ? 10,
-      socketPath ? null,
-      containerName ? null,
-      cacheDir ? null,
-      logDir ? null,
+      socketPath ? "",
+      containerName ? "",
+      cacheDir ? "",
+      logDir ? "",
       preShellHook ? "",
       postShellHook ? "",
       autoStart ? true,
@@ -122,7 +119,7 @@ in
       # naming the option, the expected shape, and the received type/value.
       # Null is accepted only where the table default is null. No coercions;
       # no Nix `path` values for any option.
-      checkedProject = checkNullOrString "project" project;
+      checkedProject = checkString "project" project;
       checkedImage = checkString "image" image;
       checkedDevShell = checkString "devShell" devShell;
       checkedWatchFiles = checkStringList "watchFiles" watchFiles;
@@ -131,10 +128,10 @@ in
       checkedExtraOptions = checkStringList "extraOptions" extraOptions;
       checkedHarden = checkBool "harden" harden;
       checkedTimeout = checkInt "timeout" timeout;
-      checkedSocketPath = checkNullOrString "socketPath" socketPath;
-      checkedContainerName = checkNullOrString "containerName" containerName;
-      checkedCacheDir = checkNullOrString "cacheDir" cacheDir;
-      checkedLogDir = checkNullOrString "logDir" logDir;
+      checkedSocketPath = checkString "socketPath" socketPath;
+      checkedContainerName = checkString "containerName" containerName;
+      checkedCacheDir = checkString "cacheDir" cacheDir;
+      checkedLogDir = checkString "logDir" logDir;
       checkedPreShellHook = checkString "preShellHook" preShellHook;
       checkedPostShellHook = checkString "postShellHook" postShellHook;
       checkedAutoStart = checkBool "autoStart" autoStart;

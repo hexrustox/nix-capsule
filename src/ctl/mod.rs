@@ -201,6 +201,7 @@ async fn clean(cfg: Config) -> Result<(), String> {
     // Clear cache/log contents entry-by-entry, then best-effort remove the
     // dirs themselves when empty. Never `remove_dir_all` the top dirs: an
     // explicit `NCAP_CACHE_DIR`/`NCAP_LOG_DIR` may point into a shared dir.
+    // TODO target specific files
     remove_dir_contents(&cfg.cache_dir)?;
     remove_dir_contents(&cfg.log_dir)?;
     if let Some(parent) = cfg.socket.parent() {

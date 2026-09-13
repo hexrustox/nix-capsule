@@ -266,6 +266,7 @@ mod tests {
     }
 
     #[test_case(None => matches Err(Error::Missing { var: "NCAP_HARDEN" }) ; "unset_is_missing")]
+    #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_missing")]
     #[test_case(Some("true") => matches Ok(true) ; "true_sets_harden")]
     #[test_case(Some("false") => matches Ok(false) ; "false_clears_harden")]
     #[test_case(Some("true ") => matches Err(Error::BadHarden { value }) if value == "true " ; "trailing_space_is_rejected")]
@@ -286,10 +287,10 @@ mod tests {
         parse_timeout(&single("NCAP_TIMEOUT", raw))
     }
 
-    #[test_case(Some("podman") => matches Ok(value) if value == "podman" ; "podman_is_valid")]
-    #[test_case(Some("docker") => matches Ok(value) if value == "docker" ; "docker_is_valid")]
     #[test_case(None => matches Err(Error::Missing { var: "NCAP_RUNTIME" }) ; "missing_is_named")]
     #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_missing")]
+    #[test_case(Some("podman") => matches Ok(value) if value == "podman" ; "podman_is_valid")]
+    #[test_case(Some("docker") => matches Ok(value) if value == "docker" ; "docker_is_valid")]
     #[test_case(Some("hello-docker") => matches Err(Error::BadRuntime { value }) if value == "hello-docker" ; "substring_is_not_enough")]
     fn runtime_is_exact(raw: Option<&str>) -> Result<String, Error> {
         parse_runtime(&single("NCAP_RUNTIME", raw))
