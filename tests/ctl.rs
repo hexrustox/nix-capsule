@@ -257,6 +257,7 @@ fn base_env(
     );
     env.insert("NCAP_SOCKET".into(), socket.to_string_lossy().into_owned());
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
+    env.insert("NCAP_PROJECT".into(), "test".into());
     env.insert("NCAP_IMAGE".into(), "alpine:latest".into());
     env.insert(
         "NCAP_SERVER".into(),
@@ -305,6 +306,11 @@ fn init_refuses_when_a_demanded_var_is_missing() {
 
     let demanded = [
         "NCAP_PROJECT_ROOT",
+        "NCAP_PROJECT",
+        "NCAP_CONTAINER",
+        "NCAP_SOCKET",
+        "NCAP_CACHE_DIR",
+        "NCAP_LOG_DIR",
         "NCAP_IMAGE",
         "NCAP_SERVER",
         "NCAP_NIX",
@@ -444,32 +450,35 @@ fn derived_project_name_is_used_and_empty_is_a_hard_error() {
     fake_runtime(&runtime_bin, &state, &runtime_log);
     fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
 
-    // Root whose basename is "my-proj" → sanitized "my-proj"
+    // Root whose basename is "my-proj" → sanitized "my-proj" via setup-env.
     let root = tmp.path().join("my-proj");
     fs::create_dir_all(&root).expect("root");
-    fs::create_dir_all(&cache).expect("cache");
-    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
-    // Hash for empty watch list
-    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
-    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
 
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
-    // Remove explicit container/project so derivation is exercised.
+    // Remove explicit container/project so setup-env derivation is exercised.
     env.remove("NCAP_CONTAINER");
     env.remove("NCAP_PROJECT");
-    // Liveness needs a connectable socket: Running alone is not live.
-    let _live = live_socket(&sock);
-    // Also remove socket/cache to exercise XDG derivation? Keep them explicit
-    // so the test focuses on name derivation.
-    let out = run_ctl(&env, &["init"]);
+    let out = run_ctl(&env, &["setup-env"]);
     assert!(
         out.status.success(),
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // The runtime log should contain the derived container name ncap-my-proj.
-    let log = fs::read_to_string(&runtime_log).expect("runtime log");
-    assert!(log.contains("ncap-my-proj"), "log={log}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("export NCAP_PROJECT='my-proj'"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("export NCAP_CONTAINER='ncap-my-proj'"),
+        "stdout={stdout}"
+    );
+
+    // Strict resolve: init without the derived vars fails naming the var.
+    let out_init = run_ctl(&env, &["init"]);
+    assert!(!out_init.status.success());
+    let stderr_init = String::from_utf8_lossy(&out_init.stderr);
+    assert!(stderr_init.contains("NCAP_PROJECT"), "stderr={stderr_init}");
 
     // Empty sanitization: root "###" → hard error telling to set project
     let bad_root = tmp.path().join("###");
@@ -478,7 +487,7 @@ fn derived_project_name_is_used_and_empty_is_a_hard_error() {
     let mut env2 = base_env(&bad_root, &cache2, &logs, &sock, &runtime_bin, &nix_bin);
     env2.remove("NCAP_CONTAINER");
     env2.remove("NCAP_PROJECT");
-    let out2 = run_ctl(&env2, &["init"]);
+    let out2 = run_ctl(&env2, &["setup-env"]);
     assert!(!out2.status.success());
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
     assert!(stderr2.contains("set `project`"), "stderr={stderr2}");
@@ -1456,9 +1465,28 @@ esac
         tmp.path().join("home").to_string_lossy().into_owned(),
     );
     env.insert("TMPDIR".into(), xdg_fallback.to_string_lossy().into_owned());
-    // No XDG_RUNTIME_DIR, no NCAP_SOCKET/CACHE/LOG → derive
+    // No XDG_RUNTIME_DIR, no NCAP_SOCKET/CACHE/LOG → derive via setup-env.
     // Also need to set HOME so XDG fallbacks have a base
     fs::create_dir_all(tmp.path().join("home")).expect("home");
+
+    // Resolve derived vars through setup-env, then feed them to init
+    // (strict resolve no longer derives).
+    let setup_out = run_ctl(&env, &["setup-env"]);
+    assert!(
+        setup_out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&setup_out.stderr)
+    );
+    for line in String::from_utf8_lossy(&setup_out.stdout).lines() {
+        let body = line.strip_prefix("export ").unwrap_or(line);
+        let (var, quoted) = body.split_once('=').expect("VAR='value'");
+        let value = quoted
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .unwrap_or(quoted)
+            .replace("'\\''", "'");
+        env.insert(var.to_owned(), value);
+    }
 
     // Liveness needs a connectable socket: Running alone is not live. The
     // socket path is derived (no NCAP_SOCKET), so rebuild it here; its

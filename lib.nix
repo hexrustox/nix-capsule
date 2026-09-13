@@ -195,10 +195,17 @@ in
       envForwardJson = builtins.toJSON checkedEnvForward;
 
       # ---- shellHook construction ---------------------------------------------
-      # Order: preHook → export NCAP_PROJECT_ROOT → guarded watch_file per entry → init when autoStart → postHook
+      # Order: preHook → export NCAP_PROJECT_ROOT → setup-env → guarded watch_file per entry → init when autoStart → postHook
       watchFileLines = lib.optionalString (checkedWatchFiles != [ ]) "[ -n \"\${DIRENV_DIR:-}\" ] && watch_file ${
         lib.concatMapStringsSep " " lib.escapeShellArg checkedWatchFiles
       }";
+
+      # The setup-env call must not abort shell entry on failure; wrap with warning.
+      setupEnvHook = ''
+        if ! source <(ncap-ctl setup-env); then
+          echo "ncap-ctl: setup-env failed (run \`ncap-ctl setup-env\` to retry)" >&2
+        fi
+      '';
 
       # The init call must not abort shell entry on failure; wrap with warning.
       initHook = lib.optionalString checkedAutoStart ''
@@ -211,6 +218,7 @@ in
         lib.filter (s: s != "") [
           checkedPreShellHook
           ''export NCAP_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"''
+          setupEnvHook
           watchFileLines
           initHook
           checkedPostShellHook

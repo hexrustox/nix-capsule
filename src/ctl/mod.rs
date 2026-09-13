@@ -20,6 +20,21 @@ use config::{Cmd, Config};
 /// dispatch. Returns the exit code the process should report.
 pub async fn run(cmd: Cmd) -> i32 {
     let lookup = |var: &str| std::env::var(var).ok();
+    // `setup-env` resolves the derived vars itself, so it must run before
+    // the full demand set — a full resolve would reject the empty values it
+    // is meant to fill.
+    if cmd == Cmd::SetupEnv {
+        return match config::setup_env(&lookup) {
+            Ok(script) => {
+                print!("{script}");
+                0
+            }
+            Err(err) => {
+                eprintln!("ncap-ctl: {err}");
+                1
+            }
+        };
+    }
     let cfg = match config::resolve(&lookup) {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -37,6 +52,7 @@ pub async fn run(cmd: Cmd) -> i32 {
         Cmd::Log => log(cfg).await,
         Cmd::Clean => clean(cfg).await,
         Cmd::ShowOptions => show_options(cfg).await,
+        Cmd::SetupEnv => unreachable!("handled before resolve"),
     };
     match result {
         Ok(()) => 0,

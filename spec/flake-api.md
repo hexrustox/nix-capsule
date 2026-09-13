@@ -69,9 +69,9 @@ attr, any name.
 
 ## Options
 
-An empty-string option leaves its `NCAP_*` empty in `mkShell`; Ctl
-falls back per spec/ctl.md § NCAP_* contract. The flake side makes no
-guarantee about the derived value.
+An empty-string option leaves its `NCAP_*` empty in `mkShell`; the Host
+shell fills it via `setup-env` per spec/ctl.md § NCAP_* contract. The
+flake side makes no guarantee about the derived value.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -117,15 +117,17 @@ The shellHook runs, in order (empty fragments skipped):
 
 1. `preShellHook`,
 2. exports `NCAP_PROJECT_ROOT` (git toplevel, falling back to `pwd`),
-3. emits one guarded `watch_file` invocation taking every `watchFiles`
+3. sources `setup-env` output (`source <(ncap-ctl setup-env)`) resolving
+   the project-scoped envs per spec/ctl.md § NCAP_* contract,
+4. emits one guarded `watch_file` invocation taking every `watchFiles`
    entry as arguments (guard: `${DIRENV_DIR:-}` non-empty — inert outside
    direnv); an empty `watchFiles` emits no line,
-4. runs `ncap-ctl init` when `autoStart`,
-5. `postShellHook`.
+5. runs `ncap-ctl init` when `autoStart`,
+6. `postShellHook`.
 
-A failing `ncap-ctl init` prints a warning on stderr and does not abort
-shell entry — wrapped commands surface the failure later through the
-Client's connect-error hint.
+A failing `ncap-ctl setup-env` or `ncap-ctl init` prints a warning on
+stderr and does not abort shell entry — wrapped commands surface the
+failure later through the Client's connect-error hint.
 
 ## Wrappers
 

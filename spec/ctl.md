@@ -18,6 +18,7 @@ contract).
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
 | `clean` | Stop the Container, remove the (stopped) container, clear this project's Cache and log contents (best-effort dir removal, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
+| `setup-env` | Resolve the five project-scoped vars and print them as `export` lines for the Host shell to source. Needs only `NCAP_PROJECT_ROOT` (§ NCAP_* contract). Never starts containers, never touches the Cache. |
 
 ## Liveness
 
@@ -117,12 +118,12 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 
 | Var | Derive | Description |
 | --- | --- | --- |
-| `NCAP_PROJECT` | from `NCAP_PROJECT_ROOT` (§ Project name) | Project name. Set by `project`. |
+| `NCAP_PROJECT` | via `setup-env` from `NCAP_PROJECT_ROOT` (§ Project name) | Project name. Set by `project`. |
 | `NCAP_PROJECT_ROOT` | `-` | Project root — the git toplevel of the consumer's checkout, falling back to the current directory outside a git repo; anchors the project name, the workspace mount, and the workdir of executed commands. No option: shellHook sets it. |
-| `NCAP_SOCKET` | from the project name (§ XDG layout) | Socket path. Set by `socketPath`. |
-| `NCAP_CACHE_DIR` | from the project name (§ XDG layout) | Cache dir. Set by `cacheDir`. |
-| `NCAP_LOG_DIR` | from the project name (§ XDG layout) | Log dir. Set by `logDir`. |
-| `NCAP_CONTAINER` | `ncap-<project>` (§ Project name) | Container name. Set by `containerName`. |
+| `NCAP_SOCKET` | via `setup-env` from the project name (§ XDG layout) | Socket path. Set by `socketPath`. |
+| `NCAP_CACHE_DIR` | via `setup-env` from the project name (§ XDG layout) | Cache dir. Set by `cacheDir`. |
+| `NCAP_LOG_DIR` | via `setup-env` from the project name (§ XDG layout) | Log dir. Set by `logDir`. |
+| `NCAP_CONTAINER` | via `setup-env` as `ncap-<project>` (§ Project name) | Container name. Set by `containerName`. |
 | `NCAP_IMAGE` | `-` | OCI image; provides only the kernel/userland sandbox. Set by `image`. |
 | `NCAP_RUNTIME` | `-` | OCI runtime (§ Runtime adapter). Set by `runtime`. |
 | `NCAP_DEVSHELL` | `-` | Complete flake URI of the Container shell; no bare-name `.#` prefixing is performed. Set by `devShell`. |
@@ -135,22 +136,27 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 | `NCAP_TIMEOUT` | `-` | Seconds (`0` allowed: no drain grace / immediate readiness deadline); bounds start readiness and the Server's drain grace. Set by `timeout`. |
 | `NCAP_HARDEN` | `-` | `true`/`false` enables harden (§ Harden). Set by `harden`. |
 
-Empty-string values count as unset. Every command demands the full `ctl`
-set: `NCAP_PROJECT_ROOT`, the project derivation, `NCAP_CONTAINER`,
-`NCAP_SOCKET`, `NCAP_CACHE_DIR`, `NCAP_LOG_DIR`, `NCAP_IMAGE`,
-`NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_SERVER`, `NCAP_BASH`,
-`NCAP_TIMEOUT`, `NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`, and
+Empty-string values count as unset. Every command except `setup-env`
+demands the full `ctl` set: `NCAP_PROJECT_ROOT`, `NCAP_PROJECT`,
+`NCAP_CONTAINER`, `NCAP_SOCKET`, `NCAP_CACHE_DIR`, `NCAP_LOG_DIR`,
+`NCAP_IMAGE`, `NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_SERVER`,
+`NCAP_BASH`, `NCAP_TIMEOUT`, `NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`, and
 `NCAP_HARDEN`. A missing var is an error naming the var, and a set
 `NCAP_WATCH_FILES`/`NCAP_RUN_OPTS` that is not a JSON array of strings
 is an error naming the var; a `NCAP_HARDEN` that is not `true`/`false`
 is likewise an error. `NCAP_ENV_FORWARD` is validated by the Client
-only.
+only. `setup-env` needs only `NCAP_PROJECT_ROOT`: it resolves
+explicit-wins-else-derived per § Project name and § XDG layout and prints
+`export VAR='…'` lines (single-quote-escaped, fixed order `PROJECT`,
+`CONTAINER`, `SOCKET`, `CACHE_DIR`, `LOG_DIR`) to stdout for the Host
+shell to source — see spec/flake-api.md § shellHook. Failure exits
+non-zero naming the var.
 
 These are env-contract demands, not per-command usage errors: in
 practice `lib.nix` sets all of them, so a missing var is a broken
 environment rather than a usage error.
 
-Precedence: explicit env wins, else the ctl-derived value per `Derive`,
+Precedence: explicit env wins, else the `setup-env`-derived value per `Derive`,
 else an error naming the var. Ctl never overrides a set value. A missing
 var whose `Derive` is `-` is an error naming it.
 

@@ -1,6 +1,7 @@
-//! Env-contract resolution: uniform demands, derivation chains, and
-//! defaults. Every command demands the full set — a missing
-//! var is named in the error.
+//! Env-contract resolution: uniform demands and defaults. Every command
+//! except `SetupEnv` demands the full set — a missing var is named in the
+//! error. `SetupEnv` derives the five project-scoped vars and prints them
+//! as bash `export` lines for the Host shell to source.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,8 @@ pub enum Cmd {
     Clean,
     /// Print the expanded runtime adapter options
     ShowOptions,
+    /// Resolve the project-scoped envs and print them as bash `export` lines
+    SetupEnv,
 }
 
 /// Resolved configuration for one command. Fields a command does not use are
@@ -179,8 +182,10 @@ fn resolve_project(
     }
 }
 
-/// Resolve the full configuration from `lookup`. All commands share one
-/// demand set (normally fully populated by `lib.nix`).
+/// Resolve the full configuration from `lookup`. All commands except
+/// `SetupEnv` share one demand set (normally fully populated by `lib.nix`
+/// plus a sourced `setup-env`): derived vars are demanded non-empty, never
+/// derived here.
 pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error> {
     // Runtime/timeout are demanded on every command (missing => error naming
     // the var). JSON-array vars consumed by ctl and harden are validated and
@@ -196,22 +201,13 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
 
     let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
     let root = PathBuf::from(&root_str);
-    let project = resolve_project(lookup, Some(&root))?;
-    let container =
-        lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_else(|| format!("ncap-{project}"));
-    let socket = if let Some(socket) = lookup_non_empty(lookup, "NCAP_SOCKET") {
-        PathBuf::from(socket)
-    } else {
-        paths::socket_path(&project)
-    };
-    let cache_dir = match lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => paths::cache_dir(&project)?,
-    };
-    let log_dir = match lookup_non_empty(lookup, "NCAP_LOG_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => paths::log_dir(&project)?,
-    };
+    // Derived vars are populated by `setup-env` in the shellHook; an empty
+    // value here is a missing var naming it, not a derivation request.
+    let project = demand(lookup, "NCAP_PROJECT")?;
+    let container = demand(lookup, "NCAP_CONTAINER")?;
+    let socket = PathBuf::from(demand(lookup, "NCAP_SOCKET")?);
+    let cache_dir = PathBuf::from(demand(lookup, "NCAP_CACHE_DIR")?);
+    let log_dir = PathBuf::from(demand(lookup, "NCAP_LOG_DIR")?);
     let devshell = demand(lookup, "NCAP_DEVSHELL")?;
     let nix = demand(lookup, "NCAP_NIX")?;
     let image = demand(lookup, "NCAP_IMAGE")?;
@@ -235,6 +231,50 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
         bash: PathBuf::from(bash),
         devshell,
     })
+}
+
+/// Single-quote-escape a value for `export VAR='...'` output.
+fn shell_escape(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+/// Resolve the five project-scoped vars and render them as bash `export`
+/// lines for the Host shell to source. Explicit non-empty values win;
+/// empty/unset values derive per the NCAP_* contract (project from the
+/// root basename, container as `ncap-<project>`, socket/cache/log from the
+/// XDG layout). Fixed order: `PROJECT, CONTAINER, SOCKET, CACHE_DIR,
+/// LOG_DIR`. Needs only `NCAP_PROJECT_ROOT`.
+pub fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, Error> {
+    let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
+    let root = PathBuf::from(&root_str);
+    let project = resolve_project(lookup, Some(&root))?;
+    let container =
+        lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_else(|| format!("ncap-{project}"));
+    let socket = if let Some(socket) = lookup_non_empty(lookup, "NCAP_SOCKET") {
+        socket
+    } else {
+        paths::socket_path(&project).to_string_lossy().into_owned()
+    };
+    let cache_dir = match lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
+        Some(dir) => dir,
+        None => paths::cache_dir(&project)?.to_string_lossy().into_owned(),
+    };
+    let log_dir = match lookup_non_empty(lookup, "NCAP_LOG_DIR") {
+        Some(dir) => dir,
+        None => paths::log_dir(&project)?.to_string_lossy().into_owned(),
+    };
+    let pairs = [
+        ("NCAP_PROJECT", project),
+        ("NCAP_CONTAINER", container),
+        ("NCAP_SOCKET", socket),
+        ("NCAP_CACHE_DIR", cache_dir),
+        ("NCAP_LOG_DIR", log_dir),
+    ];
+    let mut out = String::new();
+    for (var, value) in pairs {
+        out.push_str(&format!("export {var}='{}'\n", shell_escape(&value)));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -342,5 +382,67 @@ mod tests {
     #[test_case("---" => matches None ; "dashes_only_is_none")]
     fn sanitize_cases(basename: &str) -> Option<String> {
         sanitize(basename)
+    }
+
+    #[test]
+    fn setup_env_derives_and_quotes() {
+        let lookup = env(vec![
+            ("NCAP_PROJECT_ROOT", "/tmp/my_project"),
+            ("NCAP_CACHE_DIR", "/tmp/a'b dir"),
+        ]);
+        let out = setup_env(&lookup).expect("setup-env succeeds");
+        assert!(
+            out.contains("export NCAP_PROJECT='my-project'\n"),
+            "out={out}"
+        );
+        assert!(
+            out.contains("export NCAP_CONTAINER='ncap-my-project'\n"),
+            "out={out}"
+        );
+        assert!(
+            out.contains("export NCAP_CACHE_DIR='/tmp/a'\\''b dir'\n"),
+            "out={out}"
+        );
+        // Fixed order: project, container, socket, cache, log.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 5, "out={out}");
+        assert!(lines[0].starts_with("export NCAP_PROJECT="), "out={out}");
+        assert!(lines[1].starts_with("export NCAP_CONTAINER="), "out={out}");
+        assert!(lines[2].starts_with("export NCAP_SOCKET="), "out={out}");
+        assert!(lines[3].starts_with("export NCAP_CACHE_DIR="), "out={out}");
+        assert!(lines[4].starts_with("export NCAP_LOG_DIR="), "out={out}");
+    }
+
+    #[test]
+    fn setup_env_explicit_wins() {
+        let lookup = env(vec![
+            ("NCAP_PROJECT_ROOT", "/tmp/my_project"),
+            ("NCAP_PROJECT", "explicit"),
+            ("NCAP_CONTAINER", "custom"),
+            ("NCAP_SOCKET", "/tmp/x.sock"),
+            ("NCAP_CACHE_DIR", "/tmp/c"),
+            ("NCAP_LOG_DIR", "/tmp/l"),
+        ]);
+        let out = setup_env(&lookup).expect("setup-env succeeds");
+        assert!(
+            out.contains("export NCAP_PROJECT='explicit'\n"),
+            "out={out}"
+        );
+        assert!(
+            out.contains("export NCAP_CONTAINER='custom'\n"),
+            "out={out}"
+        );
+    }
+
+    #[test]
+    fn setup_env_needs_root() {
+        let lookup = env(vec![]);
+        let err = setup_env(&lookup).expect_err("root is demanded");
+        assert!(matches!(
+            err,
+            Error::Missing {
+                var: "NCAP_PROJECT_ROOT"
+            }
+        ));
     }
 }

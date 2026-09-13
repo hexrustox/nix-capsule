@@ -139,6 +139,7 @@ impl Runtime {
         }
     }
 
+    // TODO quote paths
     /// `exec -it <name> <bash> -c "source <cache>/env && exec <bash>"` —
     /// interactive escape hatch. Inherits stdio so the user's terminal drives
     /// the container shell directly. Returns `Ok` on exit 0, else an error
