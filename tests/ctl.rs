@@ -338,6 +338,47 @@ fn init_refuses_when_a_demanded_var_is_missing() {
 }
 
 #[test]
+fn commands_refuse_watch_files_that_are_not_relative_files() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(root.join("adir")).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state dir");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    fake_runtime(&runtime_bin, &state, &runtime_log);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+
+    let cases = [
+        (r#"/abs/nix"#, "/abs/nix"),
+        (r#"../escape"#, "../escape"),
+        (r#"adir"#, "adir"),
+    ];
+    for (entry_json, entry) in cases {
+        let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+        env.insert(
+            "NCAP_WATCH_FILES".into(),
+            format!(r#"["{entry_json}"]"#),
+        );
+        let out = run_ctl(&env, &["status"]);
+        assert!(
+            !out.status.success(),
+            "watch entry `{entry}` must fail the command"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("NCAP_WATCH_FILES") && stderr.contains(entry),
+            "error must name the var and the entry `{entry}`: stderr={stderr}"
+        );
+    }
+}
+
+#[test]
 fn start_demands_full_env_including_nix_devshell_and_image() {
     let tmp = TempDir::new().expect("tempdir");
     let cache = tmp.path().join("cache");

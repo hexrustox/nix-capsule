@@ -74,6 +74,10 @@ pub enum Error {
         #[source]
         source: std::num::ParseIntError,
     },
+    #[error("`NCAP_WATCH_FILES` entry `{entry}` is not a project-root-relative path")]
+    NotRelativeWatchFile { entry: String },
+    #[error("`NCAP_WATCH_FILES` entry `{entry}` is not a file")]
+    WatchFileNotFile { entry: String },
     #[error("`NCAP_RUNTIME` must be `podman`, `docker`, got `{value}`")]
     BadRuntime { value: String },
     #[error("`NCAP_HARDEN` must be `true` or `false`, got `{value}`")]
@@ -98,6 +102,33 @@ fn parse_watch_files(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Stri
         var: "NCAP_WATCH_FILES",
         source,
     })
+}
+
+/// Every entry must be a project-root-relative path (`Path::is_relative`,
+/// no `..` component to escape the root); an entry that exists must be a
+/// file — the digest hashes it with `File::open` and `harden` bind-mounts
+/// it, so a directory there is an error now, not a permanently stale cache.
+/// Absent entries are fine (the digest hashes their absence), and a broken
+/// symlink counts as absent, matching `File::open`'s `NotFound`.
+fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), Error> {
+    for entry in entries {
+        let path = Path::new(entry);
+        if !path.is_relative()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(Error::NotRelativeWatchFile {
+                entry: entry.clone(),
+            });
+        }
+        if root.join(path).exists() && !root.join(path).is_file() {
+            return Err(Error::WatchFileNotFile {
+                entry: entry.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_runtime(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, Error> {
@@ -196,13 +227,15 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
     let timeout = parse_timeout(lookup)?;
     // Eagerly validate the JSON-array vars and harden on every command so
     // malformed values error even where a command does not consume them.
-    // TODO check is relative path
     let watch_files = parse_watch_files(lookup)?;
     let run_opts = parse_run_opts(lookup)?;
     let harden = parse_harden(lookup)?;
 
     let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
     let root = PathBuf::from(&root_str);
+    // Relative-path and file checks need the root; still eager on every
+    // command since `setup-env` never calls this function.
+    validate_watch_files(&root, &watch_files)?;
     // Derived vars are populated by `setup-env` in the shellHook; an empty
     // value here is a missing var naming it, not a derivation request.
     let project = demand(lookup, "NCAP_PROJECT")?;
@@ -342,6 +375,26 @@ mod tests {
     #[test_case(Some(r#"["k", 1]"#) => matches Err(Error::NotJsonArray { .. }) ; "non_string_entry_is_rejected")]
     fn watch_files_is_a_json_array_of_strings(raw: Option<&str>) -> Result<Vec<String>, Error> {
         parse_watch_files(&single("NCAP_WATCH_FILES", raw))
+    }
+
+    #[test_case(&[] => matches Ok(()) ; "empty_list_passes")]
+    #[test_case(&["file"] => matches Ok(()) ; "existing_relative_file_passes")]
+    #[test_case(&["dir/file"] => matches Ok(()) ; "nested_relative_file_passes")]
+    #[test_case(&["absent"] => matches Ok(()) ; "absent_entry_hashes_its_absence")]
+    #[test_case(&["link"] => matches Ok(()) ; "symlink_to_a_file_passes")]
+    #[test_case(&["broken"] => matches Ok(()) ; "dangling_symlink_counts_as_absent")]
+    #[test_case(&["/abs/file"] => matches Err(Error::NotRelativeWatchFile { entry }) if entry == "/abs/file" ; "absolute_entry_is_rejected")]
+    #[test_case(&["../escape"] => matches Err(Error::NotRelativeWatchFile { entry }) if entry == "../escape" ; "dotdot_escape_is_rejected")]
+    #[test_case(&["dir/../.."] => matches Err(Error::NotRelativeWatchFile { entry }) if entry == "dir/../.." ; "embedded_dotdot_is_rejected")]
+    #[test_case(&["dir"] => matches Err(Error::WatchFileNotFile { entry }) if entry == "dir" ; "existing_directory_is_rejected")]
+    fn watch_files_are_relative_files(entries: &[&str]) -> Result<(), Error> {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(root.path().join("dir")).expect("watched dir");
+        std::fs::write(root.path().join("file"), b"x").expect("watched file");
+        std::os::unix::fs::symlink("file", root.path().join("link")).expect("symlink");
+        std::os::unix::fs::symlink("nowhere", root.path().join("broken")).expect("dangling");
+        let owned: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+        validate_watch_files(root.path(), &owned)
     }
 
     #[test_case(None => matches Err(Error::Missing { var: "NCAP_RUN_OPTS" }) ; "unset_is_missing")]

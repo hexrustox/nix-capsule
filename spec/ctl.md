@@ -145,7 +145,12 @@ demands the full `ctl` set: `NCAP_PROJECT_ROOT`, `NCAP_PROJECT`,
 `NCAP_HARDEN`. A missing var is an error naming the var, and a set
 `NCAP_WATCH_FILES`/`NCAP_RUN_OPTS` that is not a JSON array of strings
 is an error naming the var; a `NCAP_HARDEN` that is not `true`/`false`
-is likewise an error. `NCAP_ENV_FORWARD` is validated by the Client
+is likewise an error. Each `NCAP_WATCH_FILES` entry must be
+project-root-relative — an absolute entry or one containing a `..`
+component is an error naming the var and the entry — and an entry that
+exists must be a file (absent entries hash their absence; a broken
+symlink counts as absent), avoiding a directory entry that would
+permanently read stale. `NCAP_ENV_FORWARD` is validated by the Client
 only. `setup-env` needs only `NCAP_PROJECT_ROOT`: it resolves
 explicit-wins-else-derived per § Project name and § XDG layout and prints
 `export VAR='…'` lines (single-quote-escaped, fixed order `PROJECT`,

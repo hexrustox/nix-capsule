@@ -14,80 +14,118 @@ let
     else
       "${builtins.typeOf v} `${toString v}`";
 
-  throwOpt =
-    opt: expected: v:
-    throw "option `${opt}`: expected ${expected}, got ${showReceived v}";
+  # ---- error builders ---------------------------------------------------------
+  mkErr =
+    opt: expected: got:
+    throw "option `${opt}`: expected ${expected}, got ${got}";
+
+  mkEntryErr =
+    opt: expected: got:
+    throw "option `${opt}`: expected ${expected}, got entry ${got}";
+
+  mkFieldErr =
+    opt: field: expected: got:
+    throw "option `${opt}`: expected wrapper `${field}` to be ${expected}, got ${got}";
 
   # ---- scalar checks (return the value on success) ---------------------------
-  checkString = opt: v: if builtins.isString v then v else throwOpt opt "string" v;
+  checkPrim =
+    expected: pred: opt: v:
+    if pred v then v else mkErr opt expected (showReceived v);
 
-  checkBool = opt: v: if builtins.isBool v then v else throwOpt opt "bool" v;
-
-  checkInt = opt: v: if builtins.isInt v then v else throwOpt opt "integer" v;
+  checkString = checkPrim "string" builtins.isString;
+  checkBool = checkPrim "bool" builtins.isBool;
+  checkInt = checkPrim "integer" builtins.isInt;
 
   # ---- list-of-strings check (returns the list on success) -------------------
   checkStringList =
     opt: v:
     if !builtins.isList v then
-      throwOpt opt "list of strings" v
+      mkErr opt "list of strings" (showReceived v)
     else
       map (
         e:
         if builtins.isString e then
           e
         else
-          throw "option `${opt}`: expected list of strings, got entry ${showReceived e}"
+          mkEntryErr opt "list of strings" (showReceived e)
       ) v;
 
-  # ---- wrappers check --------------------------------------------------------
+  checkFieldString =
+    opt: field: v:
+    if builtins.isString v then v else mkFieldErr opt field "a string" (showReceived v);
+
+  checkFieldStringList =
+    opt: field: v:
+    if !builtins.isList v then
+      mkFieldErr opt field "a list of strings" (showReceived v)
+    else
+      map (
+        e:
+        if builtins.isString e then
+          e
+        else
+          mkFieldErr opt field "a list of strings" "entry ${showReceived e}"
+      ) v;
+
+  # ---- wrappers check: returns normalized { name, command, env, cwd } --------
+  # String shorthand expands to `command = name; env = []; cwd = null`.
   checkWrappers =
     opt: v:
     if !builtins.isList v then
-      throwOpt opt "list of strings or attrsets" v
+      mkErr opt "list of strings or attrsets" (showReceived v)
     else
       map (
         elem:
         if builtins.isString elem then
-          elem
+          {
+            name = elem;
+            command = elem;
+            env = [ ];
+            cwd = null;
+          }
         else if builtins.isAttrs elem then
           let
-            hasName = elem ? name;
-            nameRaw =
-              if hasName then elem.name else throw "option `${opt}`: wrapper attrset missing required `name`";
             name =
-              if builtins.isString nameRaw then
-                nameRaw
+              if elem ? name then
+                checkFieldString opt "name" elem.name
               else
-                throw "option `${opt}`: expected wrapper `name` to be string, got ${showReceived nameRaw}";
-            commandRaw = if elem ? command then elem.command else name;
-            command =
-              if builtins.isString commandRaw then
-                commandRaw
-              else
-                throw "option `${opt}`: expected wrapper `command` to be string, got ${showReceived commandRaw}";
-            envRaw = if elem ? env then elem.env else [ ];
-            env =
-              if !builtins.isList envRaw then
-                throw "option `${opt}`: expected wrapper `env` to be list of strings, got ${showReceived envRaw}"
-              else
-                map (
-                  e:
-                  if builtins.isString e then
-                    e
-                  else
-                    throw "option `${opt}`: expected wrapper `env` to be list of strings, got entry ${showReceived e}"
-                ) envRaw;
-            cwdRaw = if elem ? cwd then elem.cwd else null;
+                throw "option `${opt}`: expected wrapper attrset to have a string `name`, got attrset without one";
+            command = if elem ? command then checkFieldString opt "command" elem.command else name;
+            env = checkFieldStringList opt "env" (elem.env or [ ]);
+            cwdRaw = elem.cwd or null;
             cwd =
               if cwdRaw == null || builtins.isString cwdRaw then
                 cwdRaw
               else
-                throw "option `${opt}`: expected wrapper `cwd` to be null or string, got ${showReceived cwdRaw}";
+                mkFieldErr opt "cwd" "null or a string" (showReceived cwdRaw);
           in
-          builtins.deepSeq [ name command env cwd ] elem
+          builtins.deepSeq [ name command env cwd ] {
+            inherit name command env cwd;
+          }
         else
-          throw "option `${opt}`: expected string or attrset, got ${showReceived elem}"
+          mkErr opt "a string or attrset" (showReceived elem)
       ) v;
+
+  # ---- per-option checkers (spec/flake-api.md § Type checks, ADR-0003) -------
+  checkers = {
+    project = checkString;
+    image = checkString;
+    devShell = checkString;
+    watchFiles = checkStringList;
+    envForward = checkStringList;
+    wrappers = checkWrappers;
+    extraOptions = checkStringList;
+    harden = checkBool;
+    timeout = checkInt;
+    socketPath = checkString;
+    containerName = checkString;
+    cacheDir = checkString;
+    logDir = checkString;
+    preShellHook = checkString;
+    postShellHook = checkString;
+    autoStart = checkBool;
+    runtime = checkString;
+  };
 in
 {
   mkShell =
@@ -112,72 +150,20 @@ in
       postShellHook ? "",
       autoStart ? true,
       runtime ? "podman",
-    }:
+    }@args:
     let
-      # ---- eval-time type checks (spec/flake-api.md § Type checks, ADR-0003) --
+      # ---- eval-time type checks ----------------------------------------------
       # Every option is checked before mkShellNoCC runs; a mismatch throws
       # naming the option, the expected shape, and the received type/value.
       # Null is accepted only where the table default is null. No coercions;
       # no Nix `path` values for any option.
-      checkedProject = checkString "project" project;
-      checkedImage = checkString "image" image;
-      checkedDevShell = checkString "devShell" devShell;
-      checkedWatchFiles = checkStringList "watchFiles" watchFiles;
-      checkedEnvForward = checkStringList "envForward" envForward;
-      checkedWrappers = checkWrappers "wrappers" wrappers;
-      checkedExtraOptions = checkStringList "extraOptions" extraOptions;
-      checkedHarden = checkBool "harden" harden;
-      checkedTimeout = checkInt "timeout" timeout;
-      checkedSocketPath = checkString "socketPath" socketPath;
-      checkedContainerName = checkString "containerName" containerName;
-      checkedCacheDir = checkString "cacheDir" cacheDir;
-      checkedLogDir = checkString "logDir" logDir;
-      checkedPreShellHook = checkString "preShellHook" preShellHook;
-      checkedPostShellHook = checkString "postShellHook" postShellHook;
-      checkedAutoStart = checkBool "autoStart" autoStart;
-      checkedRuntime = checkString "runtime" runtime;
+      checked = builtins.mapAttrs (opt: check: check opt args.${opt}) checkers;
 
       # Force all checks before building the shell. deepSeq catches lazy
       # list entries (plain seq only forces the list spine).
-      checkAll = builtins.deepSeq [
-        checkedProject
-        checkedImage
-        checkedDevShell
-        checkedWatchFiles
-        checkedEnvForward
-        checkedWrappers
-        checkedExtraOptions
-        checkedHarden
-        checkedTimeout
-        checkedSocketPath
-        checkedContainerName
-        checkedCacheDir
-        checkedLogDir
-        checkedPreShellHook
-        checkedPostShellHook
-        checkedAutoStart
-        checkedRuntime
-      ] true;
+      checkAll = builtins.deepSeq checked true;
 
-      # ---- wrappers normalization ----------------------------------------------
-      normalizedWrappers = map (
-        elem:
-        if builtins.isString elem then
-          {
-            name = elem;
-            command = elem;
-            env = [ ];
-            cwd = null;
-          }
-        else
-          {
-            name = elem.name;
-            command = if elem ? command then elem.command else elem.name;
-            env = if elem ? env then elem.env else [ ];
-            cwd = if elem ? cwd then elem.cwd else null;
-          }
-      ) checkedWrappers;
-
+      # ---- wrappers --------------------------------------------------------------
       mkWrapperScript =
         w:
         let
@@ -187,17 +173,17 @@ in
         in
         pkgs.writeShellScriptBin w.name "exec ncap${envFlags}${cwdFlag} ${cmdArg} \"$@\"";
 
-      wrapperBins = map mkWrapperScript normalizedWrappers;
+      wrapperBins = map mkWrapperScript checked.wrappers;
 
       # ---- JSON-array vars ----------------------------------------------------
-      watchFilesJson = builtins.toJSON checkedWatchFiles;
-      runOptsJson = builtins.toJSON checkedExtraOptions;
-      envForwardJson = builtins.toJSON checkedEnvForward;
+      watchFilesJson = builtins.toJSON checked.watchFiles;
+      runOptsJson = builtins.toJSON checked.extraOptions;
+      envForwardJson = builtins.toJSON checked.envForward;
 
       # ---- shellHook construction ---------------------------------------------
       # Order: preHook → export NCAP_PROJECT_ROOT → setup-env → guarded watch_file per entry → init when autoStart → postHook
-      watchFileLines = lib.optionalString (checkedWatchFiles != [ ]) "[ -n \"\${DIRENV_DIR:-}\" ] && watch_file ${
-        lib.concatMapStringsSep " " lib.escapeShellArg checkedWatchFiles
+      watchFileLines = lib.optionalString (checked.watchFiles != [ ]) "command -v watch_file >/dev/null && watch_file ${
+        lib.concatMapStringsSep " " lib.escapeShellArg checked.watchFiles
       }";
 
       # The setup-env call must not abort shell entry on failure; wrap with warning.
@@ -208,7 +194,7 @@ in
       '';
 
       # The init call must not abort shell entry on failure; wrap with warning.
-      initHook = lib.optionalString checkedAutoStart ''
+      initHook = lib.optionalString checked.autoStart ''
         if ! ncap-ctl init; then
           echo "ncap-ctl: init failed (run \`ncap-ctl init\` to retry; wrapped commands will hint on connect)" >&2
         fi
@@ -216,12 +202,12 @@ in
 
       shellHookFragments = lib.concatStringsSep "\n" (
         lib.filter (s: s != "") [
-          checkedPreShellHook
+          checked.preShellHook
           ''export NCAP_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"''
           setupEnvHook
           watchFileLines
           initHook
-          checkedPostShellHook
+          checked.postShellHook
         ]
       );
     in
@@ -229,19 +215,19 @@ in
       pkgs.mkShellNoCC {
         name = "nix-capsule-shell";
 
-        NCAP_PROJECT = checkedProject;
-        NCAP_CONTAINER = checkedContainerName;
-        NCAP_SOCKET = checkedSocketPath;
-        NCAP_CACHE_DIR = checkedCacheDir;
-        NCAP_LOG_DIR = checkedLogDir;
-        NCAP_IMAGE = checkedImage;
-        NCAP_DEVSHELL = checkedDevShell;
+        NCAP_PROJECT = checked.project;
+        NCAP_CONTAINER = checked.containerName;
+        NCAP_SOCKET = checked.socketPath;
+        NCAP_CACHE_DIR = checked.cacheDir;
+        NCAP_LOG_DIR = checked.logDir;
+        NCAP_IMAGE = checked.image;
+        NCAP_DEVSHELL = checked.devShell;
         NCAP_WATCH_FILES = watchFilesJson;
         NCAP_RUN_OPTS = runOptsJson;
         NCAP_ENV_FORWARD = envForwardJson;
-        NCAP_TIMEOUT = toString checkedTimeout;
-        NCAP_HARDEN = if checkedHarden then "true" else "false";
-        NCAP_RUNTIME = checkedRuntime;
+        NCAP_TIMEOUT = toString checked.timeout;
+        NCAP_HARDEN = if checked.harden then "true" else "false";
+        NCAP_RUNTIME = checked.runtime;
         NCAP_SERVER = "${pkgs.ncap}/bin/ncap-server";
         NCAP_NIX = "${pkgs.nix}/bin/nix";
         NCAP_BASH = "${pkgs.bash}/bin/bash";
