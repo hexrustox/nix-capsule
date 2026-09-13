@@ -13,7 +13,7 @@ contract).
 | `start` | Stamp guard, probe: live ⇒ done ("already running"). Not live ⇒ run the Container detached, then await readiness (§ start flow). |
 | `stop` | `<runtime> stop <name>` — SIGTERM to the container's init process (the Server), graceful drain. Idempotent: not running ⇒ success. A failed stop whose follow-up probe shows not-running ⇒ success. |
 | `restart` | Non-fatal `stop`, then `init` (which re-ensures the Cache before starting). |
-| `enter` | `<runtime> exec -it <name> <bash> -c "source <cache>/env && exec <bash>"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
+| `enter` | `<runtime> exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Container running? Socket connectable (§ Liveness)? Cache fresh/stale/missing (§ Freshness and the digest)? |
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
 | `clean` | Stop the Container, remove the (stopped) container, clear this project's Cache and log contents (best-effort dir removal, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
@@ -50,12 +50,13 @@ The container invocation:
 
 ```
 <runtime> run -d --name <container> <mounts and options> -- <image> <NCAP_BASH> \
-  -c "source <cache>/env && exec <NCAP_SERVER> --socket <socket> --log-dir <log-dir> --timeout <timeout>"
+  -c "source '<cache>/env' && exec '<NCAP_SERVER>' --socket '<socket>' --log-dir '<log-dir>' --timeout <timeout>"
 ```
 
 `<NCAP_BASH>` and `<NCAP_SERVER>` are the absolute store paths from
 `NCAP_BASH` and `NCAP_SERVER` — the image provides only the sandbox, so the
-launch must not rely on its `PATH` for these binaries.
+launch must not rely on its `PATH` for these binaries. Every interpolated
+path is single-quote-escaped.
 
 Detached; `exec` makes the Server the container's init process.
 

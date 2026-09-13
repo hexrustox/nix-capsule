@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::shell::shell_escape;
 use crate::ctl::paths;
 
 /// A `ncap-ctl` subcommand: the variant selects the control flow and the
@@ -231,11 +232,6 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
         bash: PathBuf::from(bash),
         devshell,
     })
-}
-
-/// Single-quote-escape a value for `export VAR='...'` output.
-fn shell_escape(value: &str) -> String {
-    value.replace('\'', "'\\''")
 }
 
 /// Resolve the five project-scoped vars and render them as bash `export`

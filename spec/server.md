@@ -1,7 +1,7 @@
 # Server (`ncap-server`)
 
 The Server runs inside the container as its init process — the launcher is
-`bash -c "source <cache>/env && exec ncap-server …"`, whose trailing `exec`
+`bash -c "source '<cache>/env' && exec ncap-server …"`, whose trailing `exec`
 makes the Server the process the runtime tracks, so the Server inherits the
 container shell's environment from the sourced Env dump and children resolve
 its tools through plain `PATH`. No Nix evaluation, daemon, or image content

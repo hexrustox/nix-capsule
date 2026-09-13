@@ -1621,22 +1621,22 @@ esac
         !run_line.contains(".git"),
         "unexpected .git mount without git dir: {run_line}"
     );
-    // Launch command shape: source dump && exec server with flags
-    let expected_source = format!("source {}/env", cache.display());
+    // Launch command shape: quoted source dump && quoted exec server with flags
+    let expected_source = format!("source '{}/env'", cache.display());
     assert!(
         run_line.contains(&expected_source),
         "missing source dump: {run_line}"
     );
     assert!(
-        run_line.contains("&& exec /nix/store/fake/bin/ncap-server"),
+        run_line.contains("&& exec '/nix/store/fake/bin/ncap-server'"),
         "missing exec server: {run_line}"
     );
     assert!(
-        run_line.contains(&format!("--socket {}", sock.display())),
+        run_line.contains(&format!("--socket '{}'", sock.display())),
         "missing --socket flag: {run_line}"
     );
     assert!(
-        run_line.contains(&format!("--log-dir {}", logs.display())),
+        run_line.contains(&format!("--log-dir '{}'", logs.display())),
         "missing --log-dir flag: {run_line}"
     );
     assert!(

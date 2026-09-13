@@ -1,35 +1,49 @@
 //! Runtime adapter: podman or docker. Both
 //! runtimes share the same argument surface; probes use Go-template `inspect`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
 
 use super::paths::env_file;
+use super::shell::shell_escape;
 
-/// The OCI runtime executable.
+/// Arguments of the ncap-server binary: exactly its CLI surface
+/// (`--socket`, `--log-dir`, `--timeout`).
+#[derive(Clone, Debug)]
+pub struct ServerArgs {
+    pub socket: PathBuf,
+    pub log_dir: PathBuf,
+    pub timeout: u64,
+}
+
+/// The OCI runtime executable, scoped to a single container: the executable
+/// name, the container name it manages, and the bash path used in commands.
 #[derive(Clone, Debug)]
 pub struct Runtime {
     bin: String,
+    name: String,
+    bash: PathBuf,
 }
 
 impl Runtime {
-    pub fn new(bin: String) -> Self {
-        Self { bin }
+    pub fn new(bin: String, name: String, bash: PathBuf) -> Self {
+        Self { bin, name, bash }
     }
 
     pub fn bin(&self) -> &str {
         &self.bin
     }
 
-    /// `inspect -f {{.State.Running}} <name>` — `true` means the container's
+    /// `inspect -f {{.State.Running}} <name>` against the container it was
+    /// constructed with — `true` means the container's
     /// init process (the server) is reportedly running. This alone is not
     /// liveness (see `is_live`): any spawn or parse failure is treated as
     /// not-running.
-    pub async fn is_running(&self, name: &str) -> bool {
+    pub async fn is_running(&self) -> bool {
         let output = Command::new(&self.bin)
-            .args(["inspect", "-f", "{{.State.Running}}", name])
+            .args(["inspect", "-f", "{{.State.Running}}", &self.name])
             .output()
             .await;
         match output {
@@ -42,8 +56,8 @@ impl Runtime {
     /// One predicate serves both the `init` liveness probe and the `start`
     /// readiness poll. `Running` alone is not live (the container is still
     /// sourcing the Env dump ahead of the Server's bind).
-    pub async fn is_live(&self, name: &str, socket: &Path) -> bool {
-        if !self.is_running(name).await {
+    pub async fn is_live(&self, socket: &Path) -> bool {
+        if !self.is_running().await {
             return false;
         }
         tokio::net::UnixStream::connect(socket).await.is_ok()
@@ -51,9 +65,9 @@ impl Runtime {
 
     /// Raw `State` JSON via `inspect -f {{json .State}} <name>`, for the
     /// "never became live" failure report.
-    pub async fn inspect_state(&self, name: &str) -> String {
+    pub async fn inspect_state(&self) -> String {
         let output = Command::new(&self.bin)
-            .args(["inspect", "-f", "{{json .State}}", name])
+            .args(["inspect", "-f", "{{json .State}}", &self.name])
             .output()
             .await;
         match output {
@@ -66,25 +80,38 @@ impl Runtime {
     }
 
     /// `run -d --name <name> <mounts and options> -- <image> <bash> -c <cmd>` —
-    /// detached. `extra_args` are the mounts and options assembled by the ctl
+    /// detached, against the container it was constructed with. Renders the
+    /// server launch command as
+    /// `"source '<env_file>' && exec '<server>' --socket '<socket>' --log-dir '<log_dir>' --timeout <timeout>"`
+    /// from the raw `env_file`/`server` paths plus the server CLI surface in
+    /// `args`.
+    /// `extra_args` are the mounts and options assembled by the ctl
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
     /// Returns the container id on success, or the combined stderr/stdout on
     /// failure.
     pub async fn run_detached(
         &self,
-        name: &str,
         image: &str,
-        bash: &Path,
-        exec_cmd: &str,
+        env_file: &Path,
+        server: &Path,
+        args: &ServerArgs,
         extra_args: &[String],
     ) -> Result<String, String> {
+        let exec_cmd = format!(
+            "source '{}' && exec '{}' --socket '{}' --log-dir '{}' --timeout {}",
+            shell_escape(&env_file.to_string_lossy()),
+            shell_escape(&server.to_string_lossy()),
+            shell_escape(&args.socket.to_string_lossy()),
+            shell_escape(&args.log_dir.to_string_lossy()),
+            args.timeout
+        );
         let mut cmd = Command::new(&self.bin);
-        cmd.args(["run", "-d", "--name", name]);
+        cmd.args(["run", "-d", "--name", &self.name]);
         cmd.args(extra_args);
         cmd.args(["--", image]);
         let output = cmd
-            .arg(bash)
-            .args(["-c", exec_cmd])
+            .arg(&self.bash)
+            .args(["-c", &exec_cmd])
             .output()
             .await
             .map_err(|err| err.to_string())?;
@@ -100,9 +127,9 @@ impl Runtime {
     }
 
     /// `stop <name>`.
-    pub async fn stop(&self, name: &str) -> Result<String, String> {
+    pub async fn stop(&self) -> Result<String, String> {
         let output = Command::new(&self.bin)
-            .args(["stop", name])
+            .args(["stop", &self.name])
             .output()
             .await
             .map_err(|err| err.to_string())?;
@@ -116,9 +143,9 @@ impl Runtime {
     /// Whether a container with `name` exists at all (running or stopped):
     /// `inspect <name>` succeeding. Used by the start flow to remove an
     /// exists-but-stopped container before launch.
-    pub async fn exists(&self, name: &str) -> bool {
+    pub async fn exists(&self) -> bool {
         match Command::new(&self.bin)
-            .args(["inspect", name])
+            .args(["inspect", &self.name])
             .output()
             .await
         {
@@ -128,9 +155,9 @@ impl Runtime {
     }
 
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
-    pub async fn remove(&self, name: &str) -> Result<String, String> {
+    pub async fn remove(&self) -> Result<String, String> {
         let output = Command::new(&self.bin)
-            .args(["rm", name])
+            .args(["rm", &self.name])
             .output()
             .await
             .map_err(|err| err.to_string())?;
@@ -141,26 +168,21 @@ impl Runtime {
         }
     }
 
-    // TODO quote paths
-    /// `exec -it <name> <bash> -c "source <cache>/env && exec <bash>"` —
-    /// interactive escape hatch. Inherits stdio so the user's terminal drives
+    /// `exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'" —
+    /// interactive escape hatch against the container it was constructed with.
+    /// Inherits stdio so the user's terminal drives
     /// the container shell directly. Returns `Ok` on exit 0, else an error
     /// naming the exit status.
-    pub async fn exec_interactive(
-        &self,
-        name: &str,
-        bash: &Path,
-        cache_dir: &Path,
-    ) -> Result<(), String> {
+    pub async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), String> {
         let env_file = env_file(cache_dir);
         let cmd_str = format!(
-            "source {} && exec {}",
-            &env_file.to_string_lossy(),
-            &bash.to_string_lossy()
+            "source '{}' && exec '{}'",
+            shell_escape(&env_file.to_string_lossy()),
+            shell_escape(&self.bash.to_string_lossy())
         );
         let status = Command::new(&self.bin)
-            .args(["exec", "-it", name])
-            .arg(bash)
+            .args(["exec", "-it", &self.name])
+            .arg(&self.bash)
             .args(["-c", &cmd_str])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())

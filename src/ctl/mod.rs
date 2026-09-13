@@ -6,6 +6,7 @@ pub mod digest;
 pub mod nix;
 pub mod paths;
 pub mod runtime;
+pub mod shell;
 pub mod stamp;
 
 use std::fs;
@@ -75,9 +76,9 @@ async fn init(cfg: Config) -> Result<(), String> {
     let project = &cfg.project;
     stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
 
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     let socket = &cfg.socket;
-    let live = rt.is_live(&cfg.container, socket).await;
+    let live = rt.is_live(socket).await;
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
 
     match (live, freshness) {
@@ -89,7 +90,7 @@ async fn init(cfg: Config) -> Result<(), String> {
             // Running but stale/missing → re-eval + restart.
             ensure_cache(&cfg).await?;
             // Non-fatal stop.
-            let _ = rt.stop(&cfg.container).await;
+            let _ = rt.stop().await;
             start_inner(&cfg).await
         }
         (false, _) => {
@@ -105,9 +106,9 @@ async fn start(cfg: Config) -> Result<(), String> {
     let project = &cfg.project;
     stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
 
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     let socket = &cfg.socket;
-    if rt.is_live(&cfg.container, socket).await {
+    if rt.is_live(socket).await {
         eprintln!("container `{}` is already running", cfg.container);
         return Ok(());
     }
@@ -115,12 +116,12 @@ async fn start(cfg: Config) -> Result<(), String> {
 }
 
 async fn stop(cfg: Config) -> Result<(), String> {
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
-    if !rt.is_running(&cfg.container).await {
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    if !rt.is_running().await {
         eprintln!("container `{}` is not running", cfg.container);
         return Ok(());
     }
-    match rt.stop(&cfg.container).await {
+    match rt.stop().await {
         Ok(_) => {
             eprintln!("container `{}` stopped", cfg.container);
             Ok(())
@@ -128,7 +129,7 @@ async fn stop(cfg: Config) -> Result<(), String> {
         Err(stderr) => {
             // If stop failed but the container is now not-running, treat as
             // success (idempotent).
-            if !rt.is_running(&cfg.container).await {
+            if !rt.is_running().await {
                 eprintln!("container `{}` is not running", cfg.container);
                 Ok(())
             } else {
@@ -141,14 +142,14 @@ async fn stop(cfg: Config) -> Result<(), String> {
 async fn restart(cfg: Config) -> Result<(), String> {
     // Non-fatal stop, then init. Resolution is uniform, so the Restart cfg
     // already carries Init's fields — dispatch directly.
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
-    let _ = rt.stop(&cfg.container).await;
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let _ = rt.stop().await;
     init(cfg).await
 }
 
 async fn status(cfg: Config) -> Result<(), String> {
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
-    let running = rt.is_running(&cfg.container).await;
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let running = rt.is_running().await;
 
     let socket_connectable = UnixStream::connect(&cfg.socket).await.is_ok();
 
@@ -174,15 +175,14 @@ async fn status(cfg: Config) -> Result<(), String> {
 
 async fn enter(cfg: Config) -> Result<(), String> {
     let cache_dir = &cfg.cache_dir;
-    let bash = &cfg.bash;
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
-    if !rt.is_running(&cfg.container).await {
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    if !rt.is_running().await {
         return Err(format!(
             "container `{}` is not running; run `ncap-ctl init` to start it",
             cfg.container
         ));
     }
-    rt.exec_interactive(&cfg.container, bash, cache_dir).await
+    rt.exec_interactive(cache_dir).await
 }
 
 async fn log(cfg: Config) -> Result<(), String> {
@@ -208,12 +208,12 @@ async fn log(cfg: Config) -> Result<(), String> {
 }
 
 async fn clean(cfg: Config) -> Result<(), String> {
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     // Stop the container (best-effort, idempotent) then remove it.
-    if rt.is_running(&cfg.container).await {
-        let _ = rt.stop(&cfg.container).await;
+    if rt.is_running().await {
+        let _ = rt.stop().await;
     }
-    let _ = rt.remove(&cfg.container).await;
+    let _ = rt.remove().await;
 
     // Clear cache/log contents entry-by-entry, then best-effort remove the
     // dirs themselves when empty. Never `remove_dir_all` the top dirs: an
@@ -286,7 +286,6 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     let socket = &cfg.socket;
     let log_dir = &cfg.log_dir;
     let server = &cfg.server;
-    let bash = &cfg.bash;
     let image = &cfg.image;
 
     // The env dump must exist — otherwise the container cannot source it.
@@ -300,43 +299,52 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     }
     fs::create_dir_all(log_dir).map_err(|err| err.to_string())?;
 
-    let exec_cmd = format!(
-        "source {} && exec {} --socket {} --log-dir {} --timeout {}",
-        &env_file(cache_dir).to_string_lossy(),
-        &server.to_string_lossy(),
-        &socket.to_string_lossy(),
-        &log_dir.to_string_lossy(),
-        cfg.timeout
-    );
-
     // Assemble mount set and options. Expansion errors are fatal before the
     // runtime is ever invoked, naming the unset variable.
     let mount_args = build_runtime_args(cfg)?;
 
-    let rt = runtime::Runtime::new(cfg.runtime.clone());
+    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+
+    let server_args = runtime::ServerArgs {
+        socket: socket.clone(),
+        log_dir: log_dir.clone(),
+        timeout: cfg.timeout,
+    };
 
     // A container with the target name that exists but is not running is
     // removed before launch (spec/ctl.md § start flow).
-    if !rt.is_running(&cfg.container).await && rt.exists(&cfg.container).await {
-        let _ = rt.remove(&cfg.container).await;
+    if !rt.is_running().await && rt.exists().await {
+        let _ = rt.remove().await;
     }
 
     let run_result = rt
-        .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
+        .run_detached(
+            image,
+            &env_file(cache_dir),
+            server,
+            &server_args,
+            &mount_args,
+        )
         .await;
 
     match run_result {
         Ok(_) => {}
         Err(stderr) if runtime::is_name_in_use(&stderr) => {
             // Concurrent-start race: re-inspect.
-            if rt.is_running(&cfg.container).await {
+            if rt.is_running().await {
                 eprintln!("container `{}` is already running", cfg.container);
                 return Ok(());
             }
             // Dead container with the same name — remove and retry once.
-            let _ = rt.remove(&cfg.container).await;
+            let _ = rt.remove().await;
             match rt
-                .run_detached(&cfg.container, image, bash, &exec_cmd, &mount_args)
+                .run_detached(
+                    image,
+                    &env_file(cache_dir),
+                    server,
+                    &server_args,
+                    &mount_args,
+                )
                 .await
             {
                 Ok(_) => {}
@@ -351,7 +359,7 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     // Poll the liveness predicate until live within the deadline.
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout);
     loop {
-        if rt.is_live(&cfg.container, socket).await {
+        if rt.is_live(socket).await {
             eprintln!("container `{}` is running", cfg.container);
             return Ok(());
         }
@@ -361,7 +369,7 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let state = rt.inspect_state(&cfg.container).await;
+    let state = rt.inspect_state().await;
     Err(format!(
         "container `{}` never became live within {}s (state: {state})",
         cfg.container, cfg.timeout
