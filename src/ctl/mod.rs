@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 
 use config::{Cmd, Config};
-use paths::{env_file, profile_file};
+use paths::{env_file, hash_file, profile_file, project_stamp_file};
 
 /// Entry point from the binary: resolve `cmd` from the process environment and
 /// dispatch. Returns the exit code the process should report.
@@ -215,12 +215,14 @@ async fn clean(cfg: Config) -> Result<(), String> {
     }
     let _ = rt.remove().await;
 
-    // Clear cache/log contents entry-by-entry, then best-effort remove the
-    // dirs themselves when empty. Never `remove_dir_all` the top dirs: an
-    // explicit `NCAP_CACHE_DIR`/`NCAP_LOG_DIR` may point into a shared dir.
-    // TODO target specific files
-    remove_dir_contents(&cfg.cache_dir)?;
-    remove_dir_contents(&cfg.log_dir)?;
+    // Remove only the project's own files: the four named cache files, the
+    // profile generation links `nix print-dev-env` leaves beside the
+    // profile, and the `ncap-server-*.log` files. Never wipe the whole
+    // cache/log dir contents: an explicit `NCAP_CACHE_DIR`/`NCAP_LOG_DIR`
+    // may point into a shared dir, where a recursive delete would destroy
+    // unrelated files — the same rationale as the socket parent below.
+    clean_cache_dir(&cfg.cache_dir)?;
+    clean_log_dir(&cfg.log_dir)?;
     if let Some(parent) = cfg.socket.parent() {
         // Delete the socket file itself, then best-effort remove the parent
         // dir if empty. Never `remove_dir_all` the parent: an explicit
@@ -389,22 +391,71 @@ fn pager_command() -> (String, Vec<String>) {
     ("less".to_owned(), vec!["-R".to_owned()])
 }
 
-/// Clear the entries inside `dir`, then best-effort remove `dir` itself when
-/// empty. Never `remove_dir_all` the top dir: an explicit `NCAP_CACHE_DIR`
-/// or `NCAP_LOG_DIR` may point into a shared dir, where a recursive delete
-/// would destroy unrelated files — the same rationale as the socket parent
-/// in `clean`. Removal failure of the (now-empty) dir itself is non-fatal.
-fn remove_dir_contents(dir: &Path) -> Result<(), String> {
-    let entries = match fs::read_dir(dir) {
+/// Remove the project's cache files: the four named files of the cache
+/// layout (`env`, `hash`, `profile`, `project`) plus the profile generation
+/// links (`profile-<N>-link`) that `nix print-dev-env` creates beside the
+/// profile. Anything else in the dir is left untouched. Then best-effort
+/// remove the dir itself when empty.
+fn clean_cache_dir(cache_dir: &Path) -> Result<(), String> {
+    for file in [
+        env_file(cache_dir),
+        hash_file(cache_dir),
+        profile_file(cache_dir),
+        project_stamp_file(cache_dir),
+    ] {
+        remove_file_if_exists(&file)?;
+    }
+    remove_profile_generation_links(cache_dir)?;
+    // Non-fatal: non-empty (foreign files), permission, ...
+    let _ = fs::remove_dir(cache_dir);
+    Ok(())
+}
+
+/// Remove every `ncap-server-<digits>.log` file in the log dir, leaving any
+/// other entry untouched. Then best-effort remove the dir itself when empty.
+fn clean_log_dir(log_dir: &Path) -> Result<(), String> {
+    let entries = match fs::read_dir(log_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err.to_string()),
     };
     for entry in entries {
         let entry = entry.map_err(|err| err.to_string())?;
+        let name = entry.file_name();
+        if paths::parse_server_log_epoch(&name.to_string_lossy()).is_some() {
+            remove_file_if_exists(&entry.path())?;
+        }
+    }
+    // Non-fatal: non-empty (foreign files), permission, ...
+    let _ = fs::remove_dir(log_dir);
+    Ok(())
+}
+
+/// Remove every `profile-<N>-link` entry in `cache_dir`, the generation
+/// links `nix print-dev-env` maintains for the profile. A symlink is removed
+/// itself, never followed (`symlink_metadata`); only a real directory
+/// recurses.
+fn remove_profile_generation_links(cache_dir: &Path) -> Result<(), String> {
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let name = entry.file_name();
+        let is_link = name
+            .to_string_lossy()
+            .strip_prefix("profile-")
+            .is_some_and(|rest| {
+                rest.strip_suffix("-link").is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+            });
+        if !is_link {
+            continue;
+        }
         let path = entry.path();
-        // `symlink_metadata` so a symlink inside is removed itself, never
-        // followed; only real directories recurse (one level, on the child).
         let file_type = fs::symlink_metadata(&path)
             .map_err(|err| err.to_string())?
             .file_type();
@@ -414,8 +465,16 @@ fn remove_dir_contents(dir: &Path) -> Result<(), String> {
             fs::remove_file(&path).map_err(|err| err.to_string())?;
         }
     }
-    let _ = fs::remove_dir(dir);
     Ok(())
+}
+
+/// Remove `path`, treating absence as success.
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {

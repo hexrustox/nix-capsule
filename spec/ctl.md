@@ -16,7 +16,7 @@ contract).
 | `enter` | `<runtime> exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Container running? Socket connectable (§ Liveness)? Cache fresh/stale/missing (§ Freshness and the digest)? |
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
-| `clean` | Stop the Container, remove the (stopped) container, clear this project's Cache and log contents (best-effort dir removal, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
+| `clean` | Stop the Container, remove the (stopped) container, remove this project's cache files (the four named cache files plus the `profile-<N>-link` generation links) and all `ncap-server-*.log` files in the log dir (best-effort dir removal when empty, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
 | `setup-env` | Resolve the five project-scoped vars and print them as `export` lines for the Host shell to source. Needs only `NCAP_PROJECT_ROOT` (§ NCAP_* contract). Never starts containers, never touches the Cache. |
 
@@ -198,10 +198,11 @@ The first thing `init`/`start`/`restart` do with the Cache: read
 error — "project name `<name>` is already keyed to root `<path>`; set
 `project`" — two checkouts of one repo must never share a
 socket/container/cache. Absent ⇒ write it (creating the Cache dir if
-needed). The same root passes silently. `clean` clears the project-keyed
-Cache and log contents (best-effort dir removal) and deletes the socket
-file + best-effort parent dir, stamp included — never recursive on an
-explicit path that may be shared.
+needed). The same root passes silently. `clean` removes the project-keyed
+cache files — the four named files plus the `profile-<N>-link` generation
+links — and every `ncap-server-*.log` file in the log dir (best-effort dir
+removal when empty), and deletes the socket file + best-effort parent dir,
+stamp included — never recursive on an explicit path that may be shared.
 
 ## Freshness and the digest
 

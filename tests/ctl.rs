@@ -1182,6 +1182,152 @@ fn stop_is_idempotent() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Clean: targeted file removal, shared-dir safety
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clean_removes_project_files_and_spares_foreign_entries() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::write(state.join("running"), "false").expect("running");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    fake_runtime(&runtime_bin, &state, &runtime_log);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+
+    // Seed the full cache layout plus a generation link and a foreign file.
+    fs::create_dir_all(&cache).expect("cache");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("profile"), "profile").expect("profile");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    fs::write(cache.join("profile-1-link"), "link").expect("gen link");
+    fs::write(cache.join("unrelated.txt"), "keep me").expect("foreign cache file");
+
+    // Seed server logs plus a foreign file in the log dir.
+    fs::create_dir_all(&logs).expect("logs");
+    fs::write(logs.join("ncap-server-1000.log"), "old").expect("log 1");
+    fs::write(logs.join("ncap-server-2000.log"), "new").expect("log 2");
+    fs::write(logs.join("not-a-server-log.txt"), "keep me").expect("foreign log file");
+
+    // Seed the socket and a sibling file in its parent dir.
+    fs::create_dir_all(sock.parent().unwrap()).expect("sock dir");
+    fs::write(&sock, "socket").expect("socket file");
+    let sibling = sock.parent().unwrap().join("sibling.txt");
+    fs::write(&sibling, "keep me").expect("sibling file");
+
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    let out = run_ctl(&env, &["clean"]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // All four cache files plus the generation link are gone.
+    assert!(!cache.join("env").exists(), "env must be removed");
+    assert!(!cache.join("hash").exists(), "hash must be removed");
+    assert!(!cache.join("profile").exists(), "profile must be removed");
+    assert!(!cache.join("project").exists(), "stamp must be removed");
+    assert!(
+        !cache.join("profile-1-link").exists(),
+        "gen link must be removed"
+    );
+    // The foreign cache file survives, so the dir stays.
+    assert!(
+        cache.join("unrelated.txt").is_file(),
+        "foreign cache file must survive"
+    );
+    assert!(cache.is_dir(), "non-empty cache dir must survive");
+
+    // Server logs are gone; the foreign log file survives.
+    assert!(
+        !logs.join("ncap-server-1000.log").exists(),
+        "server log 1 must be removed"
+    );
+    assert!(
+        !logs.join("ncap-server-2000.log").exists(),
+        "server log 2 must be removed"
+    );
+    assert!(
+        logs.join("not-a-server-log.txt").is_file(),
+        "foreign log file must survive"
+    );
+    assert!(logs.is_dir(), "non-empty log dir must survive");
+
+    // The socket file is gone; the sibling survives and the parent stays.
+    assert!(!sock.exists(), "socket file must be removed");
+    assert!(sibling.is_file(), "socket-dir sibling must survive");
+    assert!(
+        sock.parent().unwrap().is_dir(),
+        "non-empty socket parent must survive"
+    );
+}
+
+#[test]
+fn clean_removes_empty_dirs_and_missing_paths_are_fine() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(&root).expect("root");
+    let cache = tmp.path().join("cache");
+    let logs = tmp.path().join("logs");
+    let sock = tmp.path().join("sock/ncap.sock");
+    let state = tmp.path().join("state");
+    fs::create_dir_all(&state).expect("state");
+    fs::write(state.join("running"), "false").expect("running");
+    let runtime_log = tmp.path().join("runtime.log");
+    let nix_log = tmp.path().join("nix.log");
+    let runtime_bin = tmp.path().join("fake-runtime");
+    let nix_bin = tmp.path().join("fake-nix");
+    fake_runtime(&runtime_bin, &state, &runtime_log);
+    fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
+
+    // Seed only the four cache files and one log: no foreign entries, so
+    // clean should empty both dirs and best-effort remove them.
+    fs::create_dir_all(&cache).expect("cache");
+    fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+    fs::write(cache.join("hash"), "ef46db3751d8e999").expect("hash");
+    fs::write(cache.join("profile"), "profile").expect("profile");
+    fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+    fs::create_dir_all(&logs).expect("logs");
+    fs::write(logs.join("ncap-server-1000.log"), "log").expect("log");
+    fs::create_dir_all(sock.parent().unwrap()).expect("sock dir");
+    fs::write(&sock, "socket").expect("socket file");
+
+    let env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
+    let out = run_ctl(&env, &["clean"]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!cache.exists(), "emptied cache dir should be removed");
+    assert!(!logs.exists(), "emptied log dir should be removed");
+    assert!(!sock.exists(), "socket file must be removed");
+    assert!(
+        !sock.parent().unwrap().exists(),
+        "emptied socket parent should be removed"
+    );
+
+    // A second clean with nothing left (dirs absent) must still succeed.
+    let out2 = run_ctl(&env, &["clean"]);
+    assert!(
+        out2.status.success(),
+        "clean twice: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+}
+
 #[test]
 fn restart_tolerates_a_stopped_container() {
     let tmp = TempDir::new().expect("tempdir");
