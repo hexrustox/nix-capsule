@@ -13,16 +13,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use nix_capsule::protocol::{Exit, Message};
+use nix_capsule::protocol::Message;
 use test_case::test_case;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::time::sleep;
 
-use common::probe::{
-    PHASE_LIMIT, read_frames_until, send_request, terminal_of, wait_for_flag, wait_for_marker,
-};
+use common::probe::{PHASE_LIMIT, read_frames_until, send_request, wait_for_flag, wait_for_marker};
 use common::{Client, Server, bin_path};
+
+use crate::common::probe::assert_clean_exit;
 
 /// How long a group has to die once the shutdown signal landed: the TERM is
 /// sent immediately, and the trap it fires writes the marker.
@@ -264,14 +264,7 @@ async fn a_connection_finishing_inside_the_grace_window_completes_normally() {
             .any(|message| matches!(message, Message::ServerStopping)),
         "the shutdown must be announced: frames={frames:?}"
     );
-    assert_eq!(
-        terminal_of(&frames),
-        Some(&Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })),
-        "the child's own exit must complete normally: frames={frames:?}"
-    );
+    assert_clean_exit(&frames, "the child's own exit must complete normally");
     assert!(
         closed_cleanly,
         "the server must close cleanly after the terminal frame"

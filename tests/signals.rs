@@ -16,6 +16,8 @@ use common::probe::{
     PHASE_LIMIT, Raw, read_frames_until, send_request, stdout_of, terminal_of, wait_for_flag,
 };
 
+use crate::common::probe::assert_clean_exit;
+
 /// Bound for group-wide delivery: the signal must clear the whole group well
 /// before a survivor's own 30-second `sleep` would end on its own.
 const GROUP_LIMIT: Duration = Duration::from_secs(10);
@@ -60,18 +62,6 @@ fn assert_no_error_frames(frames: &[Message]) {
             .iter()
             .any(|message| matches!(message, Message::Error(_))),
         "unexpected Error frames: {frames:?}"
-    );
-}
-
-/// The terminal frame must be a zero `Exit`.
-fn assert_clean_exit(frames: &[Message], message: &str) {
-    assert_eq!(
-        terminal_of(frames),
-        Some(&Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })),
-        "{message}: frames={frames:?}"
     );
 }
 

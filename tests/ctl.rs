@@ -361,10 +361,7 @@ fn commands_refuse_watch_files_that_are_not_relative_files() {
     ];
     for (entry_json, entry) in cases {
         let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
-        env.insert(
-            "NCAP_WATCH_FILES".into(),
-            format!(r#"["{entry_json}"]"#),
-        );
+        env.insert("NCAP_WATCH_FILES".into(), format!(r#"["{entry_json}"]"#));
         let out = run_ctl(&env, &["status"]);
         assert!(
             !out.status.success(),

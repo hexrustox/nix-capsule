@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use nix_capsule::protocol::{CURRENT_VERSION, FrameCodec, Message, Request};
+use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request};
 use tokio::net::UnixStream;
 use tokio::time::sleep;
 use tokio_util::codec::Framed;
@@ -79,6 +79,18 @@ pub fn terminal_of(frames: &[Message]) -> Option<&Message> {
     frames
         .iter()
         .find(|message| matches!(message, Message::Exit(_) | Message::Error(_)))
+}
+
+/// Assert the terminal frame is a clean exit 0 — no signal, no `Error`.
+pub fn assert_clean_exit(frames: &[Message], context: &str) {
+    assert_eq!(
+        terminal_of(frames),
+        Some(&Message::Exit(Exit {
+            code: Some(0),
+            signal: None,
+        })),
+        "{context}: frames={frames:?}"
+    );
 }
 
 /// Poll a synchronous predicate every 25 ms until it holds or `limit`

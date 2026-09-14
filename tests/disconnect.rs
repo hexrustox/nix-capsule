@@ -12,12 +12,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use nix_capsule::protocol::{Exit, Message};
+use nix_capsule::protocol::Message;
+use test_case::test_case;
 use tokio::io::AsyncWriteExt;
 
 use common::Server;
 use common::probe::{
-    PHASE_LIMIT, poll_until, read_frames_until, send_request, stdout_of, terminal_of,
+    PHASE_LIMIT, Raw, assert_clean_exit, poll_until, read_frames_until, send_request, stdout_of,
     wait_for_marker,
 };
 
@@ -58,6 +59,22 @@ async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
     drop(framed);
 }
 
+/// Run `script` over a fresh connection and collect frames through the
+/// terminal one, asserting a clean exit with `expect` on stdout. The server
+/// is left running — stop it after any marker reads, whose tempdir teardown
+/// `stop` takes with it.
+async fn second_connection_succeeds(server: &Server, script: &str, expect: &str, context: &str) {
+    let mut framed = server.raw().await;
+    send_request(&mut framed, server.path(), script).await;
+    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
+        matches!(message, Message::Exit(_) | Message::Error(_))
+    })
+    .await;
+    assert_clean_exit(&frames, context);
+    let stdout = stdout_of(&frames);
+    assert!(stdout.contains(expect), "stdout={stdout:?}");
+}
+
 /// Pids of zombie processes whose parent is `server_pid`, scanned straight
 /// from `/proc`: a child the server never reaped stays visible here in state
 /// `Z` forever, so an empty result means nothing is left to reap.
@@ -73,7 +90,7 @@ fn zombies_under(server_pid: u32) -> Vec<u32> {
         let Ok(pid) = name.parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = fs::read_to_string(Path::new("/proc").join(&name).join("stat")) else {
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
         // `comm` may carry spaces and parens; the fixed fields resume after
@@ -104,25 +121,15 @@ async fn abrupt_full_close_terms_the_group_and_the_next_connection_still_works()
         "the group outlived {TERM_LIMIT:?} after the client vanished"
     );
 
-    let mut second = server.raw().await;
-    send_request(&mut second, server.path(), "echo next").await;
-    let frames = read_frames_until(&mut second, PHASE_LIMIT, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
+    second_connection_succeeds(
+        &server,
+        "echo next",
+        "next",
+        "the next connection must work untouched",
+    )
     .await;
     server.stop();
-
-    assert_eq!(
-        terminal_of(&frames),
-        Some(&Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })),
-        "the next connection must work untouched: frames={frames:?}"
-    );
-    assert!(stdout_of(&frames).contains("next"), "frames={frames:?}");
 }
-
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnect_takes_down_the_whole_group_including_a_spawned_grandchild() {
     let server = Server::builder().start().await;
@@ -178,10 +185,22 @@ async fn the_disconnect_termed_child_is_reaped_leaving_no_zombie_under_the_serve
 
 // ------------------------------------------------- EOF is never a disconnect
 
+/// How stdin EOF reaches the child.
+enum StdinEof {
+    /// The write half closes; the read half stays open to receive the
+    /// child's remainder.
+    WriteHalfShutdown,
+    /// An empty Stdin frame arrives; no write-half close, so the connection
+    /// stays open for later `Signal` frames (ticket 04c).
+    EmptyFrame,
+}
+
+#[test_case(StdinEof::WriteHalfShutdown ; "write_half_only_close_is_stdin_eof_and_lets_the_child_finish")]
+#[test_case(StdinEof::EmptyFrame ; "empty_stdin_frame_is_stdin_eof_and_keeps_the_connection_open")]
 #[tokio::test(flavor = "multi_thread")]
-async fn write_half_only_close_is_stdin_eof_and_lets_the_child_finish() {
+async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(style: StdinEof) {
     let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
+    let mut framed: Raw = server.raw().await;
     send_request(&mut framed, server.path(), "cat; echo done").await;
     framed
         .send(
@@ -191,46 +210,25 @@ async fn write_half_only_close_is_stdin_eof_and_lets_the_child_finish() {
         )
         .await
         .expect("send stdin");
-    // Write-half close only: stdin EOF for the child, the read half stays
-    // open to receive the child's remainder.
-    framed
-        .get_mut()
-        .shutdown()
-        .await
-        .expect("shutdown write half");
-
-    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
-    .await;
-    server.stop();
-
-    assert_eq!(
-        terminal_of(&frames),
-        Some(&Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })),
-        "EOF must never kill the child: frames={frames:?}"
-    );
-    let stdout = stdout_of(&frames);
-    assert!(stdout.contains("hello"), "stdout={stdout:?}");
-    assert!(stdout.contains("done"), "stdout={stdout:?}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn empty_stdin_frame_is_stdin_eof_and_keeps_the_connection_open() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    send_request(&mut framed, server.path(), "cat; echo done").await;
-    for payload in [b"hello\n".to_vec(), Vec::new()] {
-        framed
-            .send(Message::Stdin(payload).into_frame().expect("encode stdin"))
-            .await
-            .expect("send stdin");
+    match style {
+        StdinEof::WriteHalfShutdown => {
+            framed
+                .get_mut()
+                .shutdown()
+                .await
+                .expect("shutdown write half");
+        }
+        StdinEof::EmptyFrame => {
+            framed
+                .send(
+                    Message::Stdin(Vec::new())
+                        .into_frame()
+                        .expect("encode stdin"),
+                )
+                .await
+                .expect("send empty stdin");
+        }
     }
-    // No write-half close here: the empty frame alone must deliver the EOF,
-    // leaving the connection open for later `Signal` frames (ticket 04c).
 
     let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
         matches!(message, Message::Exit(_) | Message::Error(_))
@@ -238,14 +236,7 @@ async fn empty_stdin_frame_is_stdin_eof_and_keeps_the_connection_open() {
     .await;
     server.stop();
 
-    assert_eq!(
-        terminal_of(&frames),
-        Some(&Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })),
-        "the empty Stdin frame must deliver stdin EOF: frames={frames:?}"
-    );
+    assert_clean_exit(&frames, "EOF must never kill the child");
     let stdout = stdout_of(&frames);
     assert!(stdout.contains("hello"), "stdout={stdout:?}");
     assert!(stdout.contains("done"), "stdout={stdout:?}");
@@ -278,11 +269,12 @@ async fn a_term_trapping_child_holds_only_its_own_connection_and_others_keep_wor
 
     // The first child is still alive here, its connection task holding; the
     // server must still serve other connections.
-    let mut second = server.raw().await;
-    send_request(&mut second, server.path(), "echo hello").await;
-    let frames = read_frames_until(&mut second, PHASE_LIMIT, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
+    second_connection_succeeds(
+        &server,
+        "echo hello",
+        "hello",
+        "other connections must be unaffected",
+    )
     .await;
     // Heartbeats stamped well past the TERM prove the server never
     // escalated to SIGKILL: the grace after the TERM is the child's. The
@@ -291,16 +283,6 @@ async fn a_term_trapping_child_holds_only_its_own_connection_and_others_keep_wor
     let full_grace = wait_for_marker(&marker, "alive-5", GRACE_LIMIT).await;
     let recorded = fs::read_to_string(&marker).unwrap_or_default();
     server.stop();
-
-    assert_eq!(
-        terminal_of(&frames),
-        Some(&Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })),
-        "other connections must be unaffected: frames={frames:?}"
-    );
-    assert!(stdout_of(&frames).contains("hello"), "frames={frames:?}");
 
     assert!(
         full_grace,
