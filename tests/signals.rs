@@ -13,10 +13,9 @@ use test_case::test_case;
 
 use common::Server;
 use common::probe::{
-    PHASE_LIMIT, Raw, read_frames_until, send_request, stdout_of, terminal_of, wait_for_flag,
+    PHASE_LIMIT, Raw, assert_clean_exit, read_frames_until, read_until_stdout_contains,
+    send_request, stdout_of, terminal_of, wait_for_flag,
 };
-
-use crate::common::probe::assert_clean_exit;
 
 /// Bound for group-wide delivery: the signal must clear the whole group well
 /// before a survivor's own 30-second `sleep` would end on its own.
@@ -44,10 +43,7 @@ async fn ready_signal_terminal(
     limit: Duration,
 ) -> Vec<Message> {
     send_request(framed, server.path(), script).await;
-    read_frames_until(framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Stdout(bytes) if String::from_utf8_lossy(bytes).contains("READY"))
-    })
-    .await;
+    read_until_stdout_contains(framed, "READY").await;
     send_signal(framed, signal as u8).await;
     read_frames_until(framed, limit, |message| {
         matches!(message, Message::Exit(_) | Message::Error(_))

@@ -63,6 +63,24 @@ pub async fn read_frames_until(
     frames
 }
 
+/// Read frames until one carries stdout containing `needle` (included); see
+/// [`read_frames_until`] for the timeout shape.
+pub async fn read_until_stdout_contains(framed: &mut Raw, needle: &str) -> Vec<Message> {
+    read_frames_until(framed, PHASE_LIMIT, |message| {
+        matches!(message, Message::Stdout(bytes) if String::from_utf8_lossy(bytes).contains(needle))
+    })
+    .await
+}
+
+/// Read frames until the terminal frame (included) or [`PHASE_LIMIT`]
+/// elapses; see [`read_frames_until`] for the timeout shape.
+pub async fn read_until_terminal(framed: &mut Raw) -> Vec<Message> {
+    read_frames_until(framed, PHASE_LIMIT, |message| {
+        matches!(message, Message::Exit(_) | Message::Error(_))
+    })
+    .await
+}
+
 /// All stdout bytes carried by `frames`.
 pub fn stdout_of(frames: &[Message]) -> String {
     frames

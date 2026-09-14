@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{FrameCodec, Message, Request};
 use tempfile::TempDir;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::time::{Duration, sleep};
+use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
 /// Upper bound on one client-wait phase; a red run fails on the assertion,
@@ -126,18 +126,7 @@ impl Server {
         let ServerProc::Real(child) = &mut self.handle else {
             return None;
         };
-        let deadline = Instant::now() + WAIT_LIMIT;
-        loop {
-            match child.try_wait().expect("poll server") {
-                Some(status) => return Some(status),
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("server did not exit within {WAIT_LIMIT:?}");
-                }
-                None => thread::sleep(Duration::from_millis(20)),
-            }
-        }
+        Some(wait_bounded(child, WAIT_LIMIT, "server"))
     }
 
     /// Deliver `sig` to a real server and await its exit; `None` for a
@@ -351,9 +340,10 @@ impl ClientProc {
         self.child.try_wait().expect("poll client")
     }
 
-    /// Wait for the client to exit and collect its output. Bounded: a client
-    /// that never exits is killed and the test fails with a named panic.
-    pub fn wait(mut self) -> ClientOutput {
+    /// Wait for the client to exit within `limit` and collect its output;
+    /// the drain deadline must beat this bound. Bounded: a client that never
+    /// exits is killed and the test fails with a named panic.
+    pub fn wait_within(mut self, limit: Duration, what: &str) -> ClientOutput {
         // Drain the pipes on a helper thread: a client blocked writing to a
         // full pipe could never exit for the bounded poll below.
         let stdout_pipe = self.child.stdout.take();
@@ -370,24 +360,19 @@ impl ClientProc {
             (stdout, stderr)
         });
 
-        let deadline = Instant::now() + WAIT_LIMIT;
-        let status = loop {
-            match self.child.try_wait().expect("poll client") {
-                Some(status) => break status,
-                None if Instant::now() >= deadline => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    panic!("client did not exit within {WAIT_LIMIT:?}");
-                }
-                None => thread::sleep(Duration::from_millis(20)),
-            }
-        };
+        let status = wait_bounded(&mut self.child, limit, what);
         let (stdout, stderr) = drained.join().expect("drain client pipes");
         ClientOutput {
             status,
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
         }
+    }
+
+    /// Wait for the client to exit and collect its output. Bounded: a client
+    /// that never exits is killed and the test fails with a named panic.
+    pub fn wait(self) -> ClientOutput {
+        self.wait_within(WAIT_LIMIT, "client")
     }
 }
 
@@ -405,6 +390,25 @@ pub fn bin_path(name: &str) -> PathBuf {
     std::env::var(&var)
         .unwrap_or_else(|_| panic!("CARGO_BIN_EXE not set for binary {name}"))
         .into()
+}
+
+/// Poll `child` until it exits or `limit` elapses, then return its status;
+/// a child that outlives the limit is killed and the test fails with a named
+/// panic. The shared shape behind [`Server::wait_for_exit`],
+/// [`ClientProc::wait`], and tests that spawn an extra process by hand.
+pub fn wait_bounded(child: &mut Child, limit: Duration, what: &str) -> ExitStatus {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait().expect("poll child") {
+            Some(status) => return status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{what} did not exit within {limit:?}");
+            }
+            None => thread::sleep(Duration::from_millis(20)),
+        }
+    }
 }
 
 /// Poll the socket until the server accepts connections (or we give up).

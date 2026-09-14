@@ -8,8 +8,7 @@
 mod common;
 
 use std::fs;
-use std::process::{Command, Stdio};
-use std::thread;
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -19,10 +18,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::time::sleep;
 
-use common::probe::{PHASE_LIMIT, read_frames_until, send_request, wait_for_flag, wait_for_marker};
-use common::{Client, Server, bin_path};
-
-use crate::common::probe::assert_clean_exit;
+use common::probe::{
+    PHASE_LIMIT, assert_clean_exit, read_frames_until, read_until_stdout_contains,
+    read_until_terminal, send_request, wait_for_flag, wait_for_marker,
+};
+use common::{Client, Server, bin_path, wait_bounded};
 
 /// How long a group has to die once the shutdown signal landed: the TERM is
 /// sent immediately, and the trap it fires writes the marker.
@@ -33,23 +33,35 @@ const TERM_LIMIT: Duration = Duration::from_secs(5);
 /// `--timeout` a test configures.
 const BAIL_LIMIT: Duration = Duration::from_millis(1500);
 
-// ------------------------------------------------- client reactions (ticket 05)
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_server_stopping_frame_bails_the_client_at_143() {
-    let server = Server::builder()
-        .respond(vec![Message::ServerStopping])
-        .start()
-        .await;
-    let out = server.client().run(&["echo", "hi"]);
-    server.stop();
-
-    assert_eq!(out.status.code(), Some(143), "stderr={}", out.stderr);
+/// An orderly shutdown: the server exits 0 — never by signal — and the
+/// socket file is gone. Reads the socket state before [`Server::stop`].
+fn assert_orderly_shutdown(status: &ExitStatus, socket_gone: bool) {
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "an orderly shutdown exits 0, not by signal"
+    );
+    assert!(socket_gone, "the socket file must be gone after exit");
 }
 
+/// The shutdown must be announced with a `ServerStopping` frame before the
+/// drain acts on the connection.
+fn assert_announced(frames: &[Message], context: &str) {
+    assert!(
+        frames
+            .iter()
+            .any(|message| matches!(message, Message::ServerStopping)),
+        "{context}: frames={frames:?}"
+    );
+}
+
+// ------------------------------------------------- client reactions (ticket 05)
+
+#[test_case(vec![Message::ServerStopping] ; "a_server_stopping_frame_bails_the_client_at_143")]
+#[test_case(vec![] ; "a_clean_close_without_a_terminal_frame_bails_the_client_at_143")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_clean_close_without_a_terminal_frame_bails_the_client_at_143() {
-    let server = Server::builder().respond(vec![]).start().await;
+async fn a_terminal_response_bails_the_client_at_143(respond: Vec<Message>) {
+    let server = Server::builder().respond(respond).start().await;
     let out = server.client().run(&["echo", "hi"]);
     server.stop();
 
@@ -128,18 +140,7 @@ async fn a_live_socket_refuses_startup_naming_the_path_and_leaves_the_owner_unto
         .stderr(stderr_log)
         .spawn()
         .expect("spawn second server");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        match second.try_wait().expect("poll second server") {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                let _ = second.kill();
-                let _ = second.wait();
-                panic!("the second server never refused the live socket");
-            }
-            None => thread::sleep(Duration::from_millis(20)),
-        }
-    };
+    let status = wait_bounded(&mut second, Duration::from_secs(10), "the second server");
     let stderr = fs::read_to_string(dir.path().join("second-stderr.log")).expect("stderr");
     let out = server.client().run(&["echo", "still-owns"]);
     server.stop();
@@ -187,10 +188,10 @@ async fn a_stale_socket_file_is_removed_and_the_bind_succeeds() {
 #[test_case(libc::SIGINT ; "sigint")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shutdown_signal_bails_the_client_at_143_immediately_and_removes_the_socket(sig: i32) {
-    let mut server = Server::builder().timeout(3).start().await;
+    let mut server = Server::builder().timeout(1).start().await;
     // The child ignores TERM so a client that wrongly waited for its child
     // would only be freed by the drain deadline, never by the child itself.
-    let mut client = server.client().cwd(server.path()).spawn(&[
+    let client = server.client().cwd(server.path()).spawn(&[
         "sh",
         "-c",
         "trap '' TERM; touch ready.flag; exec sleep 30",
@@ -198,18 +199,7 @@ async fn a_shutdown_signal_bails_the_client_at_143_immediately_and_removes_the_s
     wait_for_flag(&server, "ready.flag").await;
     server.signal(sig);
 
-    let deadline = Instant::now() + BAIL_LIMIT;
-    let client_status = loop {
-        if let Some(status) = client.try_wait() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the client never bailed within {BAIL_LIMIT:?} of the signal"
-        );
-        thread::sleep(Duration::from_millis(20));
-    };
-
+    let client_status = client.wait_within(BAIL_LIMIT, "the client to bail").status;
     let server_status = server.wait_for_exit().expect("real server");
     let socket_gone = !server.socket().exists();
     server.stop();
@@ -219,12 +209,7 @@ async fn a_shutdown_signal_bails_the_client_at_143_immediately_and_removes_the_s
         Some(143),
         "the client must bail at 143"
     );
-    assert_eq!(
-        server_status.code(),
-        Some(0),
-        "an orderly shutdown exits 0, not by signal"
-    );
-    assert!(socket_gone, "the socket file must be gone after exit");
+    assert_orderly_shutdown(&server_status, socket_gone);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -237,39 +222,23 @@ async fn a_connection_finishing_inside_the_grace_window_completes_normally() {
         "trap 'exit 0' TERM; echo READY; sleep 30",
     )
     .await;
-    read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Stdout(bytes) if String::from_utf8_lossy(bytes).contains("READY"))
-    })
-    .await;
+    read_until_stdout_contains(&mut framed, "READY").await;
 
     let status = server.terminate(libc::SIGTERM).expect("real server");
     // The terminal frames are already buffered on this socket: the
     // connection ran to completion before the drain closed it.
-    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
-    .await;
+    let frames = read_until_terminal(&mut framed).await;
     let closed_cleanly = framed.next().await.is_none();
     let socket_gone = !server.socket().exists();
     server.stop();
 
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "an orderly shutdown exits 0, not by signal"
-    );
-    assert!(
-        frames
-            .iter()
-            .any(|message| matches!(message, Message::ServerStopping)),
-        "the shutdown must be announced: frames={frames:?}"
-    );
+    assert_orderly_shutdown(&status, socket_gone);
+    assert_announced(&frames, "the shutdown must be announced");
     assert_clean_exit(&frames, "the child's own exit must complete normally");
     assert!(
         closed_cleanly,
         "the server must close cleanly after the terminal frame"
     );
-    assert!(socket_gone, "the socket file must be gone after exit");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -289,10 +258,7 @@ async fn shutdown_terms_the_whole_group_including_grandchildren() {
     );
     let mut framed = server.raw().await;
     send_request(&mut framed, server.path(), &script).await;
-    read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Stdout(bytes) if String::from_utf8_lossy(bytes).contains("READY"))
-    })
-    .await;
+    read_until_stdout_contains(&mut framed, "READY").await;
 
     let status = server.terminate(libc::SIGTERM).expect("real server");
     let child_gone = wait_for_marker(&marker, "child-gone", TERM_LIMIT).await;
@@ -301,17 +267,12 @@ async fn shutdown_terms_the_whole_group_including_grandchildren() {
     let socket_gone = !server.socket().exists();
     server.stop();
 
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "an orderly shutdown exits 0, not by signal"
-    );
+    assert_orderly_shutdown(&status, socket_gone);
     assert!(child_gone, "the child was not TERMed: marker={recorded:?}");
     assert!(
         grandchild_gone,
         "the grandchild was not TERMed with the group: marker={recorded:?}"
     );
-    assert!(socket_gone, "the socket file must be gone after exit");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -339,21 +300,12 @@ async fn a_connection_past_the_deadline_is_dropped_when_the_drain_expires() {
     let socket_gone = !server.socket().exists();
     server.stop();
 
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "an orderly shutdown exits 0, not by signal"
-    );
+    assert_orderly_shutdown(&status, socket_gone);
+    assert!(elapsed >= Duration::from_secs(1));
     assert!(
         elapsed < Duration::from_secs(10),
         "the drain must expire at the deadline, not wait out the child: {elapsed:?}"
     );
-    assert!(
-        announced
-            .iter()
-            .any(|message| matches!(message, Message::ServerStopping)),
-        "the shutdown must be announced before the drop: frames={announced:?}"
-    );
+    assert_announced(&announced, "the shutdown must be announced before the drop");
     assert!(dropped, "the overdue connection must be dropped");
-    assert!(socket_gone, "the socket file must be gone after exit");
 }
