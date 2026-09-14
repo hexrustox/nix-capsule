@@ -94,6 +94,7 @@
                 cargo-deny
                 cargo-edit
                 cargo-machete
+                cargo-llvm-cov
                 clang
                 codebook
                 nixd
@@ -104,7 +105,7 @@
                   extensions = [
                     "rust-src"
                     "rust-analyzer"
-                    # "llvm-tools-preview"
+                    "llvm-tools-preview"
                   ];
                 })
                 git

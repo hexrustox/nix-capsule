@@ -199,40 +199,6 @@ impl Runtime {
             }
         }
     }
-
-    /// Whether the runtime binary resolves and is executable. Accepts a bare
-    /// name (PATH lookup) or an absolute path.
-    pub fn check_exists(&self) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        let is_executable = |mode: u32| mode & 0o111 != 0;
-        let bin_path = if self.bin.contains('/') {
-            Path::new(&self.bin).to_path_buf()
-        } else if let Some(path_var) = std::env::var_os("PATH") {
-            std::env::split_paths(&path_var)
-                .map(|dir| dir.join(&self.bin))
-                .find(|candidate| {
-                    candidate
-                        .metadata()
-                        .is_ok_and(|meta| is_executable(meta.permissions().mode()))
-                })
-                .unwrap_or_else(|| Path::new(&self.bin).to_path_buf())
-        } else {
-            Path::new(&self.bin).to_path_buf()
-        };
-        let meta = bin_path
-            .metadata()
-            .map_err(|_| format!("runtime not found: `{}`", bin_path.display()))?;
-        if !meta.is_file() {
-            return Err(format!("runtime is not a file: `{}`", bin_path.display()));
-        }
-        if !is_executable(meta.permissions().mode()) {
-            return Err(format!(
-                "runtime is not executable: `{}`",
-                bin_path.display()
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Whether stderr indicates a concurrent-start "name in use" conflict.
