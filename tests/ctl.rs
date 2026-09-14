@@ -147,12 +147,12 @@ mod fixture {
         pub cache: PathBuf,
         pub logs: PathBuf,
         pub sock: PathBuf,
-        pub state: PathBuf,
         pub runtime_bin: PathBuf,
-        pub runtime_log: PathBuf,
-        pub runtime_args_log: PathBuf,
-        pub nix_log: PathBuf,
         pub env: HashMap<String, String>,
+        state: PathBuf,
+        runtime_log: PathBuf,
+        runtime_args_log: PathBuf,
+        nix_log: PathBuf,
         _tmp: TempDir,
         _live: Option<std::os::unix::net::UnixListener>,
     }
@@ -389,6 +389,16 @@ esac
             self
         }
 
+        pub fn with_run_fail_always(self, message: &str) -> Self {
+            fs::write(self.state.join("run_fail_always"), message).expect("run_fail_always");
+            self
+        }
+
+        pub fn with_stop_fail(self) -> Self {
+            fs::write(self.state.join("stop_fail"), "").expect("stop_fail");
+            self
+        }
+
         pub fn set_running(&self, running: bool) {
             fs::write(
                 self.state.join("running"),
@@ -584,6 +594,15 @@ esac
                 || self.state.join("rm_called").is_file()
         }
 
+        /// Pre-launch `rm` ran before the single launch `run`.
+        pub fn saw_rm_before_run(&self) -> bool {
+            let log = Self::read_log(&self.runtime_log);
+            match (log.find("rm "), log.find("run ")) {
+                (Some(rm), Some(run)) => rm < run,
+                _ => false,
+            }
+        }
+
         /// Contents of the `run_count` file written by the fake adapter.
         pub fn run_count_file(&self) -> String {
             Self::read_log(&self.state.join("run_count"))
@@ -627,67 +646,6 @@ esac
             self._tmp.path().to_path_buf()
         }
     }
-}
-
-fn fake_runtime(dir: &Path, state_dir: &Path, runtime_log: &Path) {
-    let script = format!(
-        r#"#!/usr/bin/env bash
-LOG="{}"
-STATE_DIR="{}"
-echo "$@" >> "$LOG"
-case "$1" in
-  inspect)
-    TEMPLATE="$3"
-    if [[ "$TEMPLATE" == *'State.Running'* ]]; then
-      cat "$STATE_DIR/running" 2>/dev/null || echo "false"
-    elif [[ "$TEMPLATE" == *'json .State'* ]] || [[ "$TEMPLATE" == *'json'* ]]; then
-      cat "$STATE_DIR/state_json" 2>/dev/null || echo '{{"Running":false,"Status":"exited"}}'
-    else
-      echo "false"
-    fi
-    exit 0
-    ;;
-  run)
-    COUNT_FILE="$STATE_DIR/run_count"
-    COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
-    COUNT=$((COUNT+1))
-    echo $COUNT > "$COUNT_FILE"
-    if [[ -f "$STATE_DIR/run_fail_first" && $COUNT -eq 1 ]]; then
-      echo "Error: container name \"ncap-test\" is already in use - name in use" >&2
-      exit 1
-    fi
-    if [[ -f "$STATE_DIR/run_fail_always" ]]; then
-      cat "$STATE_DIR/run_fail_always" >&2
-      exit 1
-    fi
-    echo "fake-id-$COUNT"
-    exit 0
-    ;;
-  stop)
-    if [[ -f "$STATE_DIR/stop_fail" ]]; then
-      echo "no such container" >&2
-      exit 1
-    fi
-    echo "stopped"
-    # mark not running
-    echo "false" > "$STATE_DIR/running"
-    exit 0
-    ;;
-  rm)
-    echo "removed" >> "$LOG"
-    echo "rm called" > "$STATE_DIR/rm_called"
-    exit 0
-    ;;
-  *)
-    echo "unknown $1" >&2
-    exit 1
-    ;;
-esac
-"#,
-        runtime_log.display(),
-        state_dir.display()
-    );
-    write_stub(dir, &script);
 }
 
 fn fake_nix(path: &Path, nix_log: &Path, env_content: &str) {
@@ -1128,11 +1086,6 @@ fn running_without_socket_is_not_live() {
         "not-live start must attempt run: {}",
         fx.runtime_log()
     );
-    let rt_calls2 = fx.runtime_log();
-    assert!(
-        rt_calls2.contains("run "),
-        "not-live start must attempt run: {rt_calls2}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,20 +1169,17 @@ fn start_removes_stopped_container_before_launch() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let rt_log = fx.runtime_log();
     // Pre-launch rm must run before the single launch.
-    let rm_pos = rt_log.find("\nrm ").or_else(|| rt_log.find("rm "));
-    assert!(rm_pos.is_some(), "pre-launch rm missing: {rt_log}");
-    let run_pos = rt_log.find("\nrun ").or_else(|| rt_log.find("run "));
-    assert!(run_pos.is_some(), "run missing: {rt_log}");
     assert!(
-        rm_pos.unwrap() < run_pos.unwrap(),
-        "rm before run: {rt_log}"
+        fx.saw_rm_before_run(),
+        "pre-launch rm must run before run: {}",
+        fx.runtime_log()
     );
     assert_eq!(
         fx.run_count_file(),
         "1",
-        "single launch after pre-launch rm: {rt_log}"
+        "single launch after pre-launch rm: {}",
+        fx.runtime_log()
     );
 }
 
@@ -1415,7 +1365,6 @@ fn missing_runtime_is_an_error_naming_it() {
     let fx = fixture::Fixture::down();
     let bin_dir = fx.tmp_path().join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
-    fake_runtime(&bin_dir.join("podman"), &fx.state, &fx.runtime_log);
 
     let mut env: HashMap<String, String> = HashMap::new();
     env.insert("NCAP_CONTAINER".into(), "ncap-test".into());
@@ -1805,18 +1754,18 @@ fn extra_options_braced_expansion_and_literal_passthrough() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let log = fx.runtime_log();
+    let run_line = fx.run_line();
     assert!(
-        log.contains("--braced=braced-val"),
-        "braced expansion: {log}"
+        run_line.contains("--braced=braced-val"),
+        "braced expansion: {run_line}"
     );
     assert!(
-        log.contains("literal-no-expand"),
-        "literal passthrough: {log}"
+        run_line.contains("literal-no-expand"),
+        "literal passthrough: {run_line}"
     );
     assert!(
-        log.contains("-v braced-val:/mnt"),
-        "dollar expansion: {log}"
+        run_line.contains("-v braced-val:/mnt"),
+        "dollar expansion: {run_line}"
     );
     // Argv-level lock-in: each option must survive as its own argv.
     let args = fx.run_arg_lines();
