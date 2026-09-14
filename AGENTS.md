@@ -12,6 +12,10 @@ The five canonical triage roles: `needs-triage`, `needs-info`, `ready-for-agent`
 
 Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
 
+### Error messages
+
+See `docs/agents/error.md`.
+
 ## Environment (self-hosted)
 
 - This repo's devshell is built by the **pinned** `nix-capsule` flake input
