@@ -4,11 +4,10 @@
 //! every child's process group, drains within `--timeout`, and removes the
 //! socket file.
 
-#[path = "common/mod.rs"]
 mod common;
 
 use std::fs;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -18,42 +17,13 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::time::sleep;
 
+use common::assert::{assert_announced, assert_orderly_shutdown};
 use common::probe::{
-    PHASE_LIMIT, assert_clean_exit, read_frames_until, read_until_stdout_contains,
-    read_until_terminal, send_request, wait_for_flag, wait_for_marker,
+    BAIL_LIMIT, PHASE_LIMIT, SHUTDOWN_TERM_LIMIT, assert_clean_exit, read_frames_until,
+    read_until_stdout_contains, read_until_terminal, send_request, wait_for_flag, wait_for_marker,
 };
+use common::script::shutdown_group_trap_script;
 use common::{Client, Server, bin_path, wait_bounded};
-
-/// How long a group has to die once the shutdown signal landed: the TERM is
-/// sent immediately, and the trap it fires writes the marker.
-const TERM_LIMIT: Duration = Duration::from_secs(5);
-
-/// How soon the client must bail once the shutdown signal lands: the
-/// `ServerStopping` frame precedes the drain, so this outruns any
-/// `--timeout` a test configures.
-const BAIL_LIMIT: Duration = Duration::from_millis(1500);
-
-/// An orderly shutdown: the server exits 0 — never by signal — and the
-/// socket file is gone. Reads the socket state before [`Server::stop`].
-fn assert_orderly_shutdown(status: &ExitStatus, socket_gone: bool) {
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "an orderly shutdown exits 0, not by signal"
-    );
-    assert!(socket_gone, "the socket file must be gone after exit");
-}
-
-/// The shutdown must be announced with a `ServerStopping` frame before the
-/// drain acts on the connection.
-fn assert_announced(frames: &[Message], context: &str) {
-    assert!(
-        frames
-            .iter()
-            .any(|message| matches!(message, Message::ServerStopping)),
-        "{context}: frames={frames:?}"
-    );
-}
 
 // ------------------------------------------------- client reactions (ticket 05)
 
@@ -248,21 +218,14 @@ async fn shutdown_terms_the_whole_group_including_grandchildren() {
     // Both shells announce their own death from a TERM trap; the
     // grandchild's line can only come from a TERM it received itself — a
     // kill of the child alone would leave the grandchild running.
-    let script = format!(
-        "trap 'echo child-gone >> {}; exit 0' TERM; \
-         ( trap 'echo grandchild-gone >> {}; exit 0' TERM; \
-           while true; do echo tick; sleep 0.3; done ) & \
-         echo READY; wait",
-        marker.display(),
-        marker.display()
-    );
+    let script = shutdown_group_trap_script(&marker);
     let mut framed = server.raw().await;
     send_request(&mut framed, server.path(), &script).await;
     read_until_stdout_contains(&mut framed, "READY").await;
 
     let status = server.terminate(libc::SIGTERM).expect("real server");
-    let child_gone = wait_for_marker(&marker, "child-gone", TERM_LIMIT).await;
-    let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", TERM_LIMIT).await;
+    let child_gone = wait_for_marker(&marker, "child-gone", SHUTDOWN_TERM_LIMIT).await;
+    let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", SHUTDOWN_TERM_LIMIT).await;
     let recorded = fs::read_to_string(&marker).unwrap_or_default();
     let socket_gone = !server.socket().exists();
     server.stop();

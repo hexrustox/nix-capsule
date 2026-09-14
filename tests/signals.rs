@@ -2,61 +2,17 @@
 //! speaks raw wire frames to the real `ncap-server`; ticket 04c spawns the
 //! real `ncap` client, delivers host signals to it mid-run, and awaits.
 
-#[path = "common/mod.rs"]
 mod common;
 
-use std::time::Duration;
-
-use futures_util::SinkExt;
-use nix_capsule::protocol::{Exit, Message, SignalMsg};
+use nix_capsule::protocol::{Exit, Message};
 use test_case::test_case;
 
 use common::Server;
+use common::assert::assert_no_error_frames;
 use common::probe::{
-    PHASE_LIMIT, Raw, assert_clean_exit, read_frames_until, read_until_stdout_contains,
-    read_until_terminal_within, send_request, stdout_of, terminal_of, wait_for_flag,
+    GROUP_LIMIT, PHASE_LIMIT, assert_clean_exit, read_frames_until, ready_signal_terminal,
+    send_request, stdout_of, terminal_of, wait_for_flag,
 };
-
-/// Bound for group-wide delivery: the signal must clear the whole group well
-/// before a survivor's own 30-second `sleep` would end on its own.
-const GROUP_LIMIT: Duration = Duration::from_secs(10);
-
-/// Send one `Signal` frame with `number`.
-async fn send_signal(framed: &mut Raw, signal: u8) {
-    framed
-        .send(
-            Message::Signal(SignalMsg { signal })
-                .into_frame()
-                .expect("encode signal"),
-        )
-        .await
-        .expect("send signal");
-}
-
-/// Send `sh -c script`, wait for stdout to contain `READY`, deliver `number`,
-/// and read until a terminal frame or `limit` elapses.
-async fn ready_signal_terminal(
-    framed: &mut Raw,
-    server: &Server,
-    script: &str,
-    signal: i32,
-    limit: Duration,
-) -> Vec<Message> {
-    send_request(framed, server.path(), script).await;
-    read_until_stdout_contains(framed, "READY").await;
-    send_signal(framed, signal as u8).await;
-    read_until_terminal_within(framed, limit).await
-}
-
-/// A failed kill or a vanished child must never surface as an `Error` frame.
-fn assert_no_error_frames(frames: &[Message]) {
-    assert!(
-        !frames
-            .iter()
-            .any(|message| matches!(message, Message::Error(_))),
-        "unexpected Error frames: {frames:?}"
-    );
-}
 
 // ------------------------------------------------------------- process groups
 

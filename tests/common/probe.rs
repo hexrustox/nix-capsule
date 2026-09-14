@@ -7,16 +7,40 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request};
+use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
 use tokio::net::UnixStream;
 use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
-use super::Server;
+use super::server::Server;
 
 /// Upper bound on one phase; a red run fails on the assertion, never on the
 /// harness itself.
 pub const PHASE_LIMIT: Duration = Duration::from_secs(20);
+
+/// How long the group has to die once the client vanished or the shutdown
+/// signal landed: the TERM goes out immediately and the trap it fires writes
+/// the marker. Disconnect uses the short bound; lifecycle shutdown the long
+/// one.
+pub const DISCONNECT_TERM_LIMIT: Duration = Duration::from_secs(2);
+pub const SHUTDOWN_TERM_LIMIT: Duration = Duration::from_secs(5);
+
+/// How long reaping has to complete once the child is provably dead.
+pub const REAP_LIMIT: Duration = Duration::from_secs(5);
+
+/// How long the child has to keep proving it survived its full grace: the
+/// post-TERM heartbeats must keep arriving — a KILL escalation would silence
+/// them.
+pub const GRACE_LIMIT: Duration = Duration::from_secs(8);
+
+/// Bound for group-wide signal delivery: the signal must clear the whole
+/// group well before a survivor's own 30-second `sleep` would end on its own.
+pub const GROUP_LIMIT: Duration = Duration::from_secs(10);
+
+/// How soon the client must bail once the shutdown signal lands: the
+/// `ServerStopping` frame precedes the drain, so this outruns any
+/// `--timeout` a test configures.
+pub const BAIL_LIMIT: Duration = Duration::from_millis(1500);
 
 /// A raw wire-protocol connection in probe shape, as [`Server::raw`] hands out.
 pub type Raw = Framed<UnixStream, FrameCodec>;
@@ -178,4 +202,85 @@ pub async fn wait_for_flag(server: &Server, name: &str) {
     let flag = server.path().join(name);
     let appeared = poll_until(PHASE_LIMIT, || flag.exists()).await;
     assert!(appeared, "{name} never appeared");
+}
+
+/// Send one `Signal` frame with `number`.
+pub async fn send_signal(framed: &mut Raw, signal: u8) {
+    framed
+        .send(
+            Message::Signal(SignalMsg { signal })
+                .into_frame()
+                .expect("encode signal"),
+        )
+        .await
+        .expect("send signal");
+}
+
+/// Send `sh -c script`, wait for stdout to contain `READY`, deliver `number`,
+/// and read until a terminal frame or `limit` elapses.
+pub async fn ready_signal_terminal(
+    framed: &mut Raw,
+    server: &Server,
+    script: &str,
+    signal: i32,
+    limit: Duration,
+) -> Vec<Message> {
+    send_request(framed, server.path(), script).await;
+    read_until_stdout_contains(framed, "READY").await;
+    send_signal(framed, signal as u8).await;
+    read_until_terminal_within(framed, limit).await
+}
+
+/// Send `script` as a request, wait for the child to announce `ready` on
+/// stdout, then drop the connection abruptly — the client vanishes before
+/// any terminal frame.
+pub async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
+    let mut framed = server.raw().await;
+    send_request(&mut framed, server.path(), script).await;
+    read_until_stdout_contains(&mut framed, ready).await;
+    drop(framed);
+}
+
+/// Run `script` over a fresh connection and collect frames through the
+/// terminal one, asserting a clean exit with `expect` on stdout. The server
+/// is left running — stop it after any marker reads, whose tempdir teardown
+/// `stop` takes with it.
+pub async fn second_connection_succeeds(server: &Server, script: &str, expect: &str, context: &str) {
+    let mut framed = server.raw().await;
+    let run = run_request(&mut framed, request(server.path(), script)).await;
+    assert_clean_exit(&run.frames, context);
+    assert!(run.stdout.contains(expect), "stdout={:?}", run.stdout);
+}
+
+/// Pids of zombie processes whose parent is `server_pid`, scanned straight
+/// from `/proc`: a child the server never reaped stays visible here in state
+/// `Z` forever, so an empty result means nothing is left to reap.
+pub fn zombies_under(server_pid: u32) -> Vec<u32> {
+    let mut zombies = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return zombies;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `comm` may carry spaces and parens; the fixed fields resume after
+        // the last `)`. State is field 3, ppid field 4.
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next().unwrap_or_default();
+        let ppid = fields.next().unwrap_or_default();
+        if state == "Z" && ppid == server_pid.to_string() {
+            zombies.push(pid);
+        }
+    }
+    zombies
 }

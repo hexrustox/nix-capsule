@@ -4,12 +4,9 @@
 //! told anything anymore, so children announce the disconnect-TERM by writing
 //! marker files from their traps.
 
-#[path = "common/mod.rs"]
 mod common;
 
 use std::fs;
-use std::path::Path;
-use std::time::Duration;
 
 use futures_util::SinkExt;
 use nix_capsule::protocol::Message;
@@ -18,87 +15,11 @@ use tokio::io::AsyncWriteExt;
 
 use common::Server;
 use common::probe::{
-    Raw, assert_clean_exit, poll_until, read_until_stdout_contains, read_until_terminal, request,
-    run_request, send_request, stdout_of, wait_for_marker,
+    DISCONNECT_TERM_LIMIT, GRACE_LIMIT, REAP_LIMIT, Raw, assert_clean_exit, poll_until,
+    read_until_terminal, request_and_vanish, second_connection_succeeds, send_request, stdout_of,
+    wait_for_marker, zombies_under,
 };
-
-/// How long the group has to die once the client vanished: the TERM goes out
-/// as soon as the child's next output trips over the dead socket. The marker
-/// is the observable proxy — the trap the TERM fires writes it.
-const TERM_LIMIT: Duration = Duration::from_secs(2);
-
-/// How long reaping has to complete once the child is provably dead.
-const REAP_LIMIT: Duration = Duration::from_secs(5);
-
-/// How long the child has to keep proving it survived its full grace: the
-/// post-TERM heartbeats must keep arriving — a KILL escalation would silence
-/// them.
-const GRACE_LIMIT: Duration = Duration::from_secs(8);
-
-/// The script for a child that announces READY, ticks every 300 ms, and
-/// announces its own death in `marker` from the TERM trap the disconnect
-/// fires, then exits.
-fn trapping_ticker_script(marker: &Path) -> String {
-    format!(
-        "trap 'echo gone >> {}; exit 0' TERM; echo READY; \
-         while true; do echo tick; sleep 0.3; done",
-        marker.display()
-    )
-}
-
-/// Send `script` as a request, wait for the child to announce `ready` on
-/// stdout, then drop the connection abruptly — the client vanishes before
-/// any terminal frame.
-async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
-    let mut framed = server.raw().await;
-    send_request(&mut framed, server.path(), script).await;
-    read_until_stdout_contains(&mut framed, ready).await;
-    drop(framed);
-}
-
-/// Run `script` over a fresh connection and collect frames through the
-/// terminal one, asserting a clean exit with `expect` on stdout. The server
-/// is left running — stop it after any marker reads, whose tempdir teardown
-/// `stop` takes with it.
-async fn second_connection_succeeds(server: &Server, script: &str, expect: &str, context: &str) {
-    let mut framed = server.raw().await;
-    let run = run_request(&mut framed, request(server.path(), script)).await;
-    assert_clean_exit(&run.frames, context);
-    assert!(run.stdout.contains(expect), "stdout={:?}", run.stdout);
-}
-
-/// Pids of zombie processes whose parent is `server_pid`, scanned straight
-/// from `/proc`: a child the server never reaped stays visible here in state
-/// `Z` forever, so an empty result means nothing is left to reap.
-fn zombies_under(server_pid: u32) -> Vec<u32> {
-    let mut zombies = Vec::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return zombies;
-    };
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
-        };
-        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        // `comm` may carry spaces and parens; the fixed fields resume after
-        // the last `)`. State is field 3, ppid field 4.
-        let Some((_, rest)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let mut fields = rest.split_whitespace();
-        let state = fields.next().unwrap_or_default();
-        let ppid = fields.next().unwrap_or_default();
-        if state == "Z" && ppid == server_pid.to_string() {
-            zombies.push(pid);
-        }
-    }
-    zombies
-}
+use common::script::{group_trap_script, trapping_ticker_script};
 
 // ------------------------------------------------------------ abrupt disconnect
 
@@ -109,8 +30,8 @@ async fn abrupt_full_close_terms_the_group_and_the_next_connection_still_works()
     request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
 
     assert!(
-        wait_for_marker(&marker, "gone", TERM_LIMIT).await,
-        "the group outlived {TERM_LIMIT:?} after the client vanished"
+        wait_for_marker(&marker, "gone", DISCONNECT_TERM_LIMIT).await,
+        "the group outlived {DISCONNECT_TERM_LIMIT:?} after the client vanished"
     );
 
     second_connection_succeeds(
@@ -129,18 +50,11 @@ async fn disconnect_takes_down_the_whole_group_including_a_spawned_grandchild() 
     // Both shells announce their own death from a TERM trap; the grandchild's
     // line can only come from a TERM it received itself — a kill of the child
     // alone would leave the grandchild to die silently of SIGPIPE instead.
-    let script = format!(
-        "trap 'echo child-gone >> {}; exit 0' TERM; \
-         ( trap 'echo grandchild-gone >> {}; exit 0' TERM; \
-           while true; do echo tick-gc; sleep 0.3; done ) & \
-         echo READY; wait",
-        marker.display(),
-        marker.display()
-    );
+    let script = group_trap_script(&marker);
     request_and_vanish(&server, &script, "READY").await;
 
-    let child_gone = wait_for_marker(&marker, "child-gone", TERM_LIMIT).await;
-    let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", TERM_LIMIT).await;
+    let child_gone = wait_for_marker(&marker, "child-gone", DISCONNECT_TERM_LIMIT).await;
+    let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", DISCONNECT_TERM_LIMIT).await;
     let recorded = fs::read_to_string(&marker).unwrap_or_default();
     server.stop();
 
@@ -160,8 +74,8 @@ async fn the_disconnect_termed_child_is_reaped_leaving_no_zombie_under_the_serve
     request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
 
     assert!(
-        wait_for_marker(&marker, "gone", TERM_LIMIT).await,
-        "the group outlived {TERM_LIMIT:?} after the client vanished"
+        wait_for_marker(&marker, "gone", DISCONNECT_TERM_LIMIT).await,
+        "the group outlived {DISCONNECT_TERM_LIMIT:?} after the client vanished"
     );
 
     let server_pid = server.pid().expect("real server has a pid");
@@ -252,7 +166,7 @@ async fn a_term_trapping_child_holds_only_its_own_connection_and_others_keep_wor
     request_and_vanish(&server, &script, "A-READY").await;
 
     assert!(
-        wait_for_marker(&marker, "trapped", TERM_LIMIT).await,
+        wait_for_marker(&marker, "trapped", DISCONNECT_TERM_LIMIT).await,
         "the child never received (or never survived) the disconnect TERM"
     );
 

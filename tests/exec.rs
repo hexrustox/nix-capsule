@@ -2,40 +2,21 @@
 //! client talking to a real `ncap-server` over a tempdir socket, plus raw
 //! wire-protocol tests for the frames the CLI cannot drive directly.
 
-#[path = "common/mod.rs"]
 mod common;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use futures_util::SinkExt;
 use nix_capsule::protocol::{CURRENT_VERSION, ErrorMsg, Exit, Message, Request, VersionMsg};
 use proptest::prelude::*;
-use tempfile::TempDir;
 use test_case::test_case;
 
+use common::assert::assert_exit_and_stdout;
 use common::probe::{assert_clean_exit, read_until_terminal, request, run_request, terminal_of};
-use common::{Client, ClientOutput, Server};
-
-// --------------------------------------------------- local assertion helpers
-
-/// Assert `out` exits with `code` and, when given, matches the exact stdout.
-fn assert_exit_and_stdout(out: &ClientOutput, code: i32, stdout: Option<&str>) {
-    assert_eq!(out.status.code(), Some(code));
-    if let Some(want) = stdout {
-        assert_eq!(out.stdout, want);
-    }
-}
-
-/// A tempdir whose socket path nothing listens on, for tests of client
-/// reacting to an absent server.
-fn missing_socket() -> (TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let socket = dir.path().join("missing.sock");
-    (dir, socket)
-}
+use common::{Client, Server, missing_socket};
 
 // --------------------------------------------- stdio & exit codes (real server)
 
