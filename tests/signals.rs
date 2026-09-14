@@ -14,7 +14,7 @@ use test_case::test_case;
 use common::Server;
 use common::probe::{
     PHASE_LIMIT, Raw, assert_clean_exit, read_frames_until, read_until_stdout_contains,
-    send_request, stdout_of, terminal_of, wait_for_flag,
+    read_until_terminal_within, send_request, stdout_of, terminal_of, wait_for_flag,
 };
 
 /// Bound for group-wide delivery: the signal must clear the whole group well
@@ -45,10 +45,7 @@ async fn ready_signal_terminal(
     send_request(framed, server.path(), script).await;
     read_until_stdout_contains(framed, "READY").await;
     send_signal(framed, signal as u8).await;
-    read_frames_until(framed, limit, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
-    .await
+    read_until_terminal_within(framed, limit).await
 }
 
 /// A failed kill or a vanished child must never surface as an `Error` frame.

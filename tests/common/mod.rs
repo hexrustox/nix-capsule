@@ -79,6 +79,14 @@ impl Server {
         fs::read_to_string(self.path.join("server-stderr.log")).unwrap_or_default()
     }
 
+    /// Everything the real server has written to stderr since `snapshot` —
+    /// pass a string [`Self::stderr`] returned earlier in the test. The log
+    /// file only grows by append, so slicing at the snapshot's byte length
+    /// is exact. Empty for a scripted stand-in.
+    pub fn stderr_since(&self, snapshot: &str) -> String {
+        self.stderr()[snapshot.len()..].to_string()
+    }
+
     /// The real server's process id, for `/proc` inspection; `None` for a
     /// scripted stand-in.
     pub fn pid(&self) -> Option<u32> {

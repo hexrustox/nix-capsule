@@ -8,14 +8,34 @@ mod common;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use nix_capsule::protocol::{CURRENT_VERSION, ErrorMsg, Exit, Message, Request, VersionMsg};
 use proptest::prelude::*;
+use tempfile::TempDir;
 use test_case::test_case;
 
-use common::{Client, Server};
+use common::probe::{assert_clean_exit, read_until_terminal, request, run_request, terminal_of};
+use common::{Client, ClientOutput, Server};
+
+// --------------------------------------------------- local assertion helpers
+
+/// Assert `out` exits with `code` and, when given, matches the exact stdout.
+fn assert_exit_and_stdout(out: &ClientOutput, code: i32, stdout: Option<&str>) {
+    assert_eq!(out.status.code(), Some(code));
+    if let Some(want) = stdout {
+        assert_eq!(out.stdout, want);
+    }
+}
+
+/// A tempdir whose socket path nothing listens on, for tests of client
+/// reacting to an absent server.
+fn missing_socket() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("missing.sock");
+    (dir, socket)
+}
 
 // --------------------------------------------- stdio & exit codes (real server)
 
@@ -52,10 +72,7 @@ async fn exec_reports_the_expected_stdio_and_exit_code(
     let out = client.run(args);
     server.stop();
 
-    assert_eq!(out.status.code(), Some(code));
-    if let Some(want) = stdout {
-        assert_eq!(out.stdout, want);
-    }
+    assert_exit_and_stdout(&out, code, stdout);
     if let Some(want) = stderr {
         assert_eq!(out.stderr, want);
     }
@@ -265,42 +282,23 @@ async fn merged_env_arrives_deduplicated_in_the_request() {
     );
 }
 
-// ----------------------------------------------------------- raw wire protocol
+// ------------------------------------------------------------ raw wire protocol
 
 #[tokio::test(flavor = "multi_thread")]
 async fn server_applies_request_env_over_inherited() {
     let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    let req = Request {
-        command: "sh".into(),
-        args: vec!["-c".into(), "printf %s \"$NCAP_TEST_VAR\"".into()],
-        cwd: server.path().to_string_lossy().into_owned(),
-        env: vec!["NCAP_TEST_VAR=hello".into()],
-        version: Some(CURRENT_VERSION.into()),
-    };
-    framed
-        .send(Message::Request(req).into_frame().unwrap())
-        .await
-        .unwrap();
-
-    let mut stdout = String::new();
-    let mut code = None;
-    while let Some(frame) = framed.next().await {
-        match Message::from_frame(frame.unwrap()).unwrap() {
-            Message::Version(_) => {}
-            Message::Stdout(b) => stdout.push_str(&String::from_utf8_lossy(&b)),
-            Message::Stderr(_) => {}
-            Message::Exit(e) => {
-                code = e.code;
-                break;
-            }
-            other => panic!("unexpected frame {other:?}"),
-        }
-    }
+    let run = run_request(
+        &mut server.raw().await,
+        Request {
+            env: vec!["NCAP_TEST_VAR=hello".into()],
+            ..request(server.path(), "printf %s \"$NCAP_TEST_VAR\"")
+        },
+    )
+    .await;
     server.stop();
 
-    assert_eq!(stdout, "hello");
-    assert_eq!(code, Some(0));
+    assert_clean_exit(&run.frames, "request env must override the inherited env");
+    assert_eq!(run.stdout, "hello");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -311,13 +309,12 @@ async fn non_request_first_frame_is_error_and_close() {
         .send(Message::Stdout(b"hi".to_vec()).into_frame().unwrap())
         .await
         .unwrap();
-    let resp = framed.next().await.unwrap().unwrap();
-    let msg = Message::from_frame(resp).unwrap();
+    let frames = read_until_terminal(&mut framed).await;
     server.stop();
 
     assert!(
-        matches!(msg, Message::Error(_)),
-        "expected Error, got {msg:?}"
+        matches!(terminal_of(&frames), Some(Message::Error(_))),
+        "expected Error: frames={frames:?}"
     );
 }
 
@@ -327,70 +324,47 @@ async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
     let warnings_before = server.stderr();
 
     // Mismatched version with a good cwd: the command still runs.
-    let mut framed = server.raw().await;
-    framed
-        .send(
-            Message::Request(Request {
-                command: "sh".into(),
-                args: vec!["-c".into(), "printf ok".into()],
-                cwd: server.path().to_string_lossy().into_owned(),
-                env: vec![],
-                version: Some("9.9.9".into()),
-            })
-            .into_frame()
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let mut stdout = String::new();
-    let mut code = None;
-    while let Some(frame) = framed.next().await {
-        match Message::from_frame(frame.unwrap()).unwrap() {
-            Message::Version(v) => assert_eq!(v.version, CURRENT_VERSION),
-            Message::Stdout(b) => stdout.push_str(&String::from_utf8_lossy(&b)),
-            Message::Exit(e) => {
-                code = e.code;
-                break;
-            }
-            other => panic!("unexpected frame {other:?}"),
-        }
-    }
-    assert_eq!(stdout, "ok");
-    assert_eq!(code, Some(0));
+    let run = run_request(
+        &mut server.raw().await,
+        Request {
+            version: Some("9.9.9".into()),
+            ..request(server.path(), "printf ok")
+        },
+    )
+    .await;
+    assert_eq!(run.stdout, "ok");
+    assert!(
+        run.frames
+            .iter()
+            .any(|frame| matches!(frame, Message::Version(v) if v.version == CURRENT_VERSION)),
+        "the server must still send its Version frame: frames={:?}",
+        run.frames
+    );
+    assert_clean_exit(
+        &run.frames,
+        "a mismatched version must not stop the command",
+    );
 
     // Mismatched version with a bad cwd: cwd validation still runs.
-    let mut bad = server.raw().await;
-    bad.send(
-        Message::Request(Request {
-            command: "sh".into(),
-            args: vec![],
+    let run = run_request(
+        &mut server.raw().await,
+        Request {
             cwd: "/nonexistent-xyz-abc-123".into(),
-            env: vec![],
             version: Some("9.9.9".into()),
-        })
-        .into_frame()
-        .unwrap(),
+            ..request(server.path(), "")
+        },
     )
-    .await
-    .unwrap();
-    let mut saw_error = false;
-    while let Some(frame) = bad.next().await {
-        match Message::from_frame(frame.unwrap()).unwrap() {
-            Message::Version(_) => {}
-            Message::Error(err) => {
-                assert!(err.message.contains("cwd"), "message={}", err.message);
-                saw_error = true;
-                break;
-            }
-            other => panic!("expected Error for bad cwd, got {other:?}"),
-        }
-    }
-    assert!(saw_error, "bad cwd must still fail with Error");
+    .await;
+    assert!(
+        matches!(run.terminal.as_ref(), Some(Message::Error(err)) if err.message.contains("cwd")),
+        "bad cwd must still fail with Error: frames={:?}",
+        run.frames
+    );
 
-    let stderr = server.stderr();
+    let stderr = server.stderr_since(&warnings_before);
     server.stop();
 
-    let new_warnings: Vec<&str> = stderr[warnings_before.len()..]
+    let new_warnings: Vec<&str> = stderr
         .lines()
         .filter(|line| line.contains("version mismatch"))
         .collect();
@@ -410,39 +384,21 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
     let server = Server::builder().start().await;
     let warnings_before = server.stderr();
 
-    let mut framed = server.raw().await;
-    framed
-        .send(
-            Message::Request(Request {
-                command: "sh".into(),
-                args: vec!["-c".into(), "printf ok".into()],
-                cwd: server.path().to_string_lossy().into_owned(),
-                env: vec![],
-                version: None,
-            })
-            .into_frame()
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let mut code = None;
-    while let Some(frame) = framed.next().await {
-        match Message::from_frame(frame.unwrap()).unwrap() {
-            Message::Version(_) => {}
-            Message::Exit(e) => {
-                code = e.code;
-                break;
-            }
-            Message::Stdout(_) | Message::Stderr(_) => {}
-            other => panic!("unexpected frame {other:?}"),
-        }
-    }
-    assert_eq!(code, Some(0));
+    let run = run_request(
+        &mut server.raw().await,
+        Request {
+            version: None,
+            ..request(server.path(), "printf ok")
+        },
+    )
+    .await;
+    assert_clean_exit(&run.frames, "a missing version must not stop the command");
+    assert_eq!(run.stdout, "ok");
 
-    let stderr = server.stderr();
+    let stderr = server.stderr_since(&warnings_before);
     server.stop();
 
-    let new_warnings: Vec<&str> = stderr[warnings_before.len()..]
+    let new_warnings: Vec<&str> = stderr
         .lines()
         .filter(|line| line.contains("did not send a version"))
         .collect();
@@ -506,10 +462,7 @@ async fn client_reports_what_the_server_frames_imply(
     let out = server.client().run(&["echo", "hi"]);
     server.stop();
 
-    assert_eq!(out.status.code(), Some(code));
-    if let Some(want) = stdout {
-        assert_eq!(out.stdout, want);
-    }
+    assert_exit_and_stdout(&out, code, stdout);
     let lowered = out.stderr.to_lowercase();
     assert!(
         stderr_any_of
@@ -522,8 +475,7 @@ async fn client_reports_what_the_server_frames_imply(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn connect_failure_names_socket_and_suggests_init() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let socket = dir.path().join("missing.sock");
+    let (_dir, socket) = missing_socket();
 
     let out = Client::at(&socket).run(&["echo", "hi"]);
 
@@ -542,8 +494,7 @@ async fn connect_failure_names_socket_and_suggests_init() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_key_env_flag_is_a_local_error_before_any_connection() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let socket = dir.path().join("missing.sock");
+    let (_dir, socket) = missing_socket();
 
     let out = Client::at(&socket).env_flag("=VALUE").run(&["echo", "hi"]);
 

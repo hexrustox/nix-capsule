@@ -18,8 +18,8 @@ use tokio::io::AsyncWriteExt;
 
 use common::Server;
 use common::probe::{
-    PHASE_LIMIT, Raw, assert_clean_exit, poll_until, read_frames_until, send_request, stdout_of,
-    wait_for_marker,
+    Raw, assert_clean_exit, poll_until, read_until_stdout_contains, read_until_terminal, request,
+    run_request, send_request, stdout_of, wait_for_marker,
 };
 
 /// How long the group has to die once the client vanished: the TERM goes out
@@ -52,10 +52,7 @@ fn trapping_ticker_script(marker: &Path) -> String {
 async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
     let mut framed = server.raw().await;
     send_request(&mut framed, server.path(), script).await;
-    read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Stdout(bytes) if String::from_utf8_lossy(bytes).contains(ready))
-    })
-    .await;
+    read_until_stdout_contains(&mut framed, ready).await;
     drop(framed);
 }
 
@@ -65,14 +62,9 @@ async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
 /// `stop` takes with it.
 async fn second_connection_succeeds(server: &Server, script: &str, expect: &str, context: &str) {
     let mut framed = server.raw().await;
-    send_request(&mut framed, server.path(), script).await;
-    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
-    .await;
-    assert_clean_exit(&frames, context);
-    let stdout = stdout_of(&frames);
-    assert!(stdout.contains(expect), "stdout={stdout:?}");
+    let run = run_request(&mut framed, request(server.path(), script)).await;
+    assert_clean_exit(&run.frames, context);
+    assert!(run.stdout.contains(expect), "stdout={:?}", run.stdout);
 }
 
 /// Pids of zombie processes whose parent is `server_pid`, scanned straight
@@ -230,10 +222,7 @@ async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(style: StdinE
         }
     }
 
-    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
-        matches!(message, Message::Exit(_) | Message::Error(_))
-    })
-    .await;
+    let frames = read_until_terminal(&mut framed).await;
     server.stop();
 
     assert_clean_exit(&frames, "EOF must never kill the child");

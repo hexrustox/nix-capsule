@@ -21,15 +21,21 @@ pub const PHASE_LIMIT: Duration = Duration::from_secs(20);
 /// A raw wire-protocol connection in probe shape, as [`Server::raw`] hands out.
 pub type Raw = Framed<UnixStream, FrameCodec>;
 
-/// Send `sh -c script` as a Request, versioned like the real client sends.
-pub async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
-    let request = Request {
+/// Build a `Request` that speaks `sh -c script` from `cwd`, versioned like
+/// the real client and carrying no env override; tests needing extra `env`
+/// entries or a custom `version` mutate the struct's `pub` fields.
+pub fn request(cwd: &Path, script: &str) -> Request {
+    Request {
         command: "sh".into(),
         args: vec!["-c".into(), script.into()],
         cwd: cwd.to_string_lossy().into_owned(),
         env: Vec::new(),
         version: Some(CURRENT_VERSION.into()),
-    };
+    }
+}
+
+/// Encode and send `request` over `framed`.
+pub async fn send_request_msg(framed: &mut Raw, request: Request) {
     framed
         .send(
             Message::Request(request)
@@ -38,6 +44,11 @@ pub async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
         )
         .await
         .expect("send request");
+}
+
+/// Send `sh -c script` as a Request, versioned like the real client sends.
+pub async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
+    send_request_msg(framed, request(cwd, script)).await;
 }
 
 /// Read frames until `done` matches one (which is included) or `limit`
@@ -72,13 +83,19 @@ pub async fn read_until_stdout_contains(framed: &mut Raw, needle: &str) -> Vec<M
     .await
 }
 
-/// Read frames until the terminal frame (included) or [`PHASE_LIMIT`]
-/// elapses; see [`read_frames_until`] for the timeout shape.
-pub async fn read_until_terminal(framed: &mut Raw) -> Vec<Message> {
-    read_frames_until(framed, PHASE_LIMIT, |message| {
+/// Read frames until the terminal frame (included) or `limit` elapses; see
+/// [`read_frames_until`] for the timeout shape.
+pub async fn read_until_terminal_within(framed: &mut Raw, limit: Duration) -> Vec<Message> {
+    read_frames_until(framed, limit, |message| {
         matches!(message, Message::Exit(_) | Message::Error(_))
     })
     .await
+}
+
+/// Read frames until the terminal frame (included) or [`PHASE_LIMIT`]
+/// elapses; see [`read_frames_until`] for the timeout shape.
+pub async fn read_until_terminal(framed: &mut Raw) -> Vec<Message> {
+    read_until_terminal_within(framed, PHASE_LIMIT).await
 }
 
 /// All stdout bytes carried by `frames`.
@@ -90,6 +107,26 @@ pub fn stdout_of(frames: &[Message]) -> String {
             _ => None,
         })
         .collect()
+}
+
+/// One request run against a server: the frames seen through the terminal
+/// one, with the derived stdout and terminal frame.
+pub struct RawRun {
+    pub frames: Vec<Message>,
+    pub stdout: String,
+    pub terminal: Option<Message>,
+}
+
+/// Send `request` and collect frames through the terminal frame; see
+/// [`read_until_terminal`] for the timeout shape.
+pub async fn run_request(framed: &mut Raw, request: Request) -> RawRun {
+    send_request_msg(framed, request).await;
+    let frames = read_until_terminal(framed).await;
+    RawRun {
+        stdout: stdout_of(&frames),
+        terminal: terminal_of(&frames).cloned(),
+        frames,
+    }
 }
 
 /// The terminal frame, if one arrived.
