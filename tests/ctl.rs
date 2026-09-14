@@ -131,8 +131,8 @@ fn live_socket(sock: &Path) -> std::os::unix::net::UnixListener {
 /// Deep test harness behind one small interface: owns the `TempDir`, the
 /// Cache files (Env dump, hash, Stamp guard stamp), the fake Runtime adapter
 /// + fake `nix` binaries, the Socket listener guard for Liveness, and the
-///   `run_ctl` env. Tests cross this seam via constructors + query methods
-///   instead of past it via log-file greps.
+///   `run_ctl` env. Tests cross this seam via `Fixture::new(Config)` plus the
+///   three queries `evals`, `launches`, `saw` — never past it via log strings.
 mod fixture {
     use super::{NCAP_VARS, bin_path};
     use super::{base_env, fake_nix, live_socket, run_ctl, write_stub};
@@ -141,6 +141,199 @@ mod fixture {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use tempfile::TempDir;
+
+    /// Freshness of the cached Env dump (CONTEXT.md Freshness: fresh /
+    /// stale / missing). The Watched files list lives on `Config`, so one
+    /// `Fresh` variant covers both `["flake.nix"]` and `[]` — the Cache is
+    /// seeded through the real digest interface over whatever `watch` holds.
+    pub enum Freshness {
+        Fresh,
+        Stale,
+        Missing,
+    }
+
+    /// Liveness of the Container (CONTEXT.md Liveness: Running AND
+    /// Socket-connectable; Running alone is not live). `running` seeds the
+    /// fake Runtime adapter's inspect flag; `connectable` decides whether
+    /// the Socket listener guard is held.
+    pub struct Liveness {
+        pub running: bool,
+        pub connectable: bool,
+    }
+
+    impl Liveness {
+        pub fn live() -> Self {
+            Self {
+                running: true,
+                connectable: true,
+            }
+        }
+
+        pub fn down() -> Self {
+            Self {
+                running: false,
+                connectable: true,
+            }
+        }
+    }
+
+    /// Failure modes of the fake Runtime adapter (concurrent-start race,
+    /// readiness deadline, stop failure). One enum behind the seam replaces
+    /// the old `with_*` failure builders; the bash flag files stay private
+    /// to the module implementation. `RunFailAlways` / `StopFail` have no
+    /// test yet; they document modes the stub honors for future tests.
+    #[allow(dead_code)]
+    pub enum Failure {
+        RunFailOnce,
+        PeerDead,
+        NeverRunning(String),
+        RunFailAlways(String),
+        StopFail,
+    }
+
+    /// Declarative description of the world a test needs. One constructor
+    /// (`Fixture::new`) plus three queries is the whole public surface.
+    pub struct Config {
+        pub liveness: Liveness,
+        pub freshness: Freshness,
+        pub watch: Vec<String>,
+        pub failure: Option<Failure>,
+    }
+
+    impl Default for Config {
+        fn default() -> Self {
+            Self {
+                liveness: Liveness::down(),
+                freshness: Freshness::Missing,
+                watch: Vec::new(),
+                failure: None,
+            }
+        }
+    }
+
+    impl Config {
+        /// Fresh Cache over `["flake.nix"]` with a live Container.
+        pub fn fresh_live() -> Self {
+            Self {
+                liveness: Liveness::live(),
+                freshness: Freshness::Fresh,
+                watch: vec!["flake.nix".to_owned()],
+                failure: None,
+            }
+        }
+
+        /// Fresh Cache over `[]` with the Socket guard held (start-only
+        /// tests that watch nothing stay truly fresh).
+        pub fn fresh_empty() -> Self {
+            Self {
+                liveness: Liveness::down(),
+                freshness: Freshness::Fresh,
+                watch: Vec::new(),
+                failure: None,
+            }
+        }
+    }
+
+    /// What a test may observe about the launch command, parsed once from
+    /// the fake Runtime adapter logs; tests never touch the log files
+    /// directly. Structured queries (`has_mount`, `flag_value`, `has_arg`,
+    /// `ordered_before`, `script_contains`) assert against the argv vector
+    /// so shell rendering (quoting, spacing) can't break them;
+    /// `has_text` remains for genuinely free-form probes (absence checks).
+    pub struct LaunchView {
+        line: String,
+        args: Vec<String>,
+        runs: usize,
+    }
+
+    impl LaunchView {
+        pub fn is_empty(&self) -> bool {
+            self.runs == 0
+        }
+
+        pub fn runs(&self) -> usize {
+            self.runs
+        }
+
+        /// Exact argv present (detached `-d`, image separator `--`,
+        /// single-argv flags like `--cap-drop=all`, whole extra options).
+        pub fn has_arg(&self, arg: &str) -> bool {
+            self.args.iter().any(|a| a == arg)
+        }
+
+        /// Mount spec present, in any argv shape the launch uses:
+        /// standalone spec argv, joined `"-v {spec}"` argv (extra options),
+        /// or a `"-v", "{spec}"` pair (default mounts).
+        pub fn has_mount(&self, spec: &str) -> bool {
+            self.mount_position(spec).is_some()
+        }
+
+        /// Value argv following a flag argv (`-w`, `--socket`,
+        /// `--log-dir`, `--timeout`).
+        pub fn flag_value(&self, flag: &str) -> Option<&str> {
+            self.args
+                .iter()
+                .position(|a| a == flag)
+                .and_then(|i| self.args.get(i + 1).map(String::as_str))
+        }
+
+        /// Ordering between two mount specs (or joined extra-option argv):
+        /// the more-specific mount must come after the broader one.
+        pub fn ordered_before(&self, first: &str, second: &str) -> bool {
+            match (self.mount_position(first), self.mount_position(second)) {
+                (Some(a), Some(b)) => a < b,
+                _ => false,
+            }
+        }
+
+        /// Fragment of the `bash -c` launch script (Env dump `source`,
+        /// Server `exec`).
+        pub fn script_contains(&self, frag: &str) -> bool {
+            self.script_arg().is_some_and(|s| s.contains(frag))
+        }
+
+        /// Substring over the rendered invocation line, for free-form
+        /// probes (absence checks like `.git`). Prefer the structured
+        /// queries above for mounts, flags, and ordering.
+        pub fn has_text(&self, s: &str) -> bool {
+            self.line.contains(s)
+        }
+
+        fn mount_position(&self, spec: &str) -> Option<usize> {
+            let joined = format!("-v {spec}");
+            self.args
+                .iter()
+                .position(|a| a == spec || a == &joined)
+                .or_else(|| {
+                    self.args
+                        .windows(2)
+                        .position(|w| w[0] == "-v" && w[1] == *spec)
+                        // `windows` index is the pair start, which sorts
+                        // the same as the spec argv for ordering purposes.
+                        .map(|i| i + 1)
+                })
+        }
+
+        fn script_arg(&self) -> Option<&str> {
+            self.args
+                .iter()
+                .position(|a| a == "-c")
+                .and_then(|i| self.args.get(i + 1).map(String::as_str))
+        }
+    }
+
+    impl std::fmt::Display for LaunchView {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.line)
+        }
+    }
+
+    /// Observable adapter actions for `saw`.
+    pub enum Action {
+        Stop,
+        Rm,
+        RmBeforeRun,
+    }
 
     pub struct Fixture {
         pub root: PathBuf,
@@ -162,9 +355,9 @@ mod fixture {
     /// `run_fail_first` (concurrent-start race), `run_fail_always`,
     /// `run_never` (readiness deadline), `stop_fail`, and `state_json` for
     /// inspect state output — one stub template behind the seam.
-    /// Logs the single-line invocation to `runtime_log` (for `run_line`
-    /// substring asserts) plus one argv per line for `run` invocations to
-    /// `runtime_args_log` (for no-word-splitting asserts).
+    /// Logs the single-line invocation to `runtime_log` plus one argv per
+    /// line for `run` invocations to `runtime_args_log` — both read once
+    /// behind the `launches` query, never by tests directly.
     fn write_live_stub(
         runtime_bin: &Path,
         state: &Path,
@@ -231,7 +424,7 @@ esac
         write_stub(runtime_bin, &stub);
     }
 
-    fn assemble(tmp: TempDir, running: &str, seed: &str, watch_json: &str, live: bool) -> Fixture {
+    fn assemble(tmp: TempDir, config: Config) -> Fixture {
         let root = tmp.path().join("proj");
         fs::create_dir_all(&root).expect("root");
         fs::write(root.join("flake.nix"), "x").expect("watch file");
@@ -240,7 +433,15 @@ esac
         let sock = tmp.path().join("sock/ncap.sock");
         let state = tmp.path().join("state");
         fs::create_dir_all(&state).expect("state");
-        fs::write(state.join("running"), running).expect("running");
+        fs::write(
+            state.join("running"),
+            if config.liveness.running {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .expect("running");
         let runtime_log = tmp.path().join("runtime.log");
         let runtime_args_log = tmp.path().join("runtime-args.log");
         let nix_log = tmp.path().join("nix.log");
@@ -249,35 +450,68 @@ esac
         write_live_stub(&runtime_bin, &state, &runtime_log, &runtime_args_log);
         fake_nix(&nix_bin, &nix_log, "export FOO=bar\n");
 
+        let watch_json = format!(
+            "[{}]",
+            config
+                .watch
+                .iter()
+                .map(|w| format!("{w:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
-        env.insert("NCAP_WATCH_FILES".into(), watch_json.into());
+        env.insert("NCAP_WATCH_FILES".into(), watch_json);
 
-        let _live = if live { Some(live_socket(&sock)) } else { None };
+        let _live = if config.liveness.connectable {
+            Some(live_socket(&sock))
+        } else {
+            None
+        };
 
-        // Seed the Cache through the real digest interface where fresh.
-        // "fresh" covers watch `["flake.nix"]`; "fresh-empty" covers `[]`
-        // (digest of the empty watch list, no hardcoded hash).
-        if seed == "fresh" {
-            let digest = nix_capsule::ctl::digest::compute(&root, &["flake.nix".to_owned()])
-                .expect("digest");
-            fs::create_dir_all(&cache).expect("cache");
-            fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
-            fs::write(cache.join("hash"), &digest).expect("hash");
-            fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
-        } else if seed == "fresh-empty" {
-            let digest =
-                nix_capsule::ctl::digest::compute(&root, &[] as &[String]).expect("digest");
-            fs::create_dir_all(&cache).expect("cache");
-            fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
-            fs::write(cache.join("hash"), &digest).expect("hash");
-            fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
-        } else if seed == "stale" {
-            fs::create_dir_all(&cache).expect("cache");
-            fs::write(cache.join("env"), "export OLD=1\n").expect("env");
-            fs::write(cache.join("hash"), "0000000000000000").expect("stale hash");
-            fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+        // Seed the Cache through the real digest interface where fresh
+        // (digest of the configured watch list, no hardcoded hash).
+        match config.freshness {
+            Freshness::Fresh => {
+                let digest =
+                    nix_capsule::ctl::digest::compute(&root, &config.watch).expect("digest");
+                fs::create_dir_all(&cache).expect("cache");
+                fs::write(cache.join("env"), "export FOO=bar\n").expect("env");
+                fs::write(cache.join("hash"), &digest).expect("hash");
+                fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+            }
+            Freshness::Stale => {
+                fs::create_dir_all(&cache).expect("cache");
+                fs::write(cache.join("env"), "export OLD=1\n").expect("env");
+                fs::write(cache.join("hash"), "0000000000000000").expect("stale hash");
+                fs::write(cache.join("project"), root.to_string_lossy().as_ref()).expect("stamp");
+            }
+            Freshness::Missing => {}
         }
-        // "missing" seeds nothing: down + no cache.
+
+        // Failure modes of the fake Runtime adapter, behind the seam.
+        match config.failure.as_ref() {
+            None => {}
+            Some(Failure::RunFailOnce) => {
+                fs::write(state.join("run_fail_first"), "").expect("run_fail_first");
+            }
+            Some(Failure::PeerDead) => {
+                // Peer-dead retry = first run fails with name-in-use, then the
+                // retry succeeds: same flag, plus inspect sees Running after rm.
+                fs::write(state.join("run_fail_first"), "").expect("run_fail_first");
+                fs::write(state.join("peer_dead"), "").expect("peer_dead");
+            }
+            Some(Failure::NeverRunning(state_json)) => {
+                fs::write(state.join("run_never"), "").expect("run_never");
+                fs::write(state.join("running"), "false").expect("running");
+                fs::write(state.join("state_json"), state_json).expect("state json");
+            }
+            Some(Failure::RunFailAlways(message)) => {
+                fs::write(state.join("run_fail_always"), message).expect("run_fail_always");
+            }
+            Some(Failure::StopFail) => {
+                fs::write(state.join("stop_fail"), "").expect("stop_fail");
+            }
+        }
 
         // Touch empty logs so query methods never hit missing files.
         let _ = fs::write(&runtime_log, "");
@@ -301,48 +535,18 @@ esac
     }
 
     impl Fixture {
-        pub fn fresh_live() -> Self {
+        /// The single constructor behind the seam: every test declares the
+        /// Liveness, Freshness, Watched files, and Runtime adapter failure it
+        /// needs. Env-only tweaks stay as `with_*` setters below.
+        pub fn new(config: Config) -> Self {
             let tmp = TempDir::new().expect("tempdir");
-            assemble(tmp, "true", "fresh", r#"["flake.nix"]"#, true)
-        }
-
-        /// Fresh with empty watch list: hash matches `digest([])` so
-        /// `start`-only tests that watch nothing stay truly fresh.
-        pub fn fresh_empty() -> Self {
-            let tmp = TempDir::new().expect("tempdir");
-            assemble(tmp, "false", "fresh-empty", "[]", true)
-        }
-
-        /// Fresh + empty watch + no Liveness listener (Running alone is
-        /// not live). Used by the not-live init test so the early-return
-        /// path is genuinely fresh, not stale-then-eval.
-        pub fn fresh_not_live_empty() -> Self {
-            let tmp = TempDir::new().expect("tempdir");
-            assemble(tmp, "true", "fresh-empty", "[]", false)
-        }
-
-        pub fn stale_live() -> Self {
-            let tmp = TempDir::new().expect("tempdir");
-            assemble(tmp, "true", "stale", r#"["flake.nix"]"#, true)
-        }
-
-        pub fn down() -> Self {
-            let tmp = TempDir::new().expect("tempdir");
-            // Liveness needs a connectable Socket for the readiness poll.
-            assemble(tmp, "false", "missing", "[]", true)
+            assemble(tmp, config)
         }
 
         /// Named-root variant for Project root derivation tests.
         pub fn with_root_name(name: &str) -> Self {
-            let tmp = TempDir::new().expect("tempdir");
-            let mut fx = assemble(tmp, "false", "missing", "[]", false);
-            let new_root = fx._tmp.path().join(name);
-            fs::create_dir_all(&new_root).expect("root");
-            fx.root = new_root.clone();
-            fx.env.insert(
-                "NCAP_PROJECT_ROOT".into(),
-                new_root.to_string_lossy().into_owned(),
-            );
+            let mut fx = Self::new(Config::default());
+            fx.set_root(name);
             fx
         }
 
@@ -366,36 +570,6 @@ esac
 
         pub fn with_timeout(mut self, secs: &str) -> Self {
             self.env.insert("NCAP_TIMEOUT".into(), secs.into());
-            self
-        }
-
-        pub fn with_run_fail_once(self) -> Self {
-            fs::write(self.state.join("run_fail_first"), "").expect("run_fail_first");
-            self
-        }
-
-        pub fn with_peer_dead_retry(self) -> Self {
-            // Peer-dead retry = first run fails with name-in-use, then the
-            // retry succeeds: same flag, plus inspect sees Running after rm.
-            let this = self.with_run_fail_once();
-            fs::write(this.state.join("peer_dead"), "").expect("peer_dead");
-            this
-        }
-
-        pub fn with_never_running(self, state_json: &str) -> Self {
-            fs::write(self.state.join("run_never"), "").expect("run_never");
-            fs::write(self.state.join("running"), "false").expect("running");
-            fs::write(self.state.join("state_json"), state_json).expect("state json");
-            self
-        }
-
-        pub fn with_run_fail_always(self, message: &str) -> Self {
-            fs::write(self.state.join("run_fail_always"), message).expect("run_fail_always");
-            self
-        }
-
-        pub fn with_stop_fail(self) -> Self {
-            fs::write(self.state.join("stop_fail"), "").expect("stop_fail");
             self
         }
 
@@ -567,39 +741,44 @@ esac
             fs::read_to_string(path).unwrap_or_default()
         }
 
-        /// Number of `run` invocations seen by the fake Runtime adapter.
-        pub fn runtime_runs(&self) -> usize {
-            Self::read_log(&self.runtime_log)
-                .lines()
-                .filter(|l| l.contains("run "))
-                .count()
-        }
-
         /// Number of `print-dev-env` evals seen by the fake `nix`.
-        pub fn eval_count(&self) -> usize {
+        pub fn evals(&self) -> usize {
             Self::read_log(&self.nix_log)
                 .lines()
                 .filter(|l| l.contains("print-dev-env"))
                 .count()
         }
 
-        pub fn saw_stop(&self) -> bool {
-            Self::read_log(&self.runtime_log)
+        /// Parsed view of the launch command: single-line invocation plus one
+        /// argv per line plus the `run` invocation count.
+        pub fn launches(&self) -> LaunchView {
+            let line = Self::read_log(&self.runtime_log)
                 .lines()
-                .any(|l| l.contains("stop "))
+                .find(|l| l.contains("run "))
+                .unwrap_or_default()
+                .to_owned();
+            let args = Self::read_log(&self.runtime_args_log)
+                .lines()
+                .map(|l| l.to_owned())
+                .collect::<Vec<_>>();
+            let runs = Self::read_log(&self.runtime_log)
+                .lines()
+                .filter(|l| l.contains("run "))
+                .count();
+            LaunchView { line, args, runs }
         }
 
-        pub fn saw_rm(&self) -> bool {
-            Self::read_log(&self.runtime_log).contains("rm ")
-                || self.state.join("rm_called").is_file()
-        }
-
-        /// Pre-launch `rm` ran before the single launch `run`.
-        pub fn saw_rm_before_run(&self) -> bool {
+        /// Observable Runtime adapter actions: `Stop`, `Rm`, `RmBeforeRun`
+        /// (pre-launch `rm` ran before the launch `run`).
+        pub fn saw(&self, action: Action) -> bool {
             let log = Self::read_log(&self.runtime_log);
-            match (log.find("rm "), log.find("run ")) {
-                (Some(rm), Some(run)) => rm < run,
-                _ => false,
+            match action {
+                Action::Stop => log.lines().any(|l| l.contains("stop ")),
+                Action::Rm => log.contains("rm ") || self.state.join("rm_called").is_file(),
+                Action::RmBeforeRun => match (log.find("rm "), log.find("run ")) {
+                    (Some(rm), Some(run)) => rm < run,
+                    _ => false,
+                },
             }
         }
 
@@ -612,24 +791,6 @@ esac
 
         pub fn runtime_log(&self) -> String {
             Self::read_log(&self.runtime_log)
-        }
-
-        /// The single `run` invocation line of the launch command.
-        pub fn run_line(&self) -> String {
-            Self::read_log(&self.runtime_log)
-                .lines()
-                .find(|l| l.contains("run "))
-                .unwrap_or_default()
-                .to_owned()
-        }
-
-        /// One argv per line for `run` invocations (no word-splitting
-        /// probe). Only `run` invocations are logged here.
-        pub fn run_arg_lines(&self) -> Vec<String> {
-            Self::read_log(&self.runtime_args_log)
-                .lines()
-                .map(|l| l.to_owned())
-                .collect()
         }
 
         pub fn clear_runtime_log(&self) {
@@ -744,7 +905,7 @@ fn base_env(
 
 #[test]
 fn init_refuses_when_a_demanded_var_is_missing() {
-    let fx = fixture::Fixture::down();
+    let fx = fixture::Fixture::new(fixture::Config::default());
     let demanded = [
         "NCAP_PROJECT_ROOT",
         "NCAP_PROJECT",
@@ -780,7 +941,7 @@ fn init_refuses_when_a_demanded_var_is_missing() {
 
 #[test]
 fn commands_refuse_watch_files_that_are_not_relative_files() {
-    let fx = fixture::Fixture::down();
+    let fx = fixture::Fixture::new(fixture::Config::default());
     std::fs::create_dir_all(fx.root.join("adir")).expect("root");
 
     let cases = [
@@ -807,7 +968,7 @@ fn commands_refuse_watch_files_that_are_not_relative_files() {
 #[test]
 fn start_demands_full_env_including_nix_devshell_and_image() {
     // Pre-seed cache env so start's "no cached env" check passes.
-    let fx = fixture::Fixture::fresh_empty();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
 
     // Uniform resolve: start without NCAP_NIX/NCAP_DEVSHELL must refuse.
     let mut env = fx.env.clone();
@@ -835,7 +996,7 @@ fn start_demands_full_env_including_nix_devshell_and_image() {
 
 #[test]
 fn stop_refuses_without_container_or_derivation() {
-    let fx = fixture::Fixture::down();
+    let fx = fixture::Fixture::new(fixture::Config::default());
 
     // No NCAP_CONTAINER, no NCAP_PROJECT, no root → must name NCAP_PROJECT_ROOT
     let mut env = HashMap::new();
@@ -936,7 +1097,7 @@ fn derived_project_name_is_used_and_empty_is_a_hard_error() {
 #[test]
 fn stamp_guard_same_root_passes_absent_written_different_is_error() {
     // Container down → eval + start; Liveness guard held by down().
-    let mut fx = fixture::Fixture::down();
+    let mut fx = fixture::Fixture::new(fixture::Config::default());
 
     let root_a = fx.tmp_path().join("root-a");
     fs::create_dir_all(&root_a).expect("root-a");
@@ -984,7 +1145,7 @@ fn stamp_guard_same_root_passes_absent_written_different_is_error() {
 
 #[test]
 fn init_fresh_and_running_performs_zero_evals() {
-    let fx = fixture::Fixture::fresh_live();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live());
     let out = fx.init();
     assert!(
         out.status.success(),
@@ -992,12 +1153,12 @@ fn init_fresh_and_running_performs_zero_evals() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        fx.eval_count(),
+        fx.evals(),
         0,
         "fresh+running must not eval (interface query, not log grep)"
     );
     assert_eq!(
-        fx.runtime_runs(),
+        fx.launches().runs(),
         0,
         "fresh+running must not start (interface query, not log grep)"
     );
@@ -1005,7 +1166,12 @@ fn init_fresh_and_running_performs_zero_evals() {
 
 #[test]
 fn init_running_but_stale_triggers_reeval_and_restart() {
-    let fx = fixture::Fixture::stale_live();
+    let fx = fixture::Fixture::new(fixture::Config {
+        liveness: fixture::Liveness::live(),
+        freshness: fixture::Freshness::Stale,
+        watch: vec!["flake.nix".to_owned()],
+        failure: None,
+    });
     // Live but stale ⇒ re-eval, non-fatal stop, then start to readiness.
     let out = fx.init();
     assert!(
@@ -1014,16 +1180,19 @@ fn init_running_but_stale_triggers_reeval_and_restart() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        fx.eval_count() >= 1,
+        fx.evals() >= 1,
         "stale must re-eval through the fixture interface"
     );
-    assert!(fx.saw_stop(), "stale must stop before restarting");
-    assert!(fx.runtime_runs() >= 1, "stale must start after re-eval");
+    assert!(
+        fx.saw(fixture::Action::Stop),
+        "stale must stop before restarting"
+    );
+    assert!(fx.launches().runs() >= 1, "stale must start after re-eval");
 }
 
 #[test]
 fn init_down_triggers_ensure_cache_and_start() {
-    let fx = fixture::Fixture::down().with_watch_files("[]");
+    let fx = fixture::Fixture::new(fixture::Config::default()).with_watch_files("[]");
     // No cache yet: init must eval then start.
     let out = fx.init();
     assert!(
@@ -1032,11 +1201,11 @@ fn init_down_triggers_ensure_cache_and_start() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        fx.eval_count() >= 1,
+        fx.evals() >= 1,
         "down+missing must eval through the fixture interface"
     );
     assert!(
-        fx.runtime_runs() >= 1,
+        fx.launches().runs() >= 1,
         "down must start through the fixture interface"
     );
     assert!(fx.cache.join("env").is_file(), "env must be cached");
@@ -1051,7 +1220,16 @@ fn running_without_socket_is_not_live() {
     // Fresh cache: a live container would make init return early with
     // "already running and fresh" and zero evals. Deliberately no
     // listener on the Socket path.
-    let fx = fixture::Fixture::fresh_not_live_empty().with_timeout("1");
+    let fx = fixture::Fixture::new(fixture::Config {
+        liveness: fixture::Liveness {
+            running: true,
+            connectable: false,
+        },
+        freshness: fixture::Freshness::Fresh,
+        watch: Vec::new(),
+        failure: None,
+    })
+    .with_timeout("1");
 
     // init must not take the live+fresh early return: it must attempt a
     // start (visible as a `run` invocation), which then fails readiness
@@ -1064,12 +1242,12 @@ fn running_without_socket_is_not_live() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("never became live"), "stderr={stderr}");
     assert!(
-        fx.runtime_runs() >= 1,
+        fx.launches().runs() >= 1,
         "not-live init must attempt start: {}",
         fx.runtime_log()
     );
     assert_eq!(
-        fx.eval_count(),
+        fx.evals(),
         0,
         "fresh+not-live init must not re-eval before start"
     );
@@ -1082,7 +1260,7 @@ fn running_without_socket_is_not_live() {
         "Running without a connectable socket must not count as live"
     );
     assert!(
-        fx.runtime_runs() >= 1,
+        fx.launches().runs() >= 1,
         "not-live start must attempt run: {}",
         fx.runtime_log()
     );
@@ -1095,9 +1273,13 @@ fn running_without_socket_is_not_live() {
 #[test]
 fn start_never_reaching_running_fails_with_state_and_log_tail() {
     // Never Running: run never flips the flag (readiness deadline).
-    let fx = fixture::Fixture::fresh_empty()
-        .with_timeout("1")
-        .with_never_running(r#"{"Running":false,"Status":"exited","Error":"bad image"}"#);
+    let fx = fixture::Fixture::new(fixture::Config {
+        failure: Some(fixture::Failure::NeverRunning(
+            r#"{"Running":false,"Status":"exited","Error":"bad image"}"#.to_owned(),
+        )),
+        ..fixture::Config::fresh_empty()
+    })
+    .with_timeout("1");
     fx.seed_server_logs("old log line\n", "line1\nline2\nEXPECTED_TAIL_MARKER\n");
 
     let out = fx.start();
@@ -1119,7 +1301,10 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
 #[test]
 fn concurrent_start_peer_running_is_success() {
     // After the failed run, inspect says running true → success.
-    let fx = fixture::Fixture::fresh_live().with_run_fail_once();
+    let fx = fixture::Fixture::new(fixture::Config {
+        failure: Some(fixture::Failure::RunFailOnce),
+        ..fixture::Config::fresh_live()
+    });
     let out = fx.start();
     assert!(
         out.status.success(),
@@ -1127,7 +1312,7 @@ fn concurrent_start_peer_running_is_success() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !fx.saw_rm(),
+        !fx.saw(fixture::Action::Rm),
         "peer running must not rm: {}",
         fx.runtime_log()
     );
@@ -1137,7 +1322,10 @@ fn concurrent_start_peer_running_is_success() {
 fn concurrent_start_peer_dead_removes_and_retries_once() {
     // First inspect after failure says false so we go to rm+retry; the
     // retry's run succeeds and the poll then sees Running.
-    let fx = fixture::Fixture::fresh_empty().with_peer_dead_retry();
+    let fx = fixture::Fixture::new(fixture::Config {
+        failure: Some(fixture::Failure::PeerDead),
+        ..fixture::Config::fresh_empty()
+    });
     fx.set_running(false);
     // Liveness needs a connectable Socket: Running alone is not live
     // (fresh_empty already holds the guard).
@@ -1148,7 +1336,7 @@ fn concurrent_start_peer_dead_removes_and_retries_once() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        fx.saw_rm(),
+        fx.saw(fixture::Action::Rm),
         "must have removed dead container: {}",
         fx.runtime_log()
     );
@@ -1160,7 +1348,7 @@ fn concurrent_start_peer_dead_removes_and_retries_once() {
 fn start_removes_stopped_container_before_launch() {
     // Exists but stopped: `inspect -f State.Running` says false, while a
     // bare `inspect` succeeds (the fake's default branch exits 0).
-    let fx = fixture::Fixture::fresh_empty();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     fx.set_running(false);
     // Liveness needs a connectable Socket (fresh_empty holds the guard).
     let out = fx.start();
@@ -1171,7 +1359,7 @@ fn start_removes_stopped_container_before_launch() {
     );
     // Pre-launch rm must run before the single launch.
     assert!(
-        fx.saw_rm_before_run(),
+        fx.saw(fixture::Action::RmBeforeRun),
         "pre-launch rm must run before run: {}",
         fx.runtime_log()
     );
@@ -1189,7 +1377,7 @@ fn start_removes_stopped_container_before_launch() {
 
 #[test]
 fn stop_is_idempotent() {
-    let fx = fixture::Fixture::fresh_live().not_live();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live()).not_live();
     // First: running true → stop succeeds (full env via the seam).
     let out = fx.stop();
     assert!(
@@ -1213,7 +1401,7 @@ fn stop_is_idempotent() {
 
 #[test]
 fn clean_removes_project_files_and_spares_foreign_entries() {
-    let mut fx = fixture::Fixture::down();
+    let mut fx = fixture::Fixture::new(fixture::Config::default());
     // Drop the Liveness guard so a plain Socket file can stand in.
     fx.drop_live();
     fx.seed_clean_full();
@@ -1271,7 +1459,7 @@ fn clean_removes_project_files_and_spares_foreign_entries() {
 
 #[test]
 fn clean_removes_empty_dirs_and_missing_paths_are_fine() {
-    let mut fx = fixture::Fixture::down();
+    let mut fx = fixture::Fixture::new(fixture::Config::default());
     fx.drop_live();
     fx.seed_clean_minimal();
 
@@ -1302,7 +1490,7 @@ fn clean_removes_empty_dirs_and_missing_paths_are_fine() {
 #[test]
 fn restart_tolerates_a_stopped_container() {
     // Start not running; stop will be non-fatal, then init will start.
-    let fx = fixture::Fixture::down();
+    let fx = fixture::Fixture::new(fixture::Config::default());
     // Liveness needs a connectable Socket: Running alone is not live
     // (down() already holds the guard).
     let out = fx.restart();
@@ -1312,7 +1500,7 @@ fn restart_tolerates_a_stopped_container() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        fx.runtime_runs() >= 1,
+        fx.launches().runs() >= 1,
         "restart must start through the fixture interface"
     );
 }
@@ -1323,7 +1511,7 @@ fn restart_tolerates_a_stopped_container() {
 
 #[test]
 fn status_reports_all_three_dimensions() {
-    let fx = fixture::Fixture::fresh_live();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live());
     let out = fx.status();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1353,7 +1541,7 @@ fn runtime_selection_absolute_path_is_rejected() {
     // Absolute runtime paths are rejected by ctl validation; only
     // `podman`/`docker` (resolved via PATH) are accepted. Raw invocation
     // without the shim so the absolute path reaches validation.
-    let fx = fixture::Fixture::down();
+    let fx = fixture::Fixture::new(fixture::Config::default());
     let out = fx.run_raw(&["stop"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1362,7 +1550,7 @@ fn runtime_selection_absolute_path_is_rejected() {
 
 #[test]
 fn missing_runtime_is_an_error_naming_it() {
-    let fx = fixture::Fixture::down();
+    let fx = fixture::Fixture::new(fixture::Config::default());
     let bin_dir = fx.tmp_path().join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
 
@@ -1381,7 +1569,7 @@ fn missing_runtime_is_an_error_naming_it() {
 
 #[test]
 fn invalid_runtime_is_rejected() {
-    let fx = fixture::Fixture::down().with_env("NCAP_RUNTIME", "nerdctl");
+    let fx = fixture::Fixture::new(fixture::Config::default()).with_env("NCAP_RUNTIME", "nerdctl");
     let out = fx.stop();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1395,7 +1583,7 @@ fn invalid_runtime_is_rejected() {
 
 #[test]
 fn runtime_dir_is_created_with_0700() {
-    let mut fx = fixture::Fixture::down();
+    let mut fx = fixture::Fixture::new(fixture::Config::default());
     fx.drop_live();
     // No explicit NCAP_SOCKET — let it derive via XDG fallback. Also drop
     // the preset project/container so derivation follows the Project root
@@ -1463,7 +1651,7 @@ fn runtime_dir_is_created_with_0700() {
 
 #[test]
 fn start_assembles_exact_default_mount_set_and_launch_command() {
-    let fx = fixture::Fixture::fresh_empty();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     // Ensure .git does NOT exist for this base case
     assert!(!fx.root.join(".git").exists());
     fx.set_running(false);
@@ -1476,81 +1664,85 @@ fn start_assembles_exact_default_mount_set_and_launch_command() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let run_line = fx.run_line();
-    assert!(!run_line.is_empty(), "must have run line");
+    let launch = fx.launches();
+    assert!(!launch.is_empty(), "must have run line");
     let socket_dir = fx.sock.parent().unwrap().to_string_lossy();
     let root = &fx.root;
     let cache = &fx.cache;
     let logs = &fx.logs;
     let sock = &fx.sock;
 
-    // Exact default mount set
+    // Exact default mount set, asserted against the argv vector so shell
+    // rendering can't break them.
     assert!(
-        run_line.contains("-v /nix:/nix:ro"),
-        "missing /nix ro mount: {run_line}"
+        launch.has_mount("/nix:/nix:ro"),
+        "missing /nix ro mount: {launch}"
     );
     assert!(
-        run_line.contains(&format!("-v {}:{}", socket_dir, socket_dir)),
-        "missing socket dir mount: {run_line}"
+        launch.has_mount(&format!("{}:{}", socket_dir, socket_dir)),
+        "missing socket dir mount: {launch}"
     );
     assert!(
-        run_line.contains(&format!("-v {}:{}", root.display(), root.display())),
-        "missing project root mount: {run_line}"
+        launch.has_mount(&format!("{}:{}", root.display(), root.display())),
+        "missing project root mount: {launch}"
+    );
+    assert_eq!(
+        launch.flag_value("-w"),
+        Some(root.to_string_lossy().as_ref()),
+        "missing workdir: {launch}"
     );
     assert!(
-        run_line.contains(&format!("-w {}", root.display())),
-        "missing workdir: {run_line}"
+        launch.has_mount(&format!("{}:{}:ro", cache.display(), cache.display())),
+        "missing cache ro mount: {launch}"
     );
     assert!(
-        run_line.contains(&format!("-v {}:{}:ro", cache.display(), cache.display())),
-        "missing cache ro mount: {run_line}"
-    );
-    assert!(
-        run_line.contains(&format!("-v {}:{}", logs.display(), logs.display())),
-        "missing log rw mount: {run_line}"
+        launch.has_mount(&format!("{}:{}", logs.display(), logs.display())),
+        "missing log rw mount: {launch}"
     );
     // .git must be absent
     assert!(
-        !run_line.contains(".git"),
-        "unexpected .git mount without git dir: {run_line}"
+        !launch.has_text(".git"),
+        "unexpected .git mount without git dir: {launch}"
     );
     // Launch command shape: quoted source dump && quoted exec server with flags
-    let expected_source = format!("source '{}/env'", cache.display());
     assert!(
-        run_line.contains(&expected_source),
-        "missing source dump: {run_line}"
+        launch.script_contains(&format!("source '{}/env'", cache.display())),
+        "missing source dump: {launch}"
     );
     assert!(
-        run_line.contains("&& exec '/nix/store/fake/bin/ncap-server'"),
-        "missing exec server: {run_line}"
+        launch.script_contains("&& exec '/nix/store/fake/bin/ncap-server'"),
+        "missing exec server: {launch}"
     );
     assert!(
-        run_line.contains(&format!("--socket '{}'", sock.display())),
-        "missing --socket flag: {run_line}"
+        launch.script_contains(&format!("--socket '{}'", sock.display())),
+        "missing --socket flag: {launch}"
     );
     assert!(
-        run_line.contains(&format!("--log-dir '{}'", logs.display())),
-        "missing --log-dir flag: {run_line}"
+        launch.script_contains(&format!("--log-dir '{}'", logs.display())),
+        "missing --log-dir flag: {launch}"
     );
     assert!(
-        run_line.contains("--timeout 2"),
-        "missing --timeout flag: {run_line}"
+        launch.script_contains("--timeout 2"),
+        "missing --timeout flag: {launch}"
     );
     // Ensure detached and image/bash shape
-    assert!(run_line.contains("run -d"), "missing run -d: {run_line}");
     assert!(
-        run_line.contains("-- alpine:latest"),
-        "missing image separator: {run_line}"
+        launch.has_arg("run") && launch.has_arg("-d"),
+        "missing run -d: {launch}"
     );
     assert!(
-        run_line.contains("/nix/store/fake/bin/bash -c"),
-        "missing bash -c: {run_line}"
+        launch.has_arg("--") && launch.has_arg("alpine:latest"),
+        "missing image separator: {launch}"
+    );
+    assert!(
+        launch.has_arg("/nix/store/fake/bin/bash") && launch.has_arg("-c"),
+        "missing bash -c: {launch}"
     );
 }
 
 #[test]
 fn git_mount_present_readonly_when_git_dir_exists() {
-    let fx = fixture::Fixture::fresh_empty();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     fx.seed_git();
     fx.set_running(false);
     // Liveness needs a connectable Socket (fresh_empty holds the guard).
@@ -1560,22 +1752,18 @@ fn git_mount_present_readonly_when_git_dir_exists() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_line = fx.run_line();
-    let expected = format!(
-        "-v {}/.git:{}/.git:ro",
-        fx.root.display(),
-        fx.root.display()
-    );
+    let launch = fx.launches();
+    let expected = format!("{}/.git:{}/.git:ro", fx.root.display(), fx.root.display());
     assert!(
-        run_line.contains(&expected),
-        "missing .git ro mount: {run_line}"
+        launch.has_mount(&expected),
+        "missing .git ro mount: {launch}"
     );
 }
 
 #[test]
 fn git_mount_absent_without_error_outside_git_repo() {
     // No .git
-    let fx = fixture::Fixture::fresh_empty();
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     fx.set_running(false);
     // Liveness needs a connectable Socket (fresh_empty holds the guard).
     let out = fx.start();
@@ -1584,18 +1772,18 @@ fn git_mount_absent_without_error_outside_git_repo() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_line = fx.run_line();
+    let launch = fx.launches();
     assert!(
-        !run_line.contains(".git"),
-        "unexpected .git mount outside repo: {run_line}"
+        !launch.has_text(".git"),
+        "unexpected .git mount outside repo: {launch}"
     );
 }
 
 #[test]
 fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
     // Reference an unset variable via $VAR
-    let fx =
-        fixture::Fixture::fresh_empty().with_env("NCAP_RUN_OPTS", r#"["-v $UNSET_NCAP_XYZ:/mnt"]"#);
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
+        .with_env("NCAP_RUN_OPTS", r#"["-v $UNSET_NCAP_XYZ:/mnt"]"#);
     fx.set_running(false);
     // Ensure the variable is not set in the child's env (unique name).
     debug_assert!(std::env::var("UNSET_NCAP_XYZ").is_err());
@@ -1607,7 +1795,7 @@ fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
         "must name unset var: {stderr}"
     );
     assert_eq!(
-        fx.runtime_runs(),
+        fx.launches().runs(),
         0,
         "must not have run the container before error: {}",
         fx.runtime_log()
@@ -1617,7 +1805,7 @@ fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
 #[test]
 fn extra_options_expansion_sets_var_is_passed_and_no_word_splitting() {
     // $TEST_EXPAND should expand to "/tmp/foo bar" containing a space; no word splitting means it stays one arg
-    let fx = fixture::Fixture::fresh_empty()
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("TEST_EXPAND", "/tmp/foo bar")
         .with_env("NCAP_RUN_OPTS", r#"["-v $TEST_EXPAND:/mnt"]"#);
     fx.set_running(false);
@@ -1628,42 +1816,28 @@ fn extra_options_expansion_sets_var_is_passed_and_no_word_splitting() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_line = fx.run_line();
-    // The expanded arg must appear as "-v /tmp/foo bar:/mnt" not split
+    let launch = fx.launches();
+    // The expanded arg must survive as a single argv, not split on the
+    // embedded space.
     assert!(
-        run_line.contains("-v /tmp/foo bar:/mnt"),
-        "expanded arg must be present without word splitting: {run_line}"
-    );
-    // Argv-level probe: the expanded value must survive as a single argv,
-    // not split on the embedded space.
-    let args = fx.run_arg_lines();
-    assert!(
-        args.contains(&"-v /tmp/foo bar:/mnt".to_owned()),
-        "expanded arg must be a single argv without word splitting: {args:?}"
+        launch.has_arg("-v /tmp/foo bar:/mnt"),
+        "expanded arg must be present without word splitting: {launch}"
     );
     assert!(
-        !args.contains(&"/tmp/foo".to_owned()) && !args.contains(&"bar:/mnt".to_owned()),
-        "split fragments must be absent: {args:?}"
+        !launch.has_arg("/tmp/foo") && !launch.has_arg("bar:/mnt"),
+        "split fragments must be absent: {launch}"
     );
     // Ensure defaults still come before the extra option
-    let nix_pos = args
-        .iter()
-        .position(|a| a == "/nix:/nix:ro")
-        .expect("nix mount");
-    let extra_pos = args
-        .iter()
-        .position(|a| a == "-v /tmp/foo bar:/mnt")
-        .expect("extra mount");
     assert!(
-        nix_pos < extra_pos,
-        "defaults must come before extraOptions: {args:?}"
+        launch.ordered_before("/nix:/nix:ro", "-v /tmp/foo bar:/mnt"),
+        "defaults must come before extraOptions: {launch}"
     );
 }
 
 #[test]
 fn harden_adds_security_flags_and_ro_mounts_for_present_watch_files_skips_missing() {
     // missing.nix is absent
-    let fx = fixture::Fixture::fresh_live()
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live())
         .with_harden(true)
         .with_watch_files(r#"["flake.nix", "missing.nix"]"#);
     fx.set_running(false);
@@ -1674,41 +1848,46 @@ fn harden_adds_security_flags_and_ro_mounts_for_present_watch_files_skips_missin
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_line = fx.run_line();
+    let launch = fx.launches();
     let root = &fx.root;
     assert!(
-        run_line.contains("--cap-drop=all"),
-        "missing --cap-drop: {run_line}"
+        launch.has_arg("--cap-drop=all"),
+        "missing --cap-drop: {launch}"
     );
     assert!(
-        run_line.contains("--security-opt=no-new-privileges"),
-        "missing --security-opt: {run_line}"
+        launch.has_arg("--security-opt=no-new-privileges"),
+        "missing --security-opt: {launch}"
     );
     let expected = format!(
-        "-v {}/flake.nix:{}/flake.nix:ro",
+        "{}/flake.nix:{}/flake.nix:ro",
         root.display(),
         root.display()
     );
     assert!(
-        run_line.contains(&expected),
-        "missing ro watch mount: {run_line}"
+        launch.has_mount(&expected),
+        "missing ro watch mount: {launch}"
     );
-    let missing = format!("-v {}/missing.nix", root.display());
+    let missing = format!(
+        "{}/missing.nix:{}/missing.nix:ro",
+        root.display(),
+        root.display()
+    );
     assert!(
-        !run_line.contains(&missing),
-        "missing entry must be skipped: {run_line}"
+        !launch.has_mount(&missing),
+        "missing entry must be skipped: {launch}"
     );
     // More-specific mount after root
-    let root_mount = format!("-v {}:{}", root.display(), root.display());
+    let root_mount = format!("{}:{}", root.display(), root.display());
     assert!(
-        run_line.find(&root_mount).unwrap() < run_line.find(&expected).unwrap(),
-        "watch mount after root: {run_line}"
+        launch.ordered_before(&root_mount, &expected),
+        "watch mount after root: {launch}"
     );
 }
 
 #[test]
 fn harden_off_emits_no_flags_nor_extra_mounts() {
-    let fx = fixture::Fixture::fresh_live().with_watch_files(r#"["flake.nix"]"#);
+    let fx =
+        fixture::Fixture::new(fixture::Config::fresh_live()).with_watch_files(r#"["flake.nix"]"#);
     fx.set_running(false);
     // No Harden set (default off); Liveness guard held by fresh_live.
     let out = fx.start();
@@ -1717,30 +1896,30 @@ fn harden_off_emits_no_flags_nor_extra_mounts() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_line = fx.run_line();
+    let launch = fx.launches();
     let root = &fx.root;
     assert!(
-        !run_line.contains("--cap-drop"),
-        "harden off must not emit cap-drop: {run_line}"
+        !launch.has_text("--cap-drop"),
+        "harden off must not emit cap-drop: {launch}"
     );
     assert!(
-        !run_line.contains("no-new-privileges"),
-        "harden off must not emit security-opt: {run_line}"
+        !launch.has_text("no-new-privileges"),
+        "harden off must not emit security-opt: {launch}"
     );
     let watch_mount = format!(
-        "-v {}/flake.nix:{}/flake.nix:ro",
+        "{}/flake.nix:{}/flake.nix:ro",
         root.display(),
         root.display()
     );
     assert!(
-        !run_line.contains(&watch_mount),
-        "harden off must not mount watch file: {run_line}"
+        !launch.has_mount(&watch_mount),
+        "harden off must not mount watch file: {launch}"
     );
 }
 
 #[test]
 fn extra_options_braced_expansion_and_literal_passthrough() {
-    let fx = fixture::Fixture::fresh_empty()
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("NCAP_TEST_BRACED", "braced-val")
         .with_env(
             "NCAP_RUN_OPTS",
@@ -1754,31 +1933,18 @@ fn extra_options_braced_expansion_and_literal_passthrough() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_line = fx.run_line();
-    assert!(
-        run_line.contains("--braced=braced-val"),
-        "braced expansion: {run_line}"
-    );
-    assert!(
-        run_line.contains("literal-no-expand"),
-        "literal passthrough: {run_line}"
-    );
-    assert!(
-        run_line.contains("-v braced-val:/mnt"),
-        "dollar expansion: {run_line}"
-    );
+    let launch = fx.launches();
     // Argv-level lock-in: each option must survive as its own argv.
-    let args = fx.run_arg_lines();
     assert!(
-        args.contains(&"--braced=braced-val".to_owned()),
-        "braced argv: {args:?}"
+        launch.has_arg("--braced=braced-val"),
+        "braced expansion: {launch}"
     );
     assert!(
-        args.contains(&"literal-no-expand".to_owned()),
-        "literal argv: {args:?}"
+        launch.has_arg("literal-no-expand"),
+        "literal passthrough: {launch}"
     );
     assert!(
-        args.contains(&"-v braced-val:/mnt".to_owned()),
-        "dollar argv: {args:?}"
+        launch.has_arg("-v braced-val:/mnt"),
+        "dollar expansion: {launch}"
     );
 }
