@@ -403,7 +403,7 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
             signal: None,
         }),
     ],
-    Some("ok"), 0, &["version", "9.9.9"]
+    Some("ok"), 0, "9.9.9"
     ; "version_mismatch_warns_but_command_succeeds"
 )]
 #[test_case(
@@ -414,7 +414,7 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
             signal: None,
         }),
     ],
-    Some("ok"), 0, &["version"]
+    Some("ok"), 0, "version"
     ; "version_absent_warns_but_command_succeeds"
 )]
 #[test_case(
@@ -422,14 +422,14 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
         code: None,
         signal: None,
     })],
-    None, 1, &["status", "unknown"]
+    None, 1, "carries neither"
     ; "exit_null_null_warns_and_exits_1"
 )]
 #[test_case(
     vec![Message::Error(ErrorMsg {
         message: "boom".into(),
     })],
-    None, 1, &["boom"]
+    None, 1, "boom"
     ; "error_frame_exits_1_with_message_on_stderr"
 )]
 #[tokio::test(flavor = "multi_thread")]
@@ -437,21 +437,14 @@ async fn client_reports_what_the_server_frames_imply(
     respond: Vec<Message>,
     stdout: Option<&str>,
     code: i32,
-    stderr_any_of: &[&str],
+    stderr: &str,
 ) {
     let server = Server::builder().respond(respond).start().await;
     let out = server.client().run(&["echo", "hi"]);
     server.stop();
 
     assert_exit_and_stdout(&out, code, stdout);
-    let lowered = out.stderr.to_lowercase();
-    assert!(
-        stderr_any_of
-            .iter()
-            .any(|hint| lowered.contains(&hint.to_lowercase())),
-        "stderr={}",
-        out.stderr
-    );
+    assert!(out.stderr.contains(stderr), "stderr={}", out.stderr);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -481,7 +474,7 @@ async fn empty_key_env_flag_is_a_local_error_before_any_connection() {
 
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        out.stderr.contains("invalid `--env` `=VALUE`: empty key"),
+        out.stderr.contains("`--env` `=VALUE` has an empty key"),
         "stderr={}",
         out.stderr
     );

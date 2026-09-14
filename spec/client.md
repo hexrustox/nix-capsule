@@ -86,7 +86,7 @@ it directly. The protocol is the only path.
 | Child killed by signal | `128 + signal` |
 | Terminal `Exit` carries code `127` (spawn `ENOENT`, or a Child's own 127) | prints `ncap: <command>: command not found` to stderr; exits `127` |
 | Terminal `Exit` carries code `126` (spawn `EACCES`, or a Child's own 126) | prints `ncap: <command>: permission denied` to stderr; exits `126` |
-| Terminal `Exit` with neither field set (status unknowable) | warning on stderr, then `1` |
+| Terminal `Exit` with neither field set (status unknowable) | error on stderr (`` `Exit` frame carries neither `code` nor `signal` ``), then `1` |
 | Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`, invalid `--env`, a `Signal`-frame send failure) | `1` |
 | `ServerStopping` received — the Client bails immediately and stops streaming — or the socket closed without a terminal frame | `143` (128 + SIGTERM) |
 

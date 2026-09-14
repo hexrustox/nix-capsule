@@ -57,6 +57,11 @@ Prescriptive advice is carried outside the message text:
   Errors return up the stack; `eprintln!()` fires only there, never mid-task
   in command or library code — command handlers surface errors and notices by
   returning values the toplevel renders.
+- **Warnings are not errors**: a detected-but-nonterminal condition (the
+  session goes on, or the exit code carries the signal) may print mid-task as
+  its own prefix-carrying stderr line — e.g. the client's version-mismatch
+  and missing-`Version`-frame warnings (src/client.rs). Everything that
+  fails the run is an error and follows the rule above.
 - Every rendered line carries the binary name as prefix
   (`ncap: {err}` / `ncap-ctl: {err}` / `ncap-server: {err}`); a prefix-less
   error is a bug.
@@ -109,19 +114,12 @@ String errors:
   `src/ctl/runtime.rs:99-176`
 - `map_err(|err| err.to_string())` chains (`src/ctl/mod.rs:267-282`)
 
-Contextless io errors:
-
-- Leaf pass-through `Io(#[from] io::Error)` with `#[error("{0}")]`
-  (`src/client.rs:58-59`) — wrap every io error in a variant naming the
-  operation and object
-
 Mid-task rendering:
 
 - `eprintln!` in command code rather than at the toplevel
-  (`src/ctl/mod.rs:112, 239, 269, 276, 337, 365`; `src/client.rs:140, 316,
-  320, 326, 334`). The client's runtime server-message forwarding at
-  `client.rs:154` is data relay, not an error diagnostic, and keeps its raw
-  form.
+  (`src/ctl/mod.rs:112, 239, 269, 276, 337, 365`). The client's runtime
+  server-message forwarding at `client.rs` (the `Error` frame relay) is data
+  relay, not an error diagnostic, and keeps its raw form.
 
 ## Good vs bad
 

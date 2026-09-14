@@ -12,11 +12,33 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
-use crate::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
+use crate::protocol::{
+    CURRENT_VERSION, DecodeError, EncodeError, Exit, FrameCodec, Message, Request, SignalMsg,
+};
 
 /// Exit code for an orderly server shutdown: 128 + SIGTERM. `ServerStopping`
 /// and a clean close without a terminal frame both carry it.
 const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
+
+/// Outcome of a session: the exit code the client process reports plus any
+/// notice the entry point renders on stderr before exiting.
+struct Outcome {
+    code: i32,
+    notice: Option<String>,
+}
+
+impl Outcome {
+    fn just(code: i32) -> Self {
+        Self { code, notice: None }
+    }
+
+    fn with_notice(code: i32, notice: String) -> Self {
+        Self {
+            code,
+            notice: Some(notice),
+        }
+    }
+}
 
 /// Run `command` against the server listening on `socket`.
 ///
@@ -24,25 +46,22 @@ const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
 /// `None` it defaults to the client's own current directory. `env` carries the
 /// `--env` flags, each a `KEY=VALUE` override or a bare `KEY` to copy from
 /// this process. Non-UTF-8 bytes in `env`/`command` convert lossily
-/// (`U+FFFD`) at this boundary — never rejected. Returns the exit code the
+/// (`U+FFFD`) at this boundary — never rejected. Returns the message to print
+/// on stderr, if any (unprefixed, may be multi-line), and the exit code the
 /// client process should report.
 pub async fn run(
     socket: &Path,
     cwd: Option<PathBuf>,
     env: Vec<OsString>,
     command: Vec<OsString>,
-) -> i32 {
+) -> (Option<String>, i32) {
     match session(socket, cwd, env, command).await {
-        Ok(code) => code,
-        Err(err @ ClientError::Connect { .. }) => {
-            eprintln!("ncap: {err}");
-            eprintln!("  run `ncap-ctl init` to start this project's container");
-            1
-        }
-        Err(err) => {
-            eprintln!("ncap: {err}");
-            1
-        }
+        Ok(outcome) => (outcome.notice, outcome.code),
+        Err(err @ ClientError::Connect { .. }) => (
+            Some(format!("{err}\nrun `ncap-ctl init` to start this project's container")),
+            1,
+        ),
+        Err(err) => (Some(err.to_string()), 1),
     }
 }
 
@@ -55,8 +74,21 @@ enum ClientError {
         #[source]
         source: io::Error,
     },
-    #[error("{0}")]
-    Io(#[from] io::Error),
+    #[error("cannot resolve the current directory: {source}")]
+    CurrentDir {
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot write to stdout: {source}")]
+    WriteStdout {
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot write to stderr: {source}")]
+    WriteStderr {
+        #[source]
+        source: io::Error,
+    },
     #[error("cannot install the `{signal}` handler: {source}")]
     SignalHandler {
         signal: &'static str,
@@ -68,10 +100,20 @@ enum ClientError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("invalid `--env` `{flag}`: empty key")]
+    #[error("`--env` `{flag}` has an empty key")]
     EnvFlag { flag: String },
-    #[error("{0}")]
-    Transport(String),
+    #[error("`Exit` frame carries neither `code` nor `signal`")]
+    MissingExitStatus,
+    #[error("cannot read a frame from the socket: {source}")]
+    Receive {
+        #[source]
+        source: DecodeError,
+    },
+    #[error("cannot send a frame to the socket: {source}")]
+    Send {
+        #[source]
+        source: EncodeError,
+    },
 }
 
 async fn session(
@@ -79,7 +121,7 @@ async fn session(
     cwd: Option<PathBuf>,
     env: Vec<OsString>,
     command: Vec<OsString>,
-) -> Result<i32, ClientError> {
+) -> Result<Outcome, ClientError> {
     // Unreachable: the only caller is the `ncap` binary, whose `command`
     // argument carries `required = true` (src/bin/ncap.rs:27), so clap
     // rejects an empty command before `run` is ever invoked — keeping
@@ -132,41 +174,50 @@ async fn session(
         tokio::select! {
             frame = framed.next() => match frame {
                 Some(Ok(frame)) => match Message::from_frame(frame)
-                    .map_err(|err| ClientError::Transport(err.to_string()))?
+                    .map_err(|source| ClientError::Receive { source })?
                 {
                     Message::Version(version) => {
                         version_seen = true;
                         if version.version != CURRENT_VERSION {
+                            // A warning, not an error: the session goes on —
+                            // wire compatibility is decided per frame, and the
+                            // terminal frames still arrive and render.
                             eprintln!(
-                                "ncap: version mismatch: client `{CURRENT_VERSION}`, server `{}`",
+                                "ncap: version mismatch: client {CURRENT_VERSION}, server {}",
                                 version.version
                             );
                         }
                     }
-                    Message::Stdout(bytes) => write_stream(&mut io::stdout().lock(), &bytes)?,
-                    Message::Stderr(bytes) => write_stream(&mut io::stderr().lock(), &bytes)?,
+                    Message::Stdout(bytes) => {
+                        write_stream(Stream::Stdout, &bytes)?;
+                    }
+                    Message::Stderr(bytes) => {
+                        write_stream(Stream::Stderr, &bytes)?;
+                    }
                     Message::Exit(exit) => {
                         warn_absent_version(version_seen);
-                        return Ok(exit_code(&exit, &command_name));
+                        return exit_outcome(&exit, &command_name);
                     }
                     Message::Error(message) => {
                         warn_absent_version(version_seen);
+                        // Data relay of the server's own diagnostic; the
+                        // server picked the wording.
                         eprintln!("ncap: {}", message.message);
-                        return Ok(1);
+                        return Ok(Outcome::just(1));
                     }
                     Message::ServerStopping => {
-                        return Ok(SHUTDOWN_EXIT);
+                        return Ok(Outcome::just(SHUTDOWN_EXIT));
                     }
                     // Server misuse of client-only frames carries nothing
                     // actionable.
                     Message::Request(_) | Message::Stdin(_) | Message::Signal(_) => {}
                 },
-                Some(Err(err)) => return Err(ClientError::Transport(err.to_string())),
+                Some(Err(source)) => return Err(ClientError::Receive { source }),
                 None => {
                     // A clean close without a terminal frame is the server's
                     // orderly-shutdown signature: bail with 128 + SIGTERM,
                     // never a transport failure.
-                    return Ok(SHUTDOWN_EXIT);
+                    return Ok(Outcome::just(SHUTDOWN_EXIT));
                 }
             },
             chunk = stdin_rx.recv(), if stdin_open => match chunk {
@@ -206,7 +257,7 @@ fn build_request(
 ) -> Result<Request, ClientError> {
     let cwd = match cwd {
         Some(cwd) => cwd,
-        None => std::env::current_dir()?,
+        None => std::env::current_dir().map_err(|source| ClientError::CurrentDir { source })?,
     };
     // `NCAP_ENV_FORWARD` itself travels through `var_os`: present-but-non-Unicode
     // is lossy-decoded (then fails as malformed JSON → exit 1), not treated as absent.
@@ -310,35 +361,53 @@ fn pump_stdin(tx: mpsc::Sender<Option<Vec<u8>>>) -> tokio::task::JoinHandle<()> 
     })
 }
 
-fn exit_code(exit: &Exit, command: &str) -> i32 {
+/// Classify the child's terminal status into an outcome. 127 and 126 come
+/// with a notice the entry point renders; the raw codes alone say nothing
+/// actionable.
+fn exit_outcome(exit: &Exit, command: &str) -> Result<Outcome, ClientError> {
     match (exit.code, exit.signal) {
-        (Some(127), _) => {
-            eprintln!("ncap: {command}: command not found");
-            127
-        }
-        (Some(126), _) => {
-            eprintln!("ncap: {command}: permission denied");
-            126
-        }
-        (Some(code), _) => i32::from(code),
-        (None, Some(signal)) => i32::from(signal) + 128,
-        (None, None) => {
-            eprintln!("ncap: child status unknowable");
-            1
-        }
+        (Some(127), _) => Ok(Outcome::with_notice(
+            127,
+            format!("{command}: command not found"),
+        )),
+        (Some(126), _) => Ok(Outcome::with_notice(
+            126,
+            format!("{command}: permission denied"),
+        )),
+        (Some(code), _) => Ok(Outcome::just(i32::from(code))),
+        (None, Some(signal)) => Ok(Outcome::just(i32::from(signal) + 128)),
+        (None, None) => Err(ClientError::MissingExitStatus),
     }
 }
 
+/// The session ended without the server ever sending a version frame.
 fn warn_absent_version(seen: bool) {
     if !seen {
         eprintln!("ncap: server did not send a version");
     }
 }
 
-fn write_stream(stream: &mut impl Write, bytes: &[u8]) -> Result<(), ClientError> {
-    stream.write_all(bytes)?;
-    stream.flush()?;
-    Ok(())
+/// Which of the client's own streams a relayed chunk goes to.
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+fn write_stream(stream: Stream, bytes: &[u8]) -> Result<(), ClientError> {
+    let result = match stream {
+        Stream::Stdout => {
+            let mut out = io::stdout().lock();
+            out.write_all(bytes).and_then(|()| out.flush())
+        }
+        Stream::Stderr => {
+            let mut out = io::stderr().lock();
+            out.write_all(bytes).and_then(|()| out.flush())
+        }
+    };
+    result.map_err(|source| match stream {
+        Stream::Stdout => ClientError::WriteStdout { source },
+        Stream::Stderr => ClientError::WriteStderr { source },
+    })
 }
 
 async fn send(
@@ -347,11 +416,11 @@ async fn send(
 ) -> Result<(), ClientError> {
     let frame = message
         .into_frame()
-        .map_err(|err| ClientError::Transport(err.to_string()))?;
+        .map_err(|source| ClientError::Send { source })?;
     framed
         .send(frame)
         .await
-        .map_err(|err| ClientError::Transport(err.to_string()))
+        .map_err(|source| ClientError::Send { source })
 }
 
 #[cfg(test)]

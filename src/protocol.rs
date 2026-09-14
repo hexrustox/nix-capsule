@@ -218,9 +218,13 @@ pub enum DecodeError {
     /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
     #[error("both `code` and `signal` set in `Exit` frame")]
     InvalidExit,
-    /// Underlying I/O failure.
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
+    /// Reading the frame off the socket failed. `#[from]` is required: the
+    /// `Framed` transport folds socket io errors into the codec's error type.
+    #[error("cannot read a frame from the socket: {source}")]
+    Read {
+        #[from]
+        source: std::io::Error,
+    },
 }
 
 /// Failure while encoding a frame onto the wire.
@@ -235,9 +239,13 @@ pub enum EncodeError {
     /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
     #[error("both `code` and `signal` set in `Exit` frame")]
     InvalidExit,
-    /// Underlying I/O failure.
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
+    /// Writing the frame onto the socket failed. `#[from]` is required: the
+    /// `Framed` transport folds socket io errors into the codec's error type.
+    #[error("cannot write a frame to the socket: {source}")]
+    Write {
+        #[from]
+        source: std::io::Error,
+    },
 }
 
 /// Five-byte framed codec: one tag byte, a big-endian length, then the
