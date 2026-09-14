@@ -9,6 +9,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use common::fixture;
+use common::probe::DRAIN_DEADLINE;
+
+/// The drain deadline as the `--timeout` string the fixture passes through.
+fn drain_timeout() -> String {
+    DRAIN_DEADLINE.as_secs().to_string()
+}
 
 // ---------------------------------------------------------------------------
 // Refusal: each command names the missing var
@@ -322,7 +328,7 @@ fn running_without_socket_is_not_live() {
         watch: Vec::new(),
         failure: None,
     })
-    .with_timeout("1");
+    .with_timeout(&drain_timeout());
 
     // init must not take the live+fresh early return: it must attempt a
     // start (visible as a `run` invocation), which then fails readiness
@@ -372,7 +378,7 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
         )),
         ..fixture::Config::fresh_empty()
     })
-    .with_timeout("1");
+    .with_timeout(&drain_timeout());
     fx.seed_server_logs("old log line\n", "line1\nline2\nEXPECTED_TAIL_MARKER\n");
 
     let out = fx.start();

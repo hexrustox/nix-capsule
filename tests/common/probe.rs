@@ -34,13 +34,28 @@ pub const REAP_LIMIT: Duration = Duration::from_secs(5);
 pub const GRACE_LIMIT: Duration = Duration::from_secs(8);
 
 /// Bound for group-wide signal delivery: the signal must clear the whole
-/// group well before a survivor's own 30-second `sleep` would end on its own.
+/// group well before a survivor's own [`SHELL_BODY`]-second `sleep` would end
+/// on its own.
 pub const GROUP_LIMIT: Duration = Duration::from_secs(10);
 
 /// How soon the client must bail once the shutdown signal lands: the
 /// `ServerStopping` frame precedes the drain, so this outruns any
 /// `--timeout` a test configures.
 pub const BAIL_LIMIT: Duration = Duration::from_millis(1500);
+
+/// How long a server holding live connections keeps draining after it exits:
+/// the drain deadline must expire — never wait out a child.
+pub const DRAIN_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Tick interval inside child scripts: feed loops that stream to a client
+/// and heartbeat stamps that witness a full TERM grace. Interpolated with
+/// `{SHELL_TICK:.1}`.
+pub const SHELL_TICK: f64 = 0.2;
+/// Bounded hold inside child scripts: the red-run bound, the trap aftermath,
+/// and the signal-loop tick.
+pub const SHELL_HOLD: u32 = 1;
+/// Survivor body: a child sleep that must outlive every test bound.
+pub const SHELL_BODY: u32 = 30;
 
 /// A raw wire-protocol connection in probe shape, as [`Server::raw`] hands out.
 pub type Raw = Framed<UnixStream, FrameCodec>;
@@ -245,7 +260,12 @@ pub async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
 /// terminal one, asserting a clean exit with `expect` on stdout. The server
 /// is left running — stop it after any marker reads, whose tempdir teardown
 /// `stop` takes with it.
-pub async fn second_connection_succeeds(server: &Server, script: &str, expect: &str, context: &str) {
+pub async fn second_connection_succeeds(
+    server: &Server,
+    script: &str,
+    expect: &str,
+    context: &str,
+) {
     let mut framed = server.raw().await;
     let run = run_request(&mut framed, request(server.path(), script)).await;
     assert_clean_exit(&run.frames, context);

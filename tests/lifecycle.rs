@@ -19,11 +19,12 @@ use tokio::time::sleep;
 
 use common::assert::{assert_announced, assert_orderly_shutdown};
 use common::probe::{
-    BAIL_LIMIT, PHASE_LIMIT, SHUTDOWN_TERM_LIMIT, assert_clean_exit, read_frames_until,
-    read_until_stdout_contains, read_until_terminal, send_request, wait_for_flag, wait_for_marker,
+    BAIL_LIMIT, DRAIN_DEADLINE, PHASE_LIMIT, SHELL_BODY, SHUTDOWN_TERM_LIMIT, assert_clean_exit,
+    read_frames_until, read_until_stdout_contains, read_until_terminal, send_request,
+    wait_for_flag, wait_for_marker,
 };
 use common::script::shutdown_group_trap_script;
-use common::{Client, Server, bin_path, wait_bounded};
+use common::{Client, Server, WAIT_LIMIT, bin_path, wait_bounded};
 
 // ------------------------------------------------- client reactions (ticket 05)
 
@@ -43,6 +44,10 @@ async fn garbled_traffic_stays_a_transport_failure_at_1() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("garbled.sock");
     let listener = UnixListener::bind(&socket).expect("bind garbled listener");
+    // The writer holds the connection open until the client has exited, so
+    // the garbage is parsed before any clean close could win the race; the
+    // client-side bounded poll below is the deadline.
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
     let writer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
         // One header-shaped frame: an unknown tag declaring a bogus length.
@@ -50,12 +55,20 @@ async fn garbled_traffic_stays_a_transport_failure_at_1() {
             .write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00])
             .await
             .expect("write garbage");
-        // Hold the connection briefly so the client reads the bytes before
-        // the clean close could win the race.
-        sleep(Duration::from_millis(200)).await;
+        let _ = tokio::time::timeout(WAIT_LIMIT, released).await;
     });
-    let out = Client::at(&socket).run(&["echo", "hi"]);
+    let mut client = Client::at(&socket).spawn(&["echo", "hi"]);
+    let deadline = Instant::now() + WAIT_LIMIT;
+    while client.try_wait().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the garbled client did not exit within {WAIT_LIMIT:?}"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    release.send(()).expect("release writer");
     writer.await.expect("garbage writer");
+    let out = client.wait();
 
     assert_eq!(out.status.code(), Some(1), "stderr={}", out.stderr);
 }
@@ -110,7 +123,7 @@ async fn a_live_socket_refuses_startup_naming_the_path_and_leaves_the_owner_unto
         .stderr(stderr_log)
         .spawn()
         .expect("spawn second server");
-    let status = wait_bounded(&mut second, Duration::from_secs(10), "the second server");
+    let status = wait_bounded(&mut second, PHASE_LIMIT, "the second server");
     let stderr = fs::read_to_string(dir.path().join("second-stderr.log")).expect("stderr");
     let out = server.client().run(&["echo", "still-owns"]);
     server.stop();
@@ -158,13 +171,16 @@ async fn a_stale_socket_file_is_removed_and_the_bind_succeeds() {
 #[test_case(libc::SIGINT ; "sigint")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shutdown_signal_bails_the_client_at_143_immediately_and_removes_the_socket(sig: i32) {
-    let mut server = Server::builder().timeout(1).start().await;
+    let mut server = Server::builder()
+        .timeout(DRAIN_DEADLINE.as_secs())
+        .start()
+        .await;
     // The child ignores TERM so a client that wrongly waited for its child
     // would only be freed by the drain deadline, never by the child itself.
     let client = server.client().cwd(server.path()).spawn(&[
         "sh",
         "-c",
-        "trap '' TERM; touch ready.flag; exec sleep 30",
+        &format!("trap '' TERM; touch ready.flag; exec sleep {SHELL_BODY}"),
     ]);
     wait_for_flag(&server, "ready.flag").await;
     server.signal(sig);
@@ -189,7 +205,7 @@ async fn a_connection_finishing_inside_the_grace_window_completes_normally() {
     send_request(
         &mut framed,
         server.path(),
-        "trap 'exit 0' TERM; echo READY; sleep 30",
+        &format!("trap 'exit 0' TERM; echo READY; sleep {SHELL_BODY}"),
     )
     .await;
     read_until_stdout_contains(&mut framed, "READY").await;
@@ -240,14 +256,17 @@ async fn shutdown_terms_the_whole_group_including_grandchildren() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connection_past_the_deadline_is_dropped_when_the_drain_expires() {
-    let mut server = Server::builder().timeout(1).start().await;
+    let mut server = Server::builder()
+        .timeout(DRAIN_DEADLINE.as_secs())
+        .start()
+        .await;
     let mut framed = server.raw().await;
     // The child ignores TERM, so the connection can only end when the
     // drain deadline expires.
     send_request(
         &mut framed,
         server.path(),
-        "trap '' TERM; touch ready.flag; exec sleep 30",
+        &format!("trap '' TERM; touch ready.flag; exec sleep {SHELL_BODY}"),
     )
     .await;
     wait_for_flag(&server, "ready.flag").await;
@@ -264,9 +283,9 @@ async fn a_connection_past_the_deadline_is_dropped_when_the_drain_expires() {
     server.stop();
 
     assert_orderly_shutdown(&status, socket_gone);
-    assert!(elapsed >= Duration::from_secs(1));
+    assert!(elapsed >= DRAIN_DEADLINE);
     assert!(
-        elapsed < Duration::from_secs(10),
+        elapsed < DRAIN_DEADLINE + Duration::from_secs(1),
         "the drain must expire at the deadline, not wait out the child: {elapsed:?}"
     );
     assert_announced(&announced, "the shutdown must be announced before the drop");

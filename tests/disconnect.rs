@@ -15,7 +15,7 @@ use tokio::io::AsyncWriteExt;
 
 use common::Server;
 use common::probe::{
-    DISCONNECT_TERM_LIMIT, GRACE_LIMIT, REAP_LIMIT, Raw, assert_clean_exit, poll_until,
+    DISCONNECT_TERM_LIMIT, GRACE_LIMIT, REAP_LIMIT, Raw, SHELL_TICK, assert_clean_exit, poll_until,
     read_until_terminal, request_and_vanish, second_connection_succeeds, send_request, stdout_of,
     wait_for_marker, zombies_under,
 };
@@ -158,8 +158,8 @@ async fn a_term_trapping_child_holds_only_its_own_connection_and_others_keep_wor
     // after the TERM would stop them early.
     let script = format!(
         "trap 'echo trapped >> {}; exec 1>/dev/null' TERM; echo A-READY; \
-         for i in 1 2 3 4 5 6 7 8 9 10; do echo tick-a; sleep 0.3; done; \
-         for i in 1 2 3 4 5; do sleep 0.5; echo alive-$i >> {}; done",
+         for i in 1 2 3 4 5 6 7 8 9 10; do echo tick-a; sleep {SHELL_TICK}; done; \
+         for i in 1 2 3 4 5; do sleep {SHELL_TICK}; echo alive-$i >> {}; done",
         marker.display(),
         marker.display()
     );

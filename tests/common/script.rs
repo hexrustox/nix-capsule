@@ -4,13 +4,15 @@
 
 use std::path::Path;
 
-/// The script for a child that announces READY, ticks every 300 ms, and
+use super::probe::SHELL_TICK;
+
+/// The script for a child that announces READY, ticks every 200 ms, and
 /// announces its own death in `marker` from the TERM trap the disconnect
 /// fires, then exits.
 pub fn trapping_ticker_script(marker: &Path) -> String {
     format!(
         "trap 'echo gone >> {}; exit 0' TERM; echo READY; \
-         while true; do echo tick; sleep 0.3; done",
+         while true; do echo tick; sleep {SHELL_TICK}; done",
         marker.display()
     )
 }
@@ -23,7 +25,7 @@ pub fn group_trap_script(marker: &Path) -> String {
     format!(
         "trap 'echo child-gone >> {}; exit 0' TERM; \
          ( trap 'echo grandchild-gone >> {}; exit 0' TERM; \
-           while true; do echo tick-gc; sleep 0.3; done ) & \
+           while true; do echo tick-gc; sleep {SHELL_TICK}; done ) & \
          echo READY; wait",
         marker.display(),
         marker.display()
@@ -35,7 +37,7 @@ pub fn shutdown_group_trap_script(marker: &Path) -> String {
     format!(
         "trap 'echo child-gone >> {}; exit 0' TERM; \
          ( trap 'echo grandchild-gone >> {}; exit 0' TERM; \
-           while true; do echo tick; sleep 0.3; done ) & \
+           while true; do echo tick; sleep {SHELL_TICK}; done ) & \
          echo READY; wait",
         marker.display(),
         marker.display()

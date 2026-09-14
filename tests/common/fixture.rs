@@ -535,7 +535,7 @@ impl Fixture {
     }
 
     pub fn with_timeout(mut self, secs: &str) -> Self {
-        self.env.insert("NCAP_TIMEOUT".into(), secs.into());
+        self.env.insert("NCAP_TIMEOUT".into(), secs.to_string());
         self
     }
 

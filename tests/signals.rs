@@ -10,8 +10,8 @@ use test_case::test_case;
 use common::Server;
 use common::assert::assert_no_error_frames;
 use common::probe::{
-    GROUP_LIMIT, PHASE_LIMIT, assert_clean_exit, read_frames_until, ready_signal_terminal,
-    send_request, stdout_of, terminal_of, wait_for_flag,
+    GROUP_LIMIT, PHASE_LIMIT, SHELL_BODY, SHELL_HOLD, assert_clean_exit, read_frames_until,
+    ready_signal_terminal, send_request, stdout_of, terminal_of, wait_for_flag,
 };
 
 // ------------------------------------------------------------- process groups
@@ -57,7 +57,8 @@ async fn signal_runs_a_trap_and_the_child_exits_on_its_own(signal: i32, name: &s
     let mut framed = server.raw().await;
     // The trailing `sleep` bounds the red run: without signal forwarding the
     // script still ends, just without having run the trap.
-    let script = format!("trap 'echo TRAPPED; exit 0' {name}; echo READY; sleep 1 & wait $!");
+    let script =
+        format!("trap 'echo TRAPPED; exit 0' {name}; echo READY; sleep {SHELL_HOLD} & wait $!");
     let frames = ready_signal_terminal(&mut framed, &server, &script, signal, PHASE_LIMIT).await;
     server.stop();
 
@@ -95,7 +96,7 @@ async fn signal_term_reaches_the_whole_group_including_grandchildren() {
     let frames = ready_signal_terminal(
         &mut framed,
         &server,
-        "sleep 30 & echo READY; wait",
+        &format!("sleep {SHELL_BODY} & echo READY; wait"),
         libc::SIGTERM,
         GROUP_LIMIT,
     )
@@ -121,7 +122,7 @@ async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame
     let frames = ready_signal_terminal(
         &mut framed,
         &server,
-        "echo READY; sleep 1",
+        &format!("echo READY; sleep {SHELL_HOLD}"),
         200,
         PHASE_LIMIT,
     )
@@ -151,7 +152,7 @@ async fn signal_is_relayed_mid_run(signal: i32, traps: bool, expected: i32) {
     let server = Server::builder().start().await;
     let script = if traps {
         format!(
-            "trap 'echo CLEANUP; exit 0' {name}; touch ready.flag; sleep 30",
+            "trap 'echo CLEANUP; exit 0' {name}; touch ready.flag; sleep {SHELL_BODY}",
             name = if signal == libc::SIGINT {
                 "INT"
             } else {
@@ -159,7 +160,7 @@ async fn signal_is_relayed_mid_run(signal: i32, traps: bool, expected: i32) {
             }
         )
     } else {
-        "touch ready.flag; sleep 30".to_string()
+        format!("touch ready.flag; sleep {SHELL_BODY}")
     };
     let client = server
         .client()
@@ -186,7 +187,9 @@ async fn repeated_sigints_forward_one_frame_each() {
     let client = server.client().cwd(server.path()).spawn(&[
         "sh",
         "-c",
-        "trap 'c=$((c+1)); echo COUNT=$c; touch count-$c.flag' INT; touch ready.flag; while :; do sleep 1; done",
+        &format!(
+            "trap 'c=$((c+1)); echo COUNT=$c; touch count-$c.flag' INT; touch ready.flag; while :; do sleep {SHELL_HOLD}; done"
+        ),
     ]);
     wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGINT);
@@ -209,7 +212,9 @@ async fn output_produced_after_the_signal_still_streams_before_the_terminal_fram
     let client = server.client().cwd(server.path()).spawn(&[
         "sh",
         "-c",
-        "trap 'echo AFTER-1; sleep 1; echo AFTER-2; exit 0' INT; touch ready.flag; sleep 30",
+        &format!(
+            "trap 'echo AFTER-1; sleep {SHELL_HOLD}; echo AFTER-2; exit 0' INT; touch ready.flag; sleep {SHELL_BODY}"
+        ),
     ]);
     wait_for_flag(&server, "ready.flag").await;
     client.signal(libc::SIGINT);

@@ -124,11 +124,7 @@ impl Server {
         let ServerProc::Real(child) = &mut self.handle else {
             return None;
         };
-        Some(wait_bounded(
-            child,
-            super::client::WAIT_LIMIT,
-            "server",
-        ))
+        Some(wait_bounded(child, super::client::WAIT_LIMIT, "server"))
     }
 
     /// Deliver `sig` to a real server and await its exit; `None` for a
