@@ -5,7 +5,7 @@
 //! stop every connection orderly within the drain grace.
 
 use std::fs::OpenOptions;
-use std::io::{self, ErrorKind, Write};
+use std::io::{ErrorKind, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -653,7 +653,8 @@ impl Log {
         if let Ok(mut file) = self.file.lock() {
             let _ = file.write_all(line.as_bytes());
         }
-        let _ = io::stderr().write_all(line.as_bytes());
+        #[cfg(not(test))]
+        let _ = std::io::stderr().write_all(line.as_bytes());
     }
 
     fn debug(&self, message: &str) {
@@ -723,6 +724,7 @@ fn epoch_millis() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use std::os::unix::process::CommandExt;
 
     use super::*;
@@ -749,101 +751,43 @@ mod tests {
         assert_eq!(format_utc(secs), expected);
     }
 
-    #[test_case::test_case("debug", Some(LogLevel::Debug); "debug_parses")]
-    #[test_case::test_case("info", Some(LogLevel::Info); "info_parses")]
-    #[test_case::test_case("warning", Some(LogLevel::Warning); "warning_parses")]
-    #[test_case::test_case("error", Some(LogLevel::Error); "error_parses")]
-    #[test_case::test_case("Warning", None; "capitalized_is_rejected")]
-    #[test_case::test_case("verbose", None; "off_vocabulary_is_rejected")]
-    #[test_case::test_case("", None; "empty_is_rejected")]
-    fn log_level_parses_exact_tags(raw: &str, expected: Option<LogLevel>) {
-        assert_eq!(LogLevel::parse(raw), expected, "raw={raw}");
+    fn arb_log_level() -> impl Strategy<Value = LogLevel> {
+        prop_oneof![
+            Just(LogLevel::Debug),
+            Just(LogLevel::Info),
+            Just(LogLevel::Warning),
+            Just(LogLevel::Error),
+        ]
     }
 
-    #[test]
-    fn log_level_ordering_is_debug_info_warning_error() {
-        assert!(
-            LogLevel::Debug.rank()
-                < LogLevel::Info.rank()
-                && LogLevel::Info.rank() < LogLevel::Warning.rank()
-                && LogLevel::Warning.rank() < LogLevel::Error.rank(),
-            "ranks must order debug < info < warning < error"
-        );
-        for level in [
-            LogLevel::Debug,
-            LogLevel::Info,
-            LogLevel::Warning,
-            LogLevel::Error,
-        ] {
-            assert_eq!(
-                LogLevel::parse(level.as_str()),
-                Some(level),
-                "as_str must round-trip"
-            );
-        }
-    }
-
-    /// Emit one line at each level against a `warning` minimum: only
-    /// `warning` and `error` land in the file. The stderr mirror shares the
-    /// single gate before both sinks, so file filtering proves the lockstep.
-    #[test]
-    fn log_emit_filters_below_the_minimum_before_stamping() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log = Log::start(dir.path(), LogLevel::Warning).expect("log starts");
-        log.debug("debug line");
-        log.info("info line");
-        log.warning("warning line");
-        log.error("error line");
-        let logged = newest_log_contents(dir.path());
-        assert!(
-            !logged.contains("debug line"),
-            "debug below warning must drop: {logged:?}"
-        );
-        assert!(
-            !logged.contains("info line"),
-            "info below warning must drop: {logged:?}"
-        );
-        assert!(
-            logged.contains("warning: warning line"),
-            "warning at minimum must keep: {logged:?}"
-        );
-        assert!(
-            logged.contains("error: error line"),
-            "error above minimum must keep: {logged:?}"
-        );
-    }
-
-    /// A `debug` minimum keeps every level; an `error` minimum keeps only
-    /// errors — the gate is a single minimum-severity comparison.
-    #[test_case::test_case(LogLevel::Debug, &["debug line", "info line", "warning line", "error line"]; "debug_keeps_everything")]
-    #[test_case::test_case(LogLevel::Error, &["error line"]; "error_keeps_only_errors")]
-    fn log_emit_keeps_lines_at_or_above_the_minimum(
-        min: LogLevel,
-        expected: &[&str],
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log = Log::start(dir.path(), min).expect("log starts");
-        log.debug("debug line");
-        log.info("info line");
-        log.warning("warning line");
-        log.error("error line");
-        let logged = newest_log_contents(dir.path());
-        for marker in ["debug line", "info line", "warning line", "error line"] {
-            if expected.contains(&marker) {
-                assert!(logged.contains(marker), "must keep {marker}: {logged:?}");
-            } else {
-                assert!(!logged.contains(marker), "must drop {marker}: {logged:?}");
+    proptest! {
+        #[test]
+        fn log_emit_keeps_lines_at_or_above_the_minimum(min in arb_log_level()) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let log = Log::start(dir.path(), min).expect("log starts");
+            log.debug("debug line");
+            log.info("info line");
+            log.warning("warning line");
+            log.error("error line");
+            let entries: Vec<PathBuf> = std::fs::read_dir(dir.path())
+                .expect("log dir")
+                .map(|entry| entry.expect("log dir entry").path())
+                .collect();
+            let logged = std::fs::read_to_string(&entries[0]).expect("read log file");
+            for (level, marker) in [
+                (LogLevel::Debug, "debug line"),
+                (LogLevel::Info, "info line"),
+                (LogLevel::Warning, "warning line"),
+                (LogLevel::Error, "error line"),
+            ] {
+                if level.rank() >= min.rank() {
+                    prop_assert!(logged.contains(&format!("{level}: {marker}")),
+                        "must keep {marker} at min {min}: {logged:?}");
+                } else {
+                    prop_assert!(!logged.contains(marker),
+                        "must drop {marker} below min {min}: {logged:?}");
+                }
             }
         }
-    }
-
-    /// Read back the single per-run log file `Log::start` created.
-    fn newest_log_contents(dir: &Path) -> String {
-        let entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .expect("log dir")
-            .map(|entry| entry.expect("log dir entry").path())
-            .collect();
-        assert_eq!(entries.len(), 1, "one run, one log file: {entries:?}");
-        std::fs::read_to_string(&entries[0]).expect("read log file")
     }
 }

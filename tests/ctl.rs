@@ -1089,8 +1089,7 @@ fn each_accepted_log_level_survives_as_its_own_launch_argv() {
 fn full_env_start_flow_carries_the_log_level() {
     // End-to-end start flow with a full env set: the validated level reaches
     // the server launch command.
-    let fx =
-        fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level("error");
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level("error");
     fx.set_running(false);
     let out = fx.start();
     assert!(
