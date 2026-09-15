@@ -5,13 +5,17 @@
 //!   three queries evals, launches, saw — never past it via log strings
 //!   or direct field access.
 
-use super::client::bin_path;
-use std::collections::HashMap;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::{
+    collections::HashMap,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+};
+
 use tempfile::TempDir;
+
+use super::client::bin_path;
 
 const NCAP_VARS: &[&str] = &[
     "NCAP_PROJECT",
@@ -41,14 +45,9 @@ fn run_ctl(env: &HashMap<String, String>, args: &[&str]) -> Output {
     for var in NCAP_VARS {
         cmd.env_remove(var);
     }
-    // Preserve a few ambient vars the child may need (PATH, HOME, etc.)
-    // but remove NCAP_* above. Then set the test's env.
-    //
-    // Uniform resolve + strict `NCAP_RUNTIME` (`podman`/`docker` only) mean
-    // absolute-path fake runtimes can no longer be passed through. Tests
-    // still create stub executables at arbitrary tmp paths: translate an
-    // absolute `NCAP_RUNTIME` into a `podman` shim on PATH so the child
-    // validates while invoking the same stub.
+    // Absolute-path fake runtimes can no longer pass through uniform resolve
+    // (`podman`/`docker` only): translate one into a `podman` shim on PATH so
+    // the child validates while invoking the same stub.
     let mut owned_env = env.clone();
     shim_runtime_env(&mut owned_env);
     for (key, value) in &owned_env {
@@ -146,6 +145,7 @@ pub struct Liveness {
 }
 
 impl Liveness {
+    /// Running and connectable.
     pub fn live() -> Self {
         Self {
             running: true,
@@ -153,6 +153,7 @@ impl Liveness {
         }
     }
 
+    /// Not running; the Socket guard is still held so `start` can succeed.
     pub fn down() -> Self {
         Self {
             running: false,
@@ -228,10 +229,12 @@ pub struct LaunchView {
 }
 
 impl LaunchView {
+    /// Whether the fake adapter saw no `run` invocation.
     pub fn is_empty(&self) -> bool {
         self.runs == 0
     }
 
+    /// How many `run` invocations the fake adapter saw.
     pub fn runs(&self) -> usize {
         self.runs
     }
@@ -316,6 +319,9 @@ pub enum Action {
     RmBeforeRun,
 }
 
+/// The Ctl world behind the seam: tempdir, cache, fake runtime/nix binaries,
+/// liveness guard, and the `run_ctl` env. Tests declare the world via
+/// [`Config`] and observe it via `evals`, `launches`, and `saw`.
 pub struct Fixture {
     root: PathBuf,
     cache: PathBuf,
@@ -517,11 +523,13 @@ impl Fixture {
         fx
     }
 
+    /// Override `NCAP_WATCH_FILES` with a JSON list (traversal-refusal tests).
     pub fn with_watch_files(mut self, json: &str) -> Self {
         self.env.insert("NCAP_WATCH_FILES".into(), json.into());
         self
     }
 
+    /// Override `NCAP_HARDEN`.
     pub fn with_harden(mut self, on: bool) -> Self {
         self.env.insert(
             "NCAP_HARDEN".into(),
@@ -530,16 +538,19 @@ impl Fixture {
         self
     }
 
+    /// Override `NCAP_LOG_LEVEL`.
     pub fn with_log_level(mut self, level: &str) -> Self {
         self.env.insert("NCAP_LOG_LEVEL".into(), level.into());
         self
     }
 
+    /// Insert one var into the `run_ctl` env.
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.env.insert(key.into(), value.into());
         self
     }
 
+    /// Override `NCAP_TIMEOUT` (drain-grace seconds).
     pub fn with_timeout(mut self, secs: &str) -> Self {
         self.env.insert("NCAP_TIMEOUT".into(), secs.to_string());
         self
@@ -574,18 +585,22 @@ impl Fixture {
         &self.root
     }
 
+    /// The Cache dir backing this fixture.
     pub fn cache_dir(&self) -> &Path {
         &self.cache
     }
 
+    /// The log dir handed to the child.
     pub fn log_dir(&self) -> &Path {
         &self.logs
     }
 
+    /// The socket path handed to the child.
     pub fn socket_path(&self) -> &Path {
         &self.sock
     }
 
+    /// Parent dir of [`Self::socket_path`], for mount expectations.
     pub fn socket_parent_dir(&self) -> PathBuf {
         self.sock.parent().expect("sock parent").to_path_buf()
     }
@@ -622,26 +637,32 @@ impl Fixture {
         self.cache.join(name).exists()
     }
 
+    /// Whether the Cache dir still exists.
     pub fn cache_is_dir(&self) -> bool {
         self.cache.is_dir()
     }
 
+    /// Whether a log file exists.
     pub fn logs_has(&self, name: &str) -> bool {
         self.logs.join(name).exists()
     }
 
+    /// Whether the log dir still exists.
     pub fn logs_is_dir(&self) -> bool {
         self.logs.is_dir()
     }
 
+    /// Whether the Socket file exists.
     pub fn socket_exists(&self) -> bool {
         self.sock.exists()
     }
 
+    /// Whether the Socket parent dir still exists.
     pub fn socket_parent_is_dir(&self) -> bool {
         self.sock.parent().is_some_and(|p| p.is_dir())
     }
 
+    /// Flip the fake Runtime adapter's Running flag.
     pub fn set_running(&self, running: bool) {
         fs::write(
             self.state.join("running"),
@@ -650,20 +671,24 @@ impl Fixture {
         .expect("running");
     }
 
+    /// Poison the cached hash so the Cache reads as stale.
     pub fn make_stale(&self) {
         fs::write(self.cache.join("hash"), "0000000000000000").expect("stale hash");
     }
 
+    /// Remove the cached Env dump so the Cache reads as missing.
     pub fn make_missing_env(&self) {
         let _ = fs::remove_file(self.cache.join("env"));
     }
 
+    /// Seed two server logs (old + newest) for the log-tail assertion.
     pub fn seed_server_logs(&self, old: &str, newest: &str) {
         fs::create_dir_all(&self.logs).expect("logs");
         fs::write(self.logs.join("ncap-server-100.log"), old).expect("log");
         fs::write(self.logs.join("ncap-server-999.log"), newest).expect("newest log");
     }
 
+    /// Seed a `.git` dir inside the Project root (git-mount tests).
     pub fn seed_git(&self) {
         fs::create_dir_all(self.root.join(".git")).expect("git dir");
     }
@@ -749,35 +774,43 @@ impl Fixture {
         }
     }
 
+    /// Drop the Liveness listener guard (the Container counts as not live).
     pub fn not_live(mut self) -> Self {
         self._live = None;
         self
     }
 
+    /// Run `ncap-ctl init` in this fixture's env.
     pub fn init(&self) -> Output {
         run_ctl(&self.env, &["init"])
     }
 
+    /// Run `ncap-ctl start` in this fixture's env.
     pub fn start(&self) -> Output {
         run_ctl(&self.env, &["start"])
     }
 
+    /// Run `ncap-ctl stop` in this fixture's env.
     pub fn stop(&self) -> Output {
         run_ctl(&self.env, &["stop"])
     }
 
+    /// Run `ncap-ctl status` in this fixture's env.
     pub fn status(&self) -> Output {
         run_ctl(&self.env, &["status"])
     }
 
+    /// Run `ncap-ctl clean` in this fixture's env.
     pub fn clean(&self) -> Output {
         run_ctl(&self.env, &["clean"])
     }
 
+    /// Run `ncap-ctl restart` in this fixture's env.
     pub fn restart(&self) -> Output {
         run_ctl(&self.env, &["restart"])
     }
 
+    /// Run `ncap-ctl setup-env` in this fixture's env.
     pub fn setup_env(&self) -> Output {
         run_ctl(&self.env, &["setup-env"])
     }
@@ -858,20 +891,24 @@ impl Fixture {
             .to_owned()
     }
 
+    /// Full contents of the fake Runtime adapter log.
     pub fn runtime_log(&self) -> String {
         Self::read_log(&self.runtime_log)
     }
 
+    /// Empty the fake Runtime adapter logs (between phases of one test).
     pub fn clear_runtime_log(&self) {
         let _ = fs::write(&self.runtime_log, "");
         let _ = fs::write(&self.runtime_args_log, "");
     }
 
+    /// Drop the Liveness guard and remove the Socket file stand-in.
     pub fn drop_live(&mut self) {
         self._live = None;
         let _ = fs::remove_file(&self.sock);
     }
 
+    /// The tempdir backing this fixture.
     pub fn tmp_path(&self) -> PathBuf {
         self._tmp.path().to_path_buf()
     }

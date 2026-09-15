@@ -2,8 +2,6 @@
 //! orderly shutdown, announcement, and error-frame absence. Tests cross this
 //! Seam instead of re-stating the same predicates per file.
 
-use std::process::ExitStatus;
-
 use nix_capsule::protocol::Message;
 
 use super::client::ClientOutput;
@@ -18,7 +16,7 @@ pub fn assert_exit_and_stdout(out: &ClientOutput, code: i32, stdout: Option<&str
 
 /// An orderly shutdown: the server exits 0 — never by signal — and the
 /// socket file is gone. Reads the socket state before `Server::stop`.
-pub fn assert_orderly_shutdown(status: &ExitStatus, socket_gone: bool) {
+pub fn assert_orderly_shutdown(status: &std::process::ExitStatus, socket_gone: bool) {
     assert_eq!(
         status.code(),
         Some(0),

@@ -7,17 +7,17 @@ mod common;
 use nix_capsule::protocol::{Exit, Message};
 use test_case::test_case;
 
-use common::Server;
-use common::assert::assert_no_error_frames;
-use common::probe::{
-    GROUP_LIMIT, PHASE_LIMIT, SHELL_BODY, SHELL_HOLD, assert_clean_exit, read_frames_until,
-    ready_signal_terminal, send_request, stdout_of, terminal_of, wait_for_flag,
+use common::{
+    Server,
+    assert::assert_no_error_frames,
+    probe::{
+        GROUP_LIMIT, PHASE_LIMIT, SHELL_BODY, SHELL_HOLD, assert_clean_exit, read_frames_until,
+        ready_signal_terminal, send_request, stdout_of, terminal_of, wait_for_flag,
+    },
 };
 
-// ------------------------------------------------------------- process groups
-
 #[tokio::test(flavor = "multi_thread")]
-async fn child_runs_as_its_own_process_group_leader() {
+async fn child_leads_own_process_group() {
     let server = Server::builder().start().await;
     let mut framed = server.raw().await;
     send_request(
@@ -47,18 +47,17 @@ async fn child_runs_as_its_own_process_group_leader() {
     assert_eq!(pid, pgrp, "child must lead its own process group: `{line}`");
 }
 
-// ---------------------------------------------------------- signal forwarding
-
-#[test_case(libc::SIGINT, "INT" ; "signal_int_runs_a_trap_and_the_child_exits_on_its_own")]
-#[test_case(libc::SIGTERM, "TERM" ; "signal_term_runs_a_trap_and_the_child_exits_on_its_own")]
+#[test_case(libc::SIGINT, "INT" ; "on_sigint")]
+#[test_case(libc::SIGTERM, "TERM" ; "on_sigterm")]
 #[tokio::test(flavor = "multi_thread")]
-async fn signal_runs_a_trap_and_the_child_exits_on_its_own(signal: i32, name: &str) {
+async fn signal_runs_trap_and_child_exits_on_own(signal: i32, signal_name: &str) {
     let server = Server::builder().start().await;
     let mut framed = server.raw().await;
     // The trailing `sleep` bounds the red run: without signal forwarding the
     // script still ends, just without having run the trap.
-    let script =
-        format!("trap 'echo TRAPPED; exit 0' {name}; echo READY; sleep {SHELL_HOLD} & wait $!");
+    let script = format!(
+        "trap 'echo TRAPPED; exit 0' {signal_name}; echo READY; sleep {SHELL_HOLD} & wait $!"
+    );
     let frames = ready_signal_terminal(&mut framed, &server, &script, signal, PHASE_LIMIT).await;
     server.stop();
 
@@ -74,15 +73,15 @@ async fn signal_runs_a_trap_and_the_child_exits_on_its_own(signal: i32, name: &s
     );
 }
 
-/// The Exit status of a shell killed by a signal, or reporting `128 + signal`
-/// as its code — shells differ in how they report their own signal death.
-fn died_from_signal(exit: &Exit, signal: i32) -> bool {
+// The Exit status of a shell killed by a signal, or reporting `128 + signal`
+// as its code — shells differ in how they report their own signal death.
+fn died_from_signal(status: &Exit, signal: i32) -> bool {
     let signal = signal as u8;
-    exit.signal == Some(signal) || exit.code == Some(128 + signal)
+    status.signal == Some(signal) || status.code == Some(128 + signal)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn signal_term_reaches_the_whole_group_including_grandchildren() {
+async fn signal_term_reaches_whole_group_including_grandchildren() {
     let server = Server::builder().start().await;
     let mut framed = server.raw().await;
     // The background `sleep` inherits the shell's pipes, so the server only
@@ -141,19 +140,21 @@ async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame
     );
 }
 
-// ---------------------------------------------------- client relay (ticket 04c)
-
-#[test_case(libc::SIGINT, true, 0 ; "sigint_trapping_child_runs_cleanup_and_exits_with_its_code")]
-#[test_case(libc::SIGINT, false, 130 ; "sigint_non_trapping_child_dies_by_signal")]
-#[test_case(libc::SIGTERM, true, 0 ; "sigterm_is_relayed_like_sigint_trapping")]
-#[test_case(libc::SIGTERM, false, 143 ; "sigterm_is_relayed_like_sigint_non_trapping")]
+#[test_case(libc::SIGINT, true, 0 ; "sigint_trapping_child_runs_cleanup_and_exits_0")]
+#[test_case(libc::SIGINT, false, 130 ; "sigint_non_trapping_child_exits_130")]
+#[test_case(libc::SIGTERM, true, 0 ; "sigterm_trapping_child_runs_cleanup_and_exits_0")]
+#[test_case(libc::SIGTERM, false, 143 ; "sigterm_non_trapping_child_exits_143")]
 #[tokio::test(flavor = "multi_thread")]
-async fn signal_is_relayed_mid_run(signal: i32, traps: bool, expected: i32) {
+async fn relayed_signal_determines_client_exit_code(
+    signal: i32,
+    traps_signal: bool,
+    expected_code: i32,
+) {
     let server = Server::builder().start().await;
-    let script = if traps {
+    let script = if traps_signal {
         format!(
-            "trap 'echo CLEANUP; exit 0' {name}; touch ready.flag; sleep {SHELL_BODY}",
-            name = if signal == libc::SIGINT {
+            "trap 'echo CLEANUP; exit 0' {signal_name}; touch ready.flag; sleep {SHELL_BODY}",
+            signal_name = if signal == libc::SIGINT {
                 "INT"
             } else {
                 "TERM"
@@ -171,8 +172,13 @@ async fn signal_is_relayed_mid_run(signal: i32, traps: bool, expected: i32) {
     let out = client.wait();
     server.stop();
 
-    assert_eq!(out.status.code(), Some(expected), "stderr={}", out.stderr);
-    if traps {
+    assert_eq!(
+        out.status.code(),
+        Some(expected_code),
+        "stderr={}",
+        out.stderr
+    );
+    if traps_signal {
         assert!(
             out.stdout.contains("CLEANUP"),
             "child cleanup must run before exit: stdout={}",
@@ -207,7 +213,7 @@ async fn repeated_sigints_forward_one_frame_each() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn output_produced_after_the_signal_still_streams_before_the_terminal_frame() {
+async fn post_signal_output_streams_before_terminal_frame() {
     let server = Server::builder().start().await;
     let client = server.client().cwd(server.path()).spawn(&[
         "sh",

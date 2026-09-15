@@ -4,25 +4,23 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::{fs, os::unix::fs::PermissionsExt};
 
 use futures_util::SinkExt;
-use nix_capsule::protocol::{CURRENT_VERSION, ErrorMsg, Exit, Message, Request};
+use nix_capsule::protocol::{Exit, Message, Request};
 use proptest::prelude::*;
 use test_case::test_case;
 
-use common::assert::assert_exit_and_stdout;
-use common::probe::{assert_clean_exit, read_until_terminal, request, run_request, terminal_of};
-use common::{Client, Server, missing_socket};
-
-// --------------------------------------------- stdio & exit codes (real server)
+use common::{
+    Client, Server,
+    assert::assert_exit_and_stdout,
+    missing_socket,
+    probe::{assert_clean_exit, request, run_request},
+};
 
 #[test_case(
     None, &["sh", "-c", "printf out; printf err >&2; exit 7"], Some("out"), Some("err"), 7
-    ; "streams_stdio_and_exit_code"
+    ; "copies_stdout_stderr_and_exit_7"
 )]
 #[test_case(
     None, &["sh", "-c", "kill -TERM $$"], None, None, 143
@@ -38,7 +36,7 @@ use common::{Client, Server, missing_socket};
     ; "bad_cwd_yields_exit_1"
 )]
 #[tokio::test(flavor = "multi_thread")]
-async fn exec_reports_the_expected_stdio_and_exit_code(
+async fn exec_maps_child_result_to_stdio_and_exit_code(
     cwd: Option<&str>,
     args: &[&str],
     stdout: Option<&str>,
@@ -47,8 +45,8 @@ async fn exec_reports_the_expected_stdio_and_exit_code(
 ) {
     let server = Server::builder().start().await;
     let mut client = server.client();
-    if let Some(c) = cwd {
-        client = client.cwd(Path::new(c));
+    if let Some(cwd_override) = cwd {
+        client = client.cwd(std::path::Path::new(cwd_override));
     }
     let out = client.run(args);
     server.stop();
@@ -59,12 +57,10 @@ async fn exec_reports_the_expected_stdio_and_exit_code(
     }
 }
 
-// ------------------------------------------------------------------ cwd (real)
-
 #[test_case(None ; "defaults_to_client_current_dir")]
-#[test_case(Some("work") ; "override_is_honored")]
+#[test_case(Some("work") ; "override_uses_given_dir")]
 #[tokio::test(flavor = "multi_thread")]
-async fn pwd_reports_the_effective_cwd(override_dir: Option<&str>) {
+async fn pwd_reports_effective_cwd(override_dir: Option<&str>) {
     let server = Server::builder().start().await;
     let work = server.path().join("work");
     if override_dir.is_some() {
@@ -88,8 +84,6 @@ async fn pwd_reports_the_effective_cwd(override_dir: Option<&str>) {
     assert_eq!(out.status.code(), Some(0));
 }
 
-// ---------------------------------------------------------------- stdin (real)
-
 #[tokio::test(flavor = "multi_thread")]
 async fn piped_stdin_reaches_child_and_closing_write_half_gives_eof() {
     let server = Server::builder().start().await;
@@ -103,8 +97,6 @@ async fn piped_stdin_reaches_child_and_closing_write_half_gives_eof() {
     assert!(out.stdout.contains("EOF-REACHED"), "stdout={}", out.stdout);
     assert_eq!(out.status.code(), Some(0));
 }
-
-// ------------------------------------------------- synthesized errors (real)
 
 #[tokio::test(flavor = "multi_thread")]
 async fn eacces_yields_126_with_synthesized_stderr() {
@@ -121,10 +113,8 @@ async fn eacces_yields_126_with_synthesized_stderr() {
     assert_eq!(out.stderr, "ncap: ./blocked: permission denied\n");
 }
 
-// ------------------------------------------------ env layering (ticket 03, real)
-
 #[tokio::test(flavor = "multi_thread")]
-async fn env_flag_sets_an_explicit_value_in_the_child_environment() {
+async fn explicit_env_flag_reaches_child_environment() {
     let server = Server::builder().start().await;
     let out = server.client().env_flag("NCAP_TEST_LAYER=from-flag").run(&[
         "sh",
@@ -144,7 +134,7 @@ async fn env_flag_sets_an_explicit_value_in_the_child_environment() {
     None ; "bare_key_is_omitted_when_unset_on_host"
 )]
 #[tokio::test(flavor = "multi_thread")]
-async fn bare_env_flag_copies_or_omits_the_host_value(host: Option<&str>) {
+async fn bare_env_flag_copies_or_omits_host_value(host: Option<&str>) {
     let server = Server::builder().start().await;
     let mut client = server.client().env_flag("NCAP_TEST_BARE");
     if let Some(value) = host {
@@ -161,7 +151,7 @@ async fn bare_env_flag_copies_or_omits_the_host_value(host: Option<&str>) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn forwarded_name_resolves_fresh_per_invocation_without_restart() {
+async fn forwarded_name_resolves_fresh_value_per_invocation() {
     let server = Server::builder().start().await;
     let forward = r#"["NCAP_TEST_FRESH"]"#;
     let first = server
@@ -197,7 +187,7 @@ async fn forwarded_name_unset_on_host_is_silently_omitted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn duplicate_env_flags_resolve_later_wins() {
+async fn duplicate_env_flags_keep_last_value() {
     let server = Server::builder().start().await;
     let out = server
         .client()
@@ -210,7 +200,7 @@ async fn duplicate_env_flags_resolve_later_wins() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn merged_env_arrives_deduplicated_in_the_request() {
+async fn merged_env_arrives_deduplicated_in_request() {
     let server = Server::builder()
         .respond(vec![Message::Exit(Exit {
             code: Some(0),
@@ -234,7 +224,7 @@ async fn merged_env_arrives_deduplicated_in_the_request() {
     assert_eq!(out.status.code(), Some(0));
     let request = server.captured_request().expect("captured request");
     server.stop();
-    let merged: BTreeMap<String, String> = request
+    let merged: std::collections::BTreeMap<String, String> = request
         .env
         .iter()
         .map(|entry| entry.split_once('=').expect("entry carries ="))
@@ -263,10 +253,8 @@ async fn merged_env_arrives_deduplicated_in_the_request() {
     );
 }
 
-// ------------------------------------------------------------ raw wire protocol
-
 #[tokio::test(flavor = "multi_thread")]
-async fn server_applies_request_env_over_inherited() {
+async fn request_env_overrides_inherited_env() {
     let server = Server::builder().start().await;
     let run = run_request(
         &mut server.raw().await,
@@ -290,11 +278,11 @@ async fn non_request_first_frame_is_error_and_close() {
         .send(Message::Stdout(b"hi".to_vec()).into_frame().unwrap())
         .await
         .unwrap();
-    let frames = read_until_terminal(&mut framed).await;
+    let frames = common::probe::read_until_terminal(&mut framed).await;
     server.stop();
 
     assert!(
-        matches!(terminal_of(&frames), Some(Message::Error(_))),
+        matches!(common::probe::terminal_of(&frames), Some(Message::Error(_))),
         "expected Error: frames={frames:?}"
     );
 }
@@ -304,7 +292,6 @@ async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
     let server = Server::builder().start().await;
     let warnings_before = server.stderr();
 
-    // Mismatched version with a good cwd: the command still runs.
     let run = run_request(
         &mut server.raw().await,
         Request {
@@ -317,7 +304,7 @@ async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
     assert!(
         run.frames
             .iter()
-            .any(|frame| matches!(frame, Message::Version(v) if v.version == CURRENT_VERSION)),
+            .any(|frame| matches!(frame, Message::Version(v) if v.version == nix_capsule::protocol::CURRENT_VERSION)),
         "the server must still send its Version frame: frames={:?}",
         run.frames
     );
@@ -326,7 +313,6 @@ async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
         "a mismatched version must not stop the command",
     );
 
-    // Mismatched version with a bad cwd: cwd validation still runs.
     let run = run_request(
         &mut server.raw().await,
         Request {
@@ -390,34 +376,6 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
     );
 }
 
-// ------------------------------------------------------------ client behaviors
-
-// TODO
-// #[test_case(
-//     vec![
-//         Message::Version(VersionMsg {
-//             version: "9.9.9".into(),
-//         }),
-//         Message::Stdout(b"ok".to_vec()),
-//         Message::Exit(Exit {
-//             code: Some(0),
-//             signal: None,
-//         }),
-//     ],
-//     Some("ok"), 0, "9.9.9"
-//     ; "version_mismatch_warns_but_command_succeeds"
-// )]
-// #[test_case(
-//     vec![
-//         Message::Stdout(b"ok".to_vec()),
-//         Message::Exit(Exit {
-//             code: Some(0),
-//             signal: None,
-//         }),
-//     ],
-//     Some("ok"), 0, "version"
-//     ; "version_absent_warns_but_command_succeeds"
-// )]
 #[test_case(
     vec![Message::Exit(Exit {
         code: None,
@@ -427,14 +385,14 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
     ; "exit_null_null_warns_and_exits_1"
 )]
 #[test_case(
-    vec![Message::Error(ErrorMsg {
+    vec![Message::Error(nix_capsule::protocol::ErrorMsg {
         message: "boom".into(),
     })],
     None, 1, "boom"
     ; "error_frame_exits_1_with_message_on_stderr"
 )]
 #[tokio::test(flavor = "multi_thread")]
-async fn client_reports_what_the_server_frames_imply(
+async fn client_maps_terminal_frame_to_exit_code(
     respond: Vec<Message>,
     stdout: Option<&str>,
     code: i32,
@@ -448,10 +406,8 @@ async fn client_reports_what_the_server_frames_imply(
     assert!(out.stderr.contains(stderr), "stderr={}", out.stderr);
 }
 
-// ------------------------------------------------------------ log-level filter
-
 #[tokio::test(flavor = "multi_thread")]
-async fn error_log_level_suppresses_the_version_warning_in_both_sinks() {
+async fn error_log_level_suppresses_version_warning_in_both_sinks() {
     let server = Server::builder().log_level("error").start().await;
     let stderr_before = server.stderr();
 
@@ -471,7 +427,7 @@ async fn error_log_level_suppresses_the_version_warning_in_both_sinks() {
         !stderr.contains("declared version `9.9.9`"),
         "warning below error must not mirror to stderr: {stderr:?}"
     );
-    let log_file = newest_server_log(server.path().join("logs"));
+    let log_file = read_newest_server_log(server.path().join("logs"));
     assert!(
         !log_file.contains("declared version `9.9.9`"),
         "warning below error must not reach the log file"
@@ -480,7 +436,7 @@ async fn error_log_level_suppresses_the_version_warning_in_both_sinks() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn debug_log_level_keeps_the_version_warning_in_both_sinks() {
+async fn debug_log_level_keeps_version_warning_in_both_sinks() {
     let server = Server::builder().log_level("debug").start().await;
     let stderr_before = server.stderr();
 
@@ -499,7 +455,7 @@ async fn debug_log_level_keeps_the_version_warning_in_both_sinks() {
         stderr.contains("declared version `9.9.9`"),
         "warning at debug must mirror to stderr: {stderr:?}"
     );
-    let log_file = newest_server_log(server.path().join("logs"));
+    let log_file = read_newest_server_log(server.path().join("logs"));
     assert!(
         log_file.contains("declared version `9.9.9`"),
         "warning at debug must reach the log file"
@@ -507,8 +463,8 @@ async fn debug_log_level_keeps_the_version_warning_in_both_sinks() {
     server.stop();
 }
 
-/// Read back the single per-run server log under `dir`.
-fn newest_server_log(dir: std::path::PathBuf) -> String {
+// Read back the single per-run server log under `dir`: one run writes one log file.
+fn read_newest_server_log(dir: std::path::PathBuf) -> String {
     let entries: Vec<_> = fs::read_dir(&dir)
         .expect("log dir")
         .map(|entry| entry.expect("log dir entry").path())
@@ -537,7 +493,7 @@ async fn connect_failure_names_socket_and_suggests_init() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn empty_key_env_flag_is_a_local_error_before_any_connection() {
+async fn empty_key_env_flag_fails_locally_without_connect_hint() {
     let (_dir, socket) = missing_socket();
 
     let out = Client::at(&socket).env_flag("=VALUE").run(&["echo", "hi"]);
@@ -555,22 +511,20 @@ async fn empty_key_env_flag_is_a_local_error_before_any_connection() {
     );
 }
 
-// ------------------------------------------------------------------ properties
-
-/// A NUL-free Unicode string: full range of multibyte, newline, and control
-/// characters, sized so large payloads cross the server's pipe-read chunk
-/// boundaries. NUL is filtered out because execve argv cannot carry it.
-fn arb_payload() -> impl Strategy<Value = String> {
+// A NUL-free Unicode string: full range of multibyte, newline, and control
+// characters, sized so large payloads cross the server's pipe-read chunk
+// boundaries. NUL is filtered out because execve argv cannot carry it.
+fn arbitrary_payload() -> impl Strategy<Value = String> {
     prop::collection::vec(any::<char>(), 0..2048)
         .prop_map(|chars| chars.into_iter().filter(|c| *c != '\0').collect())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn arbitrary_stdio_round_trips_through_a_real_child() {
+async fn stdio_round_trips_verbatim_with_exit_0() {
     let server = Server::builder().start().await;
     // Each case spawns real processes, so a reduced case count keeps the
     // suite fast while the shared server carries the expensive setup.
-    proptest!(ProptestConfig::with_cases(16), |(out in arb_payload(), err in arb_payload())| {
+    proptest!(ProptestConfig::with_cases(16), |(stdout_text in arbitrary_payload(), stderr_text in arbitrary_payload())| {
         let result = server
             .client()
             .run(&[
@@ -578,18 +532,18 @@ async fn arbitrary_stdio_round_trips_through_a_real_child() {
                 "-c",
                 "printf %s \"$1\"; printf %s \"$2\" >&2",
                 "sh",
-                &out,
-                &err,
+                &stdout_text,
+                &stderr_text,
             ]);
-        prop_assert_eq!(result.stdout, out);
-        prop_assert_eq!(result.stderr, err);
+        prop_assert_eq!(result.stdout, stdout_text);
+        prop_assert_eq!(result.stderr, stderr_text);
         prop_assert_eq!(result.status.code(), Some(0));
     });
     server.stop();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn arbitrary_stdin_is_written_verbatim_to_a_child_file() {
+async fn stdin_writes_verbatim_to_child_file() {
     let server = Server::builder().start().await;
     // Each case spawns real processes, so a reduced case count keeps the
     // suite fast while the shared server carries the expensive setup.

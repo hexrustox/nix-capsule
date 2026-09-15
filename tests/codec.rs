@@ -36,7 +36,8 @@ fn framed(tag: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Feed `bytes` through a fresh decoder in fixed-size chunks; collect every message.
+// Feed `bytes` through a fresh decoder in fixed-size chunks; collect every message.
+// Fixed-size chunks prove chunk tolerance regardless of transport splits.
 fn feed_in_chunks(bytes: &[u8], chunk: usize) -> Result<Vec<Message>, DecodeError> {
     let mut codec = FrameCodec;
     let mut src = BytesMut::new();
@@ -49,8 +50,6 @@ fn feed_in_chunks(bytes: &[u8], chunk: usize) -> Result<Vec<Message>, DecodeErro
     }
     Ok(out)
 }
-
-// ---------------------------------------------------------------- strategies
 
 prop_compose! {
     fn arb_request()
@@ -89,8 +88,6 @@ fn arb_known_tag() -> impl Strategy<Value = u8> {
     0x01u8..=0x09
 }
 
-// ------------------------------------------------------ exact literal tables
-
 #[test_case(
     Message::Request(Request {
         command: "sh".into(),
@@ -105,12 +102,12 @@ fn arb_known_tag() -> impl Strategy<Value = u8> {
 #[test_case(
     Message::Stdin(vec![0xde, 0xad]),
     b"\x02\x00\x00\x00\x02\xde\xad".to_vec()
-    ; "stdin"
+    ; "stdin_encodes_to_tag_02"
 )]
 #[test_case(
     Message::Stdout(b"out".to_vec()),
     b"\x03\x00\x00\x00\x03out".to_vec()
-    ; "stdout"
+    ; "stdout_encodes_to_tag_03"
 )]
 #[test_case(
     Message::Stderr(Vec::new()),
@@ -120,7 +117,7 @@ fn arb_known_tag() -> impl Strategy<Value = u8> {
 #[test_case(
     Message::Error(ErrorMsg { message: "boom".into() }),
     b"\x06\x00\x00\x00\x12{\"message\":\"boom\"}".to_vec()
-    ; "error"
+    ; "error_encodes_message_json"
 )]
 #[test_case(
     Message::ServerStopping,
@@ -138,16 +135,16 @@ fn arb_known_tag() -> impl Strategy<Value = u8> {
 #[test_case(
     Message::Signal(SignalMsg { signal: 15 }),
     b"\x09\x00\x00\x00\x0d{\"signal\":15}".to_vec()
-    ; "signal"
+    ; "signal_encodes_number_json"
 )]
 fn encodes_the_documented_wire_bytes(msg: Message, want: Vec<u8>) {
     assert_eq!(encoded(&msg), want);
 }
 
-#[test_case(Some(7), None => framed(0x05, br#"{"code":7}"#) ; "code_only")]
-#[test_case(None, Some(9) => framed(0x05, br#"{"signal":9}"#) ; "signal_only")]
-#[test_case(None, None => framed(0x05, b"{}") ; "neither_set_is_the_unknowable_status_exception")]
-fn encode_exit_emits_only_the_set_field(code: Option<u8>, signal: Option<u8>) -> Vec<u8> {
+#[test_case(Some(7), None => framed(0x05, br#"{"code":7}"#) ; "emits_code_only")]
+#[test_case(None, Some(9) => framed(0x05, br#"{"signal":9}"#) ; "emits_signal_only")]
+#[test_case(None, None => framed(0x05, b"{}") ; "neither_set_is_unknowable_status_exception")]
+fn encode_exit_emits_only_set_field(code: Option<u8>, signal: Option<u8>) -> Vec<u8> {
     encoded(&Message::Exit(Exit { code, signal }))
 }
 
@@ -194,22 +191,22 @@ fn decode_server_stopping_with_non_empty_payload_is_rejected() {
 #[test_case(0x0a ; "just_past_max")]
 #[test_case(0x7f ; "ascii_control_zone")]
 #[test_case(0xff ; "all_bits_set")]
-fn unknown_tag_bytes_reject_decoding(bad_tag: u8) {
+fn unknown_tag_bytes_reject_decoding(rejected_tag: u8) {
     let mut codec = FrameCodec;
-    let mut src = BytesMut::from(framed(bad_tag, b"x").as_slice());
+    let mut src = BytesMut::from(framed(rejected_tag, b"x").as_slice());
     match codec.decode(&mut src) {
-        Err(DecodeError::UnknownFrameType(b)) => assert_eq!(b, bad_tag),
-        other => panic!("tag {bad_tag:#x}: expected UnknownFrameType, got {other:?}"),
+        Err(DecodeError::UnknownFrameType(tag_byte)) => assert_eq!(tag_byte, rejected_tag),
+        other => panic!("tag {rejected_tag:#x}: expected UnknownFrameType, got {other:?}"),
     }
 }
 
 // `ServerStopping` has no struct payload: only the empty payload decodes;
 // a non-empty payload is pinned as a rejection below.
-#[test_case(FrameType::Request ; "request")]
-#[test_case(FrameType::Exit ; "exit")]
-#[test_case(FrameType::Error ; "error")]
-#[test_case(FrameType::Version ; "version")]
-#[test_case(FrameType::Signal ; "signal")]
+#[test_case(FrameType::Request ; "rejects_request_junk")]
+#[test_case(FrameType::Exit ; "rejects_exit_junk")]
+#[test_case(FrameType::Error ; "rejects_error_junk")]
+#[test_case(FrameType::Version ; "rejects_version_junk")]
+#[test_case(FrameType::Signal ; "rejects_signal_junk")]
 fn malformed_struct_payloads_fail_decoding_without_panicking(tag: FrameType) {
     let mut codec = FrameCodec;
     let mut src = BytesMut::from(framed(tag.to_byte(), b"{not json").as_slice());
@@ -236,10 +233,8 @@ fn encoder_rejects_oversized_payloads() {
     }
 }
 
-// ---------------------------------------------------------------- boundaries
-
 #[test]
-fn a_declared_length_of_exactly_16_mib_is_accepted() {
+fn declared_length_of_exactly_16_mib_is_accepted() {
     let payload = vec![0xa5; MAX_PAYLOAD];
     let wire = framed(0x03, &payload);
     assert_eq!(
@@ -250,7 +245,7 @@ fn a_declared_length_of_exactly_16_mib_is_accepted() {
 }
 
 #[test]
-fn a_declared_length_above_16_mib_is_rejected_at_header_time() {
+fn declared_length_above_16_mib_is_rejected_at_header_time() {
     let mut codec = FrameCodec;
     let mut src = BytesMut::new();
     src.put_u8(0x03);
@@ -262,16 +257,14 @@ fn a_declared_length_above_16_mib_is_rejected_at_header_time() {
     }
 }
 
-// --------------------------------------------------------------- properties
-
 proptest! {
     #[test]
-    fn decoding_an_encoded_message_returns_it_unchanged(msg in arb_message()) {
+    fn encoded_message_decodes_unchanged(msg in arb_message()) {
         prop_assert_eq!(decoded(&encoded(&msg)), msg);
     }
 
     #[test]
-    fn a_single_stream_frame_survives_any_chunking(
+    fn single_stream_frame_survives_any_chunking(
         payload in prop::collection::vec(any::<u8>(), 0..300),
         chunk in 1usize..=200,
         kind in 0u8..3,
@@ -291,7 +284,7 @@ proptest! {
     }
 
     #[test]
-    fn a_sequence_of_frames_survives_any_chunking(
+    fn sequence_of_frames_survives_any_chunking(
         msgs in prop::collection::vec(arb_message(), 1..=6),
         chunk in 1usize..=200,
     ) {
@@ -305,7 +298,7 @@ proptest! {
     }
 
     #[test]
-    fn lengths_above_the_cap_fail_before_buffering_regardless_of_tag_or_body(
+    fn lengths_above_cap_fail_before_buffering_regardless_of_tag_or_body(
         tag in arb_known_tag(),
         declared in MAX_PAYLOAD as u32 + 1..=u32::MAX,
         buffered in 0usize..=48,
@@ -323,7 +316,7 @@ proptest! {
     }
 
     #[test]
-    fn no_strict_prefix_of_a_frame_yields_that_frame(
+    fn strict_prefix_of_frame_yields_no_frame(
         msg in arb_message(),
         cut_pct in 1u32..=99,
     ) {

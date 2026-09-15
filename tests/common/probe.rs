@@ -2,9 +2,11 @@
 //! [`Server`] or watch its tempdir, through one shared helper set — no
 //! per-file copy of frame collection, timeout shaping, or polling.
 
-use std::fs;
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
@@ -151,8 +153,11 @@ pub fn stdout_of(frames: &[Message]) -> String {
 /// One request run against a server: the frames seen through the terminal
 /// one, with the derived stdout and terminal frame.
 pub struct RawRun {
+    /// Every frame seen, including the terminal one.
     pub frames: Vec<Message>,
+    /// All stdout bytes carried by `frames`.
     pub stdout: String,
+    /// The terminal frame, if one arrived.
     pub terminal: Option<Message>,
 }
 

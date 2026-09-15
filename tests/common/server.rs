@@ -1,20 +1,18 @@
 //! One [`Server`] per test: the real `ncap-server` binary by default, or a
 //! scripted stand-in once the builder sets [`respond`](ServerBuilder::respond).
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Child, ExitStatus},
+    sync::{Arc, Mutex},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{FrameCodec, Message, Request};
 use tempfile::TempDir;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::time::sleep;
+use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
-
-use super::client::{bin_path, wait_bounded};
 
 /// What a running [`Server`] holds: a real binary child or a scripted task.
 enum ServerProc {
@@ -125,7 +123,11 @@ impl Server {
         let ServerProc::Real(child) = &mut self.handle else {
             return None;
         };
-        Some(wait_bounded(child, super::client::WAIT_LIMIT, "server"))
+        Some(super::client::wait_bounded(
+            child,
+            super::client::WAIT_LIMIT,
+            "server",
+        ))
     }
 
     /// Deliver `sig` to a real server and await its exit; `None` for a
@@ -136,6 +138,7 @@ impl Server {
     }
 }
 
+/// Builder for a [`Server`] with a fresh tempdir and socket.
 pub struct ServerBuilder {
     log_dir: Option<PathBuf>,
     socket_path: Option<PathBuf>,
@@ -194,7 +197,7 @@ impl ServerBuilder {
                 let log_dir = self.log_dir.unwrap_or_else(|| path.join("logs"));
                 let stderr_log = fs::File::create(path.join("server-stderr.log"))
                     .expect("create server stderr capture");
-                let child = Command::new(bin_path("ncap-server"))
+                let child = std::process::Command::new(super::client::bin_path("ncap-server"))
                     .arg("--socket")
                     .arg(&socket)
                     .arg("--log-dir")
@@ -203,7 +206,7 @@ impl ServerBuilder {
                     .arg(self.timeout.unwrap_or(Self::TIMEOUT_SECS).to_string())
                     .arg("--log-level")
                     .arg(self.log_level.unwrap_or_else(|| "debug".to_owned()))
-                    .stdout(Stdio::null())
+                    .stdout(std::process::Stdio::null())
                     .stderr(stderr_log)
                     .spawn()
                     .expect("spawn ncap-server");
@@ -211,7 +214,7 @@ impl ServerBuilder {
                 ServerProc::Real(child)
             }
             Some(respond) => {
-                let listener = UnixListener::bind(&socket).expect("bind fake socket");
+                let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake socket");
                 let store = Arc::clone(&captured);
                 let task = tokio::spawn(async move {
                     let (stream, _) = listener.accept().await.expect("accept");
@@ -249,13 +252,14 @@ pub fn missing_socket() -> (TempDir, PathBuf) {
     (dir, socket)
 }
 
-/// Poll the socket until the server accepts connections (or we give up).
+// Poll the socket until the server accepts connections (or we give up).
+// Retries every 20 ms: the child needs time to bind after spawn.
 async fn wait_for_socket(socket: &Path) {
     for _ in 0..200 {
         if UnixStream::connect(socket).await.is_ok() {
             return;
         }
-        sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!("server never bound {socket:?}");
 }

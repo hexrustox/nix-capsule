@@ -13,18 +13,18 @@ use nix_capsule::protocol::Message;
 use test_case::test_case;
 use tokio::io::AsyncWriteExt;
 
-use common::Server;
-use common::probe::{
-    DISCONNECT_TERM_LIMIT, GRACE_LIMIT, REAP_LIMIT, Raw, SHELL_TICK, assert_clean_exit, poll_until,
-    read_until_terminal, request_and_vanish, second_connection_succeeds, send_request, stdout_of,
-    wait_for_marker, zombies_under,
+use common::{
+    Server,
+    probe::{
+        DISCONNECT_TERM_LIMIT, GRACE_LIMIT, REAP_LIMIT, Raw, SHELL_TICK, assert_clean_exit,
+        poll_until, read_until_terminal, request_and_vanish, second_connection_succeeds,
+        send_request, stdout_of, wait_for_marker, zombies_under,
+    },
+    script::{group_trap_script, trapping_ticker_script},
 };
-use common::script::{group_trap_script, trapping_ticker_script};
-
-// ------------------------------------------------------------ abrupt disconnect
 
 #[tokio::test(flavor = "multi_thread")]
-async fn abrupt_full_close_terms_the_group_and_the_next_connection_still_works() {
+async fn full_close_terms_group_and_next_connection_succeeds() {
     let server = Server::builder().start().await;
     let marker = server.path().join("term-marker");
     request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
@@ -44,7 +44,7 @@ async fn abrupt_full_close_terms_the_group_and_the_next_connection_still_works()
     server.stop();
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn disconnect_takes_down_the_whole_group_including_a_spawned_grandchild() {
+async fn disconnect_terms_whole_group_including_grandchild() {
     let server = Server::builder().start().await;
     let marker = server.path().join("group-marker");
     // Both shells announce their own death from a TERM trap; the grandchild's
@@ -65,10 +65,8 @@ async fn disconnect_takes_down_the_whole_group_including_a_spawned_grandchild() 
     );
 }
 
-// ----------------------------------------------------------------------- reaping
-
 #[tokio::test(flavor = "multi_thread")]
-async fn the_disconnect_termed_child_is_reaped_leaving_no_zombie_under_the_server() {
+async fn disconnect_termed_child_is_reaped_leaving_no_zombie() {
     let server = Server::builder().start().await;
     let marker = server.path().join("reap-marker");
     request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
@@ -89,22 +87,18 @@ async fn the_disconnect_termed_child_is_reaped_leaving_no_zombie_under_the_serve
     );
 }
 
-// ------------------------------------------------- EOF is never a disconnect
-
-/// How stdin EOF reaches the child.
+// How stdin EOF reaches the child: the write half closes while the read half
+// stays open, or an empty Stdin frame arrives keeping the connection open for
+// later `Signal` frames.
 enum StdinEof {
-    /// The write half closes; the read half stays open to receive the
-    /// child's remainder.
     WriteHalfShutdown,
-    /// An empty Stdin frame arrives; no write-half close, so the connection
-    /// stays open for later `Signal` frames (ticket 04c).
     EmptyFrame,
 }
 
-#[test_case(StdinEof::WriteHalfShutdown ; "write_half_only_close_is_stdin_eof_and_lets_the_child_finish")]
-#[test_case(StdinEof::EmptyFrame ; "empty_stdin_frame_is_stdin_eof_and_keeps_the_connection_open")]
+#[test_case(StdinEof::WriteHalfShutdown ; "write_half_shutdown")]
+#[test_case(StdinEof::EmptyFrame ; "empty_frame")]
 #[tokio::test(flavor = "multi_thread")]
-async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(style: StdinEof) {
+async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(eof_style: StdinEof) {
     let server = Server::builder().start().await;
     let mut framed: Raw = server.raw().await;
     send_request(&mut framed, server.path(), "cat; echo done").await;
@@ -116,7 +110,7 @@ async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(style: StdinE
         )
         .await
         .expect("send stdin");
-    match style {
+    match eof_style {
         StdinEof::WriteHalfShutdown => {
             framed
                 .get_mut()
@@ -145,10 +139,8 @@ async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(style: StdinE
     assert!(stdout.contains("done"), "stdout={stdout:?}");
 }
 
-// --------------------------------------------------- TERM-trapping survivors
-
 #[tokio::test(flavor = "multi_thread")]
-async fn a_term_trapping_child_holds_only_its_own_connection_and_others_keep_working() {
+async fn term_trapping_child_holds_only_own_connection_and_others_keep_working() {
     let server = Server::builder().start().await;
     let marker = server.path().join("trap-marker");
     // The trap runs on TERM but does not exit, and silences stdout

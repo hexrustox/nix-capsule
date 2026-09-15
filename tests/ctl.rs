@@ -5,23 +5,20 @@
 
 mod common;
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::{fs, os::unix::fs::PermissionsExt};
 
 use common::fixture;
-use common::probe::DRAIN_DEADLINE;
 
 /// The drain deadline as the `--timeout` string the fixture passes through.
+// String form is what the fixture passes through to `--timeout`.
 fn drain_timeout() -> String {
-    DRAIN_DEADLINE.as_secs().to_string()
+    common::probe::DRAIN_DEADLINE.as_secs().to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Refusal: each command names the missing var
-// ---------------------------------------------------------------------------
+// Each command names the missing var it refuses on: the var must appear in stderr.
 
 #[test]
-fn init_refuses_when_a_demanded_var_is_missing() {
+fn init_refuses_when_demanded_var_is_missing() {
     let demanded = [
         "NCAP_PROJECT_ROOT",
         "NCAP_PROJECT",
@@ -41,16 +38,19 @@ fn init_refuses_when_a_demanded_var_is_missing() {
         "NCAP_HARDEN",
         "NCAP_LOG_LEVEL",
     ];
-    for var in demanded {
+    for demanded_var in demanded {
         // For NCAP_PROJECT_ROOT removal, NCAP_CONTAINER etc. still set so
         // the error should still name NCAP_PROJECT_ROOT, not a derived var.
-        let fx = fixture::Fixture::new(fixture::Config::default()).without(var);
+        let fx = fixture::Fixture::new(fixture::Config::default()).without(demanded_var);
         let out = fx.init();
-        assert!(!out.status.success(), "init without {var} must fail");
+        assert!(
+            !out.status.success(),
+            "init without {demanded_var} must fail"
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains(var),
-            "init without {var} must name it: stderr={stderr}"
+            stderr.contains(demanded_var),
+            "init without {demanded_var} must name it: stderr={stderr}"
         );
     }
 }
@@ -80,9 +80,7 @@ fn commands_refuse_watch_files_that_are_not_relative_files() {
 }
 
 #[test]
-fn start_demands_full_env_including_nix_devshell_and_image() {
-    // Pre-seed cache env so start's "no cached env" check passes.
-    // Uniform resolve: start without NCAP_NIX/NCAP_DEVSHELL must refuse.
+fn start_refuses_without_nix_devshell_or_image() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .without("NCAP_NIX")
         .without("NCAP_DEVSHELL");
@@ -97,7 +95,6 @@ fn start_demands_full_env_including_nix_devshell_and_image() {
         "start must demand NCAP_NIX/NCAP_DEVSHELL: stderr={stderr}"
     );
 
-    // Start without NCAP_IMAGE must refuse naming it.
     let fx2 = fixture::Fixture::new(fixture::Config::fresh_empty()).without("NCAP_IMAGE");
     let out2 = fx2.start();
     assert!(!out2.status.success());
@@ -107,7 +104,6 @@ fn start_demands_full_env_including_nix_devshell_and_image() {
 
 #[test]
 fn stop_refuses_without_container_or_derivation() {
-    // No NCAP_CONTAINER, no NCAP_PROJECT, no root → must name NCAP_PROJECT_ROOT
     let fx = fixture::Fixture::new(fixture::Config::default())
         .without("NCAP_PROJECT_ROOT")
         .without("NCAP_PROJECT")
@@ -125,7 +121,7 @@ fn stop_refuses_without_container_or_derivation() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("NCAP_PROJECT_ROOT"), "stderr={stderr}");
 
-    // With only NCAP_CONTAINER, uniform resolve still demands the full env.
+    // With only NCAP_CONTAINER the full env is still demanded.
     let fx2 = fixture::Fixture::new(fixture::Config::default())
         .without("NCAP_PROJECT_ROOT")
         .without("NCAP_PROJECT")
@@ -148,12 +144,8 @@ fn stop_refuses_without_container_or_derivation() {
     assert!(stderr2.contains("NCAP_PROJECT_ROOT"), "stderr={stderr2}");
 }
 
-// ---------------------------------------------------------------------------
-// Name sanitization via the binary (derivation + empty-result error)
-// ---------------------------------------------------------------------------
-
 #[test]
-fn derived_project_name_is_used_and_empty_is_a_hard_error() {
+fn derived_project_name_sanitizes_and_empty_root_fails_naming_project() {
     // Root whose basename is "my-proj" → sanitized "my-proj" via setup-env.
     // Remove explicit container/project so setup-env derivation is exercised.
     let fx = fixture::Fixture::with_root_name("my-proj")
@@ -197,10 +189,6 @@ fn derived_project_name_is_used_and_empty_is_a_hard_error() {
     assert!(stderr2.contains("set `project`"), "stderr={stderr2}");
 }
 
-// ---------------------------------------------------------------------------
-// Stamp guard
-// ---------------------------------------------------------------------------
-
 #[test]
 fn stamp_guard_same_root_passes_absent_written_different_is_error() {
     // Container down → eval + start; Liveness guard held by down().
@@ -238,13 +226,8 @@ fn stamp_guard_same_root_passes_absent_written_different_is_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Init flows: fresh+running zero evals, stale triggers re-eval, down triggers
-// ensure-cache + start
-// ---------------------------------------------------------------------------
-
 #[test]
-fn init_fresh_and_running_performs_zero_evals() {
+fn init_fresh_and_running_skips_eval_and_start() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_live());
     let out = fx.init();
     assert!(
@@ -265,7 +248,7 @@ fn init_fresh_and_running_performs_zero_evals() {
 }
 
 #[test]
-fn init_running_but_stale_triggers_reeval_and_restart() {
+fn init_running_but_stale_reevals_and_restarts() {
     let fx = fixture::Fixture::new(fixture::Config {
         liveness: fixture::Liveness::live(),
         freshness: fixture::Freshness::Stale,
@@ -291,7 +274,7 @@ fn init_running_but_stale_triggers_reeval_and_restart() {
 }
 
 #[test]
-fn init_down_triggers_ensure_cache_and_start() {
+fn init_down_evals_and_starts() {
     let fx = fixture::Fixture::new(fixture::Config::default()).with_watch_files("[]");
     // No cache yet: init must eval then start.
     let out = fx.init();
@@ -311,12 +294,8 @@ fn init_down_triggers_ensure_cache_and_start() {
     assert!(fx.cache_has("env"), "env must be cached");
 }
 
-// ---------------------------------------------------------------------------
-// Liveness: Running without a connectable socket is not live
-// ---------------------------------------------------------------------------
-
 #[test]
-fn running_without_socket_is_not_live() {
+fn not_live_without_connectable_socket_fails_with_never_live() {
     // Fresh cache: a live container would make init return early with
     // "already running and fresh" and zero evals. Deliberately no
     // listener on the Socket path.
@@ -366,10 +345,6 @@ fn running_without_socket_is_not_live() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Readiness deadline + log tail
-// ---------------------------------------------------------------------------
-
 #[test]
 fn start_never_reaching_running_fails_with_state_and_log_tail() {
     // Never Running: run never flips the flag (readiness deadline).
@@ -394,12 +369,8 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Concurrent-start race
-// ---------------------------------------------------------------------------
-
 #[test]
-fn concurrent_start_peer_running_is_success() {
+fn concurrent_start_peer_running_succeeds_without_rm() {
     // After the failed run, inspect says running true → success.
     let fx = fixture::Fixture::new(fixture::Config {
         failure: Some(fixture::Failure::RunFailOnce),
@@ -471,12 +442,8 @@ fn start_removes_stopped_container_before_launch() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Stop idempotent; restart tolerates stopped
-// ---------------------------------------------------------------------------
-
 #[test]
-fn stop_is_idempotent() {
+fn second_stop_succeeds_without_error() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_live()).not_live();
     // First: running true → stop succeeds (full env via the seam).
     let out = fx.stop();
@@ -494,10 +461,6 @@ fn stop_is_idempotent() {
         String::from_utf8_lossy(&out2.stderr)
     );
 }
-
-// ---------------------------------------------------------------------------
-// Clean: targeted file removal, shared-dir safety
-// ---------------------------------------------------------------------------
 
 #[test]
 fn clean_removes_project_files_and_spares_foreign_entries() {
@@ -552,7 +515,7 @@ fn clean_removes_project_files_and_spares_foreign_entries() {
 }
 
 #[test]
-fn clean_removes_empty_dirs_and_missing_paths_are_fine() {
+fn clean_removes_empty_dirs_and_second_clean_succeeds() {
     let mut fx = fixture::Fixture::new(fixture::Config::default());
     fx.drop_live();
     fx.seed_clean_minimal();
@@ -582,7 +545,7 @@ fn clean_removes_empty_dirs_and_missing_paths_are_fine() {
 }
 
 #[test]
-fn restart_tolerates_a_stopped_container() {
+fn restart_on_stopped_container_succeeds_and_starts() {
     // Start not running; stop will be non-fatal, then init will start.
     let fx = fixture::Fixture::new(fixture::Config::default());
     // Liveness needs a connectable Socket: Running alone is not live
@@ -599,12 +562,8 @@ fn restart_tolerates_a_stopped_container() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Status covers all three dimensions
-// ---------------------------------------------------------------------------
-
 #[test]
-fn status_reports_all_three_dimensions() {
+fn status_shows_running_connectable_fresh_stale_missing() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_live());
     let out = fx.status();
     assert!(out.status.success());
@@ -626,10 +585,6 @@ fn status_reports_all_three_dimensions() {
     assert!(stdout3.contains("missing"), "stdout={stdout3}");
 }
 
-// ---------------------------------------------------------------------------
-// Runtime selection follows NCAP_RUNTIME
-// ---------------------------------------------------------------------------
-
 #[test]
 fn runtime_selection_absolute_path_is_rejected() {
     // Absolute runtime paths are rejected by ctl validation; only
@@ -643,7 +598,7 @@ fn runtime_selection_absolute_path_is_rejected() {
 }
 
 #[test]
-fn missing_runtime_is_an_error_naming_it() {
+fn missing_runtime_fails_naming_runtime_var() {
     let fx = fixture::Fixture::new(fixture::Config::default()).without("NCAP_RUNTIME");
     let bin_dir = fx.tmp_path().join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -658,7 +613,7 @@ fn missing_runtime_is_an_error_naming_it() {
 }
 
 #[test]
-fn invalid_runtime_is_rejected() {
+fn invalid_runtime_fails_naming_runtime_var() {
     let fx = fixture::Fixture::new(fixture::Config::default()).with_env("NCAP_RUNTIME", "nerdctl");
     let out = fx.stop();
     assert!(!out.status.success());
@@ -666,11 +621,7 @@ fn invalid_runtime_is_rejected() {
     assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
 }
 
-// ---------------------------------------------------------------------------
-// XDG fallback is exercised via unit tests; a smoke integration for the
-// runtime dir creation mode 0700.
-// ---------------------------------------------------------------------------
-
+// XDG fallback is exercised via unit tests; this smoke pins the runtime dir mode.
 #[test]
 fn runtime_dir_is_created_with_0700() {
     let mut fx = fixture::Fixture::new(fixture::Config::default());
@@ -729,12 +680,8 @@ fn runtime_dir_is_created_with_0700() {
     assert_eq!(mode, 0o700, "runtime dir must be 0700");
 }
 
-// ---------------------------------------------------------------------------
-// Ticket 07: exact default mount set and launch command shape
-// ---------------------------------------------------------------------------
-
 #[test]
-fn start_assembles_exact_default_mount_set_and_launch_command() {
+fn start_mounts_exact_default_set_and_executes_server() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     // Ensure .git does NOT exist for this base case
     assert!(!fx.project_has(".git"));
@@ -892,7 +839,7 @@ fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
 }
 
 #[test]
-fn extra_options_expansion_sets_var_is_passed_and_no_word_splitting() {
+fn expanded_option_survives_as_single_argv_after_defaults() {
     // $TEST_EXPAND should expand to "/tmp/foo bar" containing a space; no word splitting means it stays one arg
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("TEST_EXPAND", "/tmp/foo bar")
@@ -1007,7 +954,7 @@ fn harden_off_emits_no_flags_nor_extra_mounts() {
 }
 
 #[test]
-fn extra_options_braced_expansion_and_literal_passthrough() {
+fn braced_expansion_and_literal_survive_as_single_argvs() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("NCAP_TEST_BRACED", "braced-val")
         .with_env(
@@ -1038,18 +985,15 @@ fn extra_options_braced_expansion_and_literal_passthrough() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Ticket log-level: env-contract validation and launch argv lock-in
-// ---------------------------------------------------------------------------
-
 #[test]
-fn off_vocabulary_log_level_is_rejected_naming_the_var_and_the_four_values() {
-    for bad in ["verbose", "Warning", "warn", "debug "] {
-        let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(bad);
+fn unknown_log_level_fails_naming_var_and_four_values() {
+    for rejected_level in ["verbose", "Warning", "warn", "debug "] {
+        let fx =
+            fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(rejected_level);
         let out = fx.status();
         assert!(
             !out.status.success(),
-            "log level `{bad}` must fail the command"
+            "log level `{rejected_level}` must fail the command"
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -1066,7 +1010,7 @@ fn off_vocabulary_log_level_is_rejected_naming_the_var_and_the_four_values() {
 }
 
 #[test]
-fn each_accepted_log_level_survives_as_its_own_launch_argv() {
+fn accepted_log_level_survives_as_launch_argv() {
     for level in ["debug", "info", "warning", "error"] {
         let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(level);
         fx.set_running(false);
@@ -1086,7 +1030,7 @@ fn each_accepted_log_level_survives_as_its_own_launch_argv() {
 }
 
 #[test]
-fn full_env_start_flow_carries_the_log_level() {
+fn full_env_start_propagates_log_level_to_launch() {
     // End-to-end start flow with a full env set: the validated level reaches
     // the server launch command.
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level("error");

@@ -2,11 +2,13 @@
 //! socket, one command per connection, streaming stdio back as a
 //! [`ClientOutput`].
 
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    io::{Read, Write},
+    path::Path,
+    process::{Child, ExitStatus, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 /// Upper bound on one client-wait phase; a red run fails on the assertion,
 /// never on the harness itself.
@@ -64,7 +66,7 @@ impl<'a> Client<'a> {
     /// without waiting, for tests that must deliver a signal mid-run; await
     /// the outcome with [`ClientProc::wait`].
     pub fn spawn(self, args: &[&str]) -> ClientProc {
-        let mut cmd = Command::new(bin_path("ncap"));
+        let mut cmd = std::process::Command::new(bin_path("ncap"));
         cmd.arg("--socket").arg(self.socket);
         if let Some(c) = self.cwd {
             cmd.arg("--cwd").arg(c);
@@ -165,7 +167,7 @@ pub struct ClientOutput {
 
 /// Absolute path to a compiled binary target, resolved at runtime from the
 /// `CARGO_BIN_EXE_*` env var Cargo sets for integration tests.
-pub fn bin_path(name: &str) -> PathBuf {
+pub fn bin_path(name: &str) -> std::path::PathBuf {
     let var = format!("CARGO_BIN_EXE_{name}");
     std::env::var(&var)
         .unwrap_or_else(|_| panic!("CARGO_BIN_EXE not set for binary {name}"))
