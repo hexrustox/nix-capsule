@@ -28,7 +28,7 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
-    let (message, code) = runtime.block_on(nix_capsule::client::run(
+    let (code, message) = runtime.block_on(nix_capsule::client::run(
         &cli.socket,
         cli.cwd,
         cli.env,

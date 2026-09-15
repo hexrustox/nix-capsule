@@ -1,6 +1,8 @@
 //! Shared io error context: one variant per filesystem operation, naming the
 //! failed operation and its object with the raw cause riding as `#[source]`.
-//! Constructed by any ctl module that touches the filesystem.
+//! Constructed by any module that touches the filesystem — ctl flows and the
+//! Server alike (socket and signal-handler io errors carry their own context
+//! in `server::ServerError`; these are not filesystem operations).
 
 use std::io;
 
@@ -9,6 +11,12 @@ pub enum FsError {
     #[error("cannot create `{dir}`: {source}")]
     CreateDir {
         dir: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot open `{path}`: {source}")]
+    Open {
+        path: String,
         #[source]
         source: io::Error,
     },

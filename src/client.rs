@@ -46,24 +46,24 @@ impl Outcome {
 /// `None` it defaults to the client's own current directory. `env` carries the
 /// `--env` flags, each a `KEY=VALUE` override or a bare `KEY` to copy from
 /// this process. Non-UTF-8 bytes in `env`/`command` convert lossily
-/// (`U+FFFD`) at this boundary — never rejected. Returns the message to print
-/// on stderr, if any (unprefixed, may be multi-line), and the exit code the
-/// client process should report.
+/// (`U+FFFD`) at this boundary — never rejected. Returns the exit code the
+/// client process should report and the message to print on stderr, if any
+/// (unprefixed, may be multi-line).
 pub async fn run(
     socket: &Path,
     cwd: Option<PathBuf>,
     env: Vec<OsString>,
     command: Vec<OsString>,
-) -> (Option<String>, i32) {
+) -> (i32, Option<String>) {
     match session(socket, cwd, env, command).await {
-        Ok(outcome) => (outcome.notice, outcome.code),
+        Ok(outcome) => (outcome.code, outcome.notice),
         Err(err @ ClientError::Connect { .. }) => (
+            1,
             Some(format!(
                 "{err}\nrun `ncap-ctl init` to start this project's container"
             )),
-            1,
         ),
-        Err(err) => (Some(err.to_string()), 1),
+        Err(err) => (1, Some(err.to_string())),
     }
 }
 
@@ -116,6 +116,8 @@ enum ClientError {
         #[source]
         source: EncodeError,
     },
+    #[error("server error: {message}")]
+    ServerError { message: String },
 }
 
 async fn session(
@@ -194,9 +196,9 @@ async fn session(
                         warn_absent_version(version_seen);
                         return exit_outcome(&exit, &command_name);
                     }
-                    Message::Error(message) => {
+                    Message::Error(err) => {
                         warn_absent_version(version_seen);
-                        return Ok(Outcome::with_notice(1, message.message))
+                        return Err(ClientError::ServerError { message: err.message });
                     }
                     Message::ServerStopping => {
                         return Ok(Outcome::just(SHUTDOWN_EXIT));

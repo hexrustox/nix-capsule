@@ -29,7 +29,7 @@ fn main() {
         Duration::from_secs(cli.timeout),
     ));
     if let Err(err) = result {
-        eprintln!("ncap-server: {err}");
+        eprintln!("{}: {err}", env!("CARGO_BIN_NAME"));
         std::process::exit(1);
     }
 }

@@ -21,18 +21,77 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
+use crate::ctl::fs_error::FsError;
 use crate::ctl::paths::server_log_path;
-use crate::protocol::{CURRENT_VERSION, ErrorMsg, Exit, FrameCodec, Message, VersionMsg};
+use crate::protocol::{
+    CURRENT_VERSION, DecodeError, ErrorMsg, Exit, FrameCodec, FrameType, Message, VersionMsg,
+};
+
+/// Failures of the Server's startup path: context variants name the failed
+/// operation and its object with the raw cause riding as `#[source]`; the
+/// shared filesystem variants pass through transparent. Socket and
+/// signal-handler io errors are not filesystem operations and carry their
+/// context here.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    #[error("socket `{socket}` is owned by a live server")]
+    SocketInUse { socket: String },
+    #[error("cannot bind socket `{socket}`: {source}")]
+    Bind {
+        socket: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot install the `{signal}` handler: {source}")]
+    SignalHandler {
+        signal: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Failure modes that end a Connection with a terminal `Error` frame; the
+/// message rides to the Client as the frame's `message` payload. Separate
+/// from the startup `ServerError`: this enum renders on the wire, not on
+/// the Server's stderr.
+#[derive(Debug, thiserror::Error)]
+enum Rejection {
+    #[error("expected a `Request` frame first, got `{got:?}`")]
+    ExpectedRequest { got: FrameType },
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("`cwd` is not a directory: `{cwd}`")]
+    NotADirectory { cwd: String },
+    #[error("invalid env entry `{entry}`")]
+    BadEnvEntry { entry: String },
+    #[error("cannot spawn `{command}`: {source}")]
+    Spawn {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot wait for `{command}`: {source}")]
+    Wait {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 /// Bind `socket` and serve connections until the process is stopped. A
 /// SIGTERM or SIGINT starts the orderly shutdown: `ServerStopping` to every
 /// live connection, a group TERM for every child, a drain bounded by
 /// `drain`, then the socket file's removal.
-pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io::Result<()> {
+pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> Result<(), ServerError> {
     let log = Arc::new(Log::start(&log_dir)?);
     log.line(&format!("server starting (pid {})", std::process::id()));
     probe_socket(&socket).await?;
-    let listener = UnixListener::bind(&socket)?;
+    let listener = UnixListener::bind(&socket).map_err(|source| ServerError::Bind {
+        socket: socket.display().to_string(),
+        source,
+    })?;
     log.line(&format!(
         "server listening on socket `{}`",
         socket.display()
@@ -47,8 +106,16 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io:
         log.clone(),
     ));
 
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).map_err(|source| ServerError::SignalHandler {
+            signal: "SIGTERM",
+            source,
+        })?;
+    let mut sigint =
+        signal(SignalKind::interrupt()).map_err(|source| ServerError::SignalHandler {
+            signal: "SIGINT",
+            source,
+        })?;
     let received = tokio::select! {
         _ = sigterm.recv() => "SIGTERM",
         _ = sigint.recv() => "SIGINT",
@@ -84,17 +151,19 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> std::io:
 /// owned by a live server — refuse rather than disturb it. A connect failure
 /// means the file is stale (the previous server crashed) and is removed so
 /// the bind can succeed.
-async fn probe_socket(socket: &Path) -> std::io::Result<()> {
+async fn probe_socket(socket: &Path) -> Result<(), ServerError> {
     if !socket.exists() {
         return Ok(());
     }
     match UnixStream::connect(socket).await {
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!("socket `{}` is owned by a live server", socket.display()),
-        )),
+        Ok(_) => Err(ServerError::SocketInUse {
+            socket: socket.display().to_string(),
+        }),
         Err(_) => {
-            std::fs::remove_file(socket)?;
+            std::fs::remove_file(socket).map_err(|source| FsError::Remove {
+                path: socket.display().to_string(),
+                source,
+            })?;
             Ok(())
         }
     }
@@ -132,18 +201,20 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
                 Ok(other) => {
                     send_error(
                         &mut framed,
-                        &format!("expected a Request frame, got {:?}", other.frame_type()),
+                        &Rejection::ExpectedRequest {
+                            got: other.frame_type(),
+                        },
                     )
                     .await;
                     return;
                 }
                 Err(err) => {
-                    send_error(&mut framed, &err.to_string()).await;
+                    send_error(&mut framed, &Rejection::from(err)).await;
                     return;
                 }
             },
             Some(Err(err)) => {
-                send_error(&mut framed, &err.to_string()).await;
+                send_error(&mut framed, &Rejection::from(err)).await;
                 return;
             }
             None => return, // client left before its first frame
@@ -183,7 +254,9 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
     if !Path::new(&request.cwd).is_dir() {
         send_error(
             &mut framed,
-            &format!("cwd is not a directory: `{}`", request.cwd),
+            &Rejection::NotADirectory {
+                cwd: request.cwd.clone(),
+            },
         )
         .await;
         return;
@@ -200,7 +273,9 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
             None => {
                 send_error(
                     &mut framed,
-                    &format!("invalid env entry `{entry}`: expected `KEY=VALUE`"),
+                    &Rejection::BadEnvEntry {
+                        entry: entry.clone(),
+                    },
                 )
                 .await;
                 return;
@@ -242,7 +317,10 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
                 _ => {
                     send_error(
                         &mut framed,
-                        &format!("failed to spawn `{}`: {err}", request.command),
+                        &Rejection::Spawn {
+                            command: request.command.clone(),
+                            source: err,
+                        },
                     )
                     .await;
                 }
@@ -270,7 +348,10 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
             Err(err) => {
                 send_error(
                     &mut framed,
-                    &format!("failed to wait for `{}`: {err}", request.command),
+                    &Rejection::Wait {
+                        command: request.command.clone(),
+                        source: err,
+                    },
                 )
                 .await;
                 return;
@@ -356,12 +437,12 @@ async fn bridge(
                     }
                     Ok(_) => {}
                     Err(err) => {
-                        send_error(framed, &err.to_string()).await;
+                        send_error(framed, &Rejection::from(err)).await;
                         return false;
                     }
                 },
                 Some(Err(err)) => {
-                    send_error(framed, &err.to_string()).await;
+                    send_error(framed, &Rejection::from(err)).await;
                     return false;
                 }
                 None => {
@@ -422,11 +503,11 @@ async fn pump_output(
     }
 }
 
-async fn send_error(framed: &mut Framed<UnixStream, FrameCodec>, message: &str) {
+async fn send_error(framed: &mut Framed<UnixStream, FrameCodec>, rejection: &Rejection) {
     send(
         framed,
         Message::Error(ErrorMsg {
-            message: message.to_string(),
+            message: rejection.to_string(),
         }),
     )
     .await;
@@ -454,10 +535,20 @@ struct Log {
 
 impl Log {
     /// Create `dir` when missing and open this run's epoch-stamped log file.
-    fn start(dir: &Path) -> std::io::Result<Self> {
-        std::fs::create_dir_all(dir)?;
+    fn start(dir: &Path) -> Result<Self, FsError> {
+        std::fs::create_dir_all(dir).map_err(|source| FsError::CreateDir {
+            dir: dir.display().to_string(),
+            source,
+        })?;
         let path = server_log_path(dir, epoch_millis());
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| FsError::Open {
+                path: path.display().to_string(),
+                source,
+            })?;
         Ok(Self {
             file: Mutex::new(file),
         })
