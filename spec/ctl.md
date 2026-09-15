@@ -50,7 +50,7 @@ The container invocation:
 
 ```
 <runtime> run -d --name <container> <mounts and options> -- <image> <NCAP_BASH> \
-  -c "source '<cache>/env' && exec '<NCAP_SERVER>' --socket '<socket>' --log-dir '<log-dir>' --timeout <timeout>"
+  -c "source '<cache>/env' && exec '<NCAP_SERVER>' --socket '<socket>' --log-dir '<log-dir>' --timeout <timeout> --log-level <log-level>"
 ```
 
 `<NCAP_BASH>` and `<NCAP_SERVER>` are the absolute store paths from
@@ -136,16 +136,19 @@ sockets rule out macOS (podman-machine's VM breaks path identity).
 | `NCAP_BASH` | `-` | Store path of devshell bash. No option: pkgs-provided. |
 | `NCAP_TIMEOUT` | `-` | Seconds (`0` allowed: no drain grace / immediate readiness deadline); bounds start readiness and the Server's drain grace. Set by `timeout`. |
 | `NCAP_HARDEN` | `-` | `true`/`false` enables harden (§ Harden). Set by `harden`. |
+| `NCAP_LOG_LEVEL` | `-` | Minimum severity the Server logs at; one of `debug`, `info`, `warning`, `error` (spec/server.md § Logging). Set by `logLevel`. |
 
 Empty-string values count as unset. Every command except `setup-env`
 demands the full `ctl` set: `NCAP_PROJECT_ROOT`, `NCAP_PROJECT`,
 `NCAP_CONTAINER`, `NCAP_SOCKET`, `NCAP_CACHE_DIR`, `NCAP_LOG_DIR`,
 `NCAP_IMAGE`, `NCAP_RUNTIME`, `NCAP_DEVSHELL`, `NCAP_NIX`, `NCAP_SERVER`,
-`NCAP_BASH`, `NCAP_TIMEOUT`, `NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`, and
-`NCAP_HARDEN`. A missing var is an error naming the var, and a set
+`NCAP_BASH`, `NCAP_TIMEOUT`, `NCAP_WATCH_FILES`, `NCAP_RUN_OPTS`,
+`NCAP_HARDEN`, and `NCAP_LOG_LEVEL`. A missing var is an error naming
+the var, and a set
 `NCAP_WATCH_FILES`/`NCAP_RUN_OPTS` that is not a JSON array of strings
 is an error naming the var; a `NCAP_HARDEN` that is not `true`/`false`
-is likewise an error. Each `NCAP_WATCH_FILES` entry must be
+is likewise an error; a `NCAP_LOG_LEVEL` that is not one of the four
+levels is likewise an error. Each `NCAP_WATCH_FILES` entry must be
 project-root-relative — an absolute entry or one containing a `..`
 component is an error naming the var and the entry — and an entry that
 exists must be a file (absent entries hash their absence; a broken

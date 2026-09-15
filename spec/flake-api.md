@@ -88,6 +88,7 @@ flake side makes no guarantee about the derived value.
 | `containerName` | string | `""` | Sets `NCAP_CONTAINER`. |
 | `cacheDir` | string | `""` | Sets `NCAP_CACHE_DIR`. |
 | `logDir` | string | `""` | Sets `NCAP_LOG_DIR`. |
+| `logLevel` | string | `"warning"` | Sets `NCAP_LOG_LEVEL`. |
 | `preShellHook` / `postShellHook` | strings | `""` | Extra shellHook fragments, run before/after the capsule fragments. |
 | `autoStart` | bool | `true` | Run `ncap-ctl init` from the shellHook. |
 | `runtime` | string | `"podman"` | Sets `NCAP_RUNTIME`. |
@@ -100,14 +101,15 @@ the option, the expected shape, and the received type/value. No
 coercions: a
 value of the wrong type is an error, never silently converted.
 `lib.nix` performs type checks only; value transformation and
-validation (runtime names, timeout range, devshell shape) is `ctl`'s job.
+validation (runtime names, timeout range, devshell shape, log-level
+values) is `ctl`'s job.
 
 Checked shapes: `image`, `devShell`,
 `runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
 strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `harden`, `autoStart` bools; `timeout` integer number;
 `project`, `containerName`, `socketPath`, `cacheDir`, `logDir` strings;
-`preShellHook`, `postShellHook` strings. Wrapper attrsets require `name` (string);
+`preShellHook`, `postShellHook` strings; `logLevel` a string. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
 null or string. Unknown top-level options and unknown wrapper fields
 throw at eval time naming the option or field.

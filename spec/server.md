@@ -11,7 +11,8 @@ on re-init (spec/ctl.md § init flow).
 
 ## Startup
 
-CLI: `--socket`, `--log-dir`, `--timeout` (drain grace, seconds).
+CLI: `--socket`, `--log-dir`, `--timeout` (drain grace, seconds),
+`--log-level` (minimum severity; the levels are § Logging).
 
 - If the socket path exists: probe it. Connectable ⇒ another Server owns it —
   error out naming the path, leaving the owner untouched. Stale (connect
@@ -96,6 +97,12 @@ with the UTC time in compact RFC 3339 form (`[YYYY-MM-DDTHH:MM:SSZ]`) and
 mirrored to stderr so the container runtime captures the same stream.
 Logging is best-effort and never disturbs the Connection it reports on. How
 lines read follows `docs/agents/log.md`.
+
+`--log-level` (required) sets the minimum severity the Server logs
+at. The levels are exactly `debug` < `info` < `warning` < `error`; a
+line whose level ranks below the minimum is not written — neither to
+the log file nor to the stderr mirror. Filtering happens at emit
+time, before the line is stamped; nothing is buffered or replayed.
 
 This section inventories what gets logged — the spec's say on logging stops
 here; it does not carry the lines' format or levels. Events listed elsewhere

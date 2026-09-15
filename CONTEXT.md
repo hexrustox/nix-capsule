@@ -46,6 +46,10 @@ _Avoid_: shim, alias, stub
 The interchangeable OCI runtime — podman or docker — behind all container run/inspect/stop operations.
 _Avoid_: engine, backend
 
+**Log level**:
+The minimum severity the Server logs at — exactly `debug`, `info`, `warning`, `error` — set by mkShell option `logLevel`, enforced by Ctl against the env contract, and passed to the Server as `--log-level`.
+_Avoid_: verbosity, filter level, log level CLI
+
 ### State
 
 **Project name**:
