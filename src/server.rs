@@ -86,16 +86,13 @@ enum Rejection {
 /// `drain`, then the socket file's removal.
 pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> Result<(), ServerError> {
     let log = Arc::new(Log::start(&log_dir)?);
-    log.line(&format!("server starting (pid {})", std::process::id()));
+    log.info(&format!("server started (pid {})", std::process::id()));
     probe_socket(&socket).await?;
     let listener = UnixListener::bind(&socket).map_err(|source| ServerError::Bind {
         socket: socket.display().to_string(),
         source,
     })?;
-    log.line(&format!(
-        "server listening on socket `{}`",
-        socket.display()
-    ));
+    log.info(&format!("socket bound at `{}`", socket.display()));
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let connections: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -120,7 +117,7 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> Result<(
         _ = sigterm.recv() => "SIGTERM",
         _ = sigint.recv() => "SIGINT",
     };
-    log.line(&format!("{received} received; notifying live connections"));
+    log.debug(&format!("{received} received notifying live connections"));
     let _ = stop_tx.send(true);
     acceptor.abort();
     // Await the cancelled acceptor so every handle it pushed is visible
@@ -133,7 +130,7 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> Result<(
         .expect("connection lock")
         .drain(..)
         .collect();
-    log.line(&format!("draining connections within {}s", drain.as_secs()));
+    log.info(&format!("drain begun within {}s", drain.as_secs()));
     if drain > Duration::from_secs(0) {
         let _ = tokio::time::timeout(drain, async {
             for handle in handles {
@@ -143,7 +140,7 @@ pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> Result<(
         .await;
     }
     let _ = std::fs::remove_file(&socket);
-    log.line("socket removed; server stopped");
+    log.info("socket removed and server exited");
     Ok(())
 }
 
@@ -184,7 +181,7 @@ async fn accept_loop(
                 connections.lock().expect("connection lock").push(handle);
             }
             Err(err) => {
-                log.line(&format!("accept failed: {err}"));
+                log.error(&format!("accept failed: {err}"));
                 return;
             }
         }
@@ -192,6 +189,7 @@ async fn accept_loop(
 }
 
 async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: Arc<Log>) {
+    log.info("connection opened");
     let mut framed = Framed::new(stream, FrameCodec);
 
     let request = tokio::select! {
@@ -209,11 +207,13 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
                     return;
                 }
                 Err(err) => {
+                    log.error(&format!("first frame undecodable: {err}"));
                     send_error(&mut framed, &Rejection::from(err)).await;
                     return;
                 }
             },
             Some(Err(err)) => {
+                log.error(&format!("first frame undecodable: {err}"));
                 send_error(&mut framed, &Rejection::from(err)).await;
                 return;
             }
@@ -233,6 +233,10 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
     if !send(&mut framed, version).await {
         return;
     }
+    log.debug(&format!(
+        "exec request for `{}` in `{}`",
+        request.command, request.cwd
+    ));
 
     // Version is advisory, never a rejection: a differing (or missing)
     // request version is one warning line, then the connection continues to
@@ -240,13 +244,13 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
     match &request.version {
         Some(peer) if peer == CURRENT_VERSION => {}
         Some(peer) => {
-            log.line(&format!(
-                "version mismatch: client `{peer}`, server `{CURRENT_VERSION}`"
+            log.warning(&format!(
+                "connection declared version `{peer}` against `{CURRENT_VERSION}`"
             ));
         }
         None => {
-            log.line(&format!(
-                "client did not send a version (server `{CURRENT_VERSION}`)"
+            log.warning(&format!(
+                "connection declared no version against `{CURRENT_VERSION}`"
             ));
         }
     }
@@ -271,6 +275,7 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
                 command.env(key, value);
             }
             None => {
+                log.error(&format!("invalid env entry `{entry}`"));
                 send_error(
                     &mut framed,
                     &Rejection::BadEnvEntry {
@@ -435,7 +440,7 @@ async fn bridge(
                         // number) is one warning line, never an Error frame —
                         // the connection continues to its normal terminal.
                         if let Err(err) = signal_group(pgid, signal_msg.signal) {
-                            log.line(&format!("kill(-{pgid}, {}): {err}", signal_msg.signal));
+                            log.warning(&format!("kill(-{pgid}, {}): {err}", signal_msg.signal));
                         }
                     }
                     Ok(_) => {}
@@ -557,14 +562,31 @@ impl Log {
         })
     }
 
-    /// Append one stamped line to the log file and stderr; logging is
-    /// best-effort and never disturbs the connection it reports on.
-    fn line(&self, message: &str) {
-        let line = format!("[{}] {message}\n", rfc3339_utc());
+    /// Append one stamped, level-tagged line to the log file and stderr;
+    /// logging is best-effort and never disturbs the connection it reports
+    /// on.
+    fn line(&self, level: &str, message: &str) {
+        let line = format!("[{}] {level}: {message}\n", rfc3339_utc());
         if let Ok(mut file) = self.file.lock() {
             let _ = file.write_all(line.as_bytes());
         }
         let _ = io::stderr().write_all(line.as_bytes());
+    }
+
+    fn debug(&self, message: &str) {
+        self.line("debug", message);
+    }
+
+    fn info(&self, message: &str) {
+        self.line("info", message);
+    }
+
+    fn warning(&self, message: &str) {
+        self.line("warning", message);
+    }
+
+    fn error(&self, message: &str) {
+        self.line("error", message);
     }
 }
 

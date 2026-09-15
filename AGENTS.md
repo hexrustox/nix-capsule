@@ -12,9 +12,11 @@ The five canonical triage roles: `needs-triage`, `needs-info`, `ready-for-agent`
 
 Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
 
-### Error messages
+### Error messages and logs
 
 Read `docs/agents/error.md` before writing a new or modifying an existing error message.
+
+Read `docs/agents/log.md` before writing a new or modifying an existing Server log line.
 
 ## Environment (self-hosted)
 

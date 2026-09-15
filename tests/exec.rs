@@ -347,7 +347,7 @@ async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
 
     let new_warnings: Vec<&str> = stderr
         .lines()
-        .filter(|line| line.contains("version mismatch"))
+        .filter(|line| line.contains("declared version `9.9.9`"))
         .collect();
     assert_eq!(
         new_warnings.len(),
@@ -381,7 +381,7 @@ async fn missing_version_warns_once_and_command_still_succeeds() {
 
     let new_warnings: Vec<&str> = stderr
         .lines()
-        .filter(|line| line.contains("did not send a version"))
+        .filter(|line| line.contains("declared no version"))
         .collect();
     assert_eq!(
         new_warnings.len(),
