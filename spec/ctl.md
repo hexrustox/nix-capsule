@@ -191,7 +191,8 @@ on tmpfs — it disappears at logout/reboot, so stale sockets don't accumulate.
 The project name is the sanitized basename of the project root: every
 non-ASCII-alphanumeric character joins the surrounding run into a single `-`;
 leading and trailing `-` are stripped; case is preserved. An empty result is
-a hard error telling you to set `project`. Explicit `NCAP_PROJECT`,
+a hard error naming the project root, plus a sibling stderr line advising
+to set `project`. Explicit `NCAP_PROJECT`,
 `NCAP_CONTAINER`, `NCAP_SOCKET`, `NCAP_CACHE_DIR`, and `NCAP_LOG_DIR` bypass
 their ctl-derived values; an unset `NCAP_CONTAINER` is ctl-derived as
 `ncap-<project>`.
@@ -200,9 +201,9 @@ their ctl-derived values; an unset `NCAP_CONTAINER` is ctl-derived as
 
 The first thing `init`/`start`/`restart` do with the Cache: read
 `<cache>/project`. Present and different from the current project root ⇒
-error — "project name `<name>` is already keyed to root `<path>`; set
-`project`" — two checkouts of one repo must never share a
-socket/container/cache. Absent ⇒ write it (creating the Cache dir if
+error — naming the project and the keyed root, plus a sibling stderr line
+advising to set `project` — two checkouts of one repo
+must never share a socket/container/cache. Absent ⇒ write it (creating the Cache dir if
 needed). The same root passes silently. `clean` removes the project-keyed
 cache files — the four named files plus the `profile-<N>-link` generation
 links — and every `ncap-server-*.log` file in the log dir (best-effort dir

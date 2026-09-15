@@ -58,7 +58,9 @@ pub async fn run(
     match session(socket, cwd, env, command).await {
         Ok(outcome) => (outcome.notice, outcome.code),
         Err(err @ ClientError::Connect { .. }) => (
-            Some(format!("{err}\nrun `ncap-ctl init` to start this project's container")),
+            Some(format!(
+                "{err}\nrun `ncap-ctl init` to start this project's container"
+            )),
             1,
         ),
         Err(err) => (Some(err.to_string()), 1),

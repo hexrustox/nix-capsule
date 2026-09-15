@@ -58,10 +58,10 @@ pub struct Config {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum ConfigError {
     #[error("required `{var}` is not set")]
     Missing { var: &'static str },
-    #[error("cannot derive a project name from root `{root}`; set `project`")]
+    #[error("cannot derive a project name from root `{root}`")]
     EmptyProjectName { root: String },
     #[error("`{var}` is not a JSON array of strings: {source}")]
     NotJsonArray {
@@ -83,22 +83,23 @@ pub enum Error {
     #[error("`NCAP_HARDEN` must be `true` or `false`, got `{value}`")]
     BadHarden { value: String },
     #[error(transparent)]
-    NoHome(#[from] paths::NoHome),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    NoHome(#[from] paths::NoHomeError),
 }
 
 fn lookup_non_empty(lookup: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<String> {
     lookup(var).and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
 
-fn demand(lookup: &dyn Fn(&str) -> Option<String>, var: &'static str) -> Result<String, Error> {
-    lookup_non_empty(lookup, var).ok_or(Error::Missing { var })
+fn demand(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    var: &'static str,
+) -> Result<String, ConfigError> {
+    lookup_non_empty(lookup, var).ok_or(ConfigError::Missing { var })
 }
 
-fn parse_watch_files(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, Error> {
+fn parse_watch_files(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, ConfigError> {
     let raw = demand(lookup, "NCAP_WATCH_FILES")?;
-    serde_json::from_str(&raw).map_err(|source| Error::NotJsonArray {
+    serde_json::from_str(&raw).map_err(|source| ConfigError::NotJsonArray {
         var: "NCAP_WATCH_FILES",
         source,
     })
@@ -110,7 +111,7 @@ fn parse_watch_files(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Stri
 /// it, so a directory there is an error now, not a permanently stale cache.
 /// Absent entries are fine (the digest hashes their absence), and a broken
 /// symlink counts as absent, matching `File::open`'s `NotFound`.
-fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), Error> {
+fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), ConfigError> {
     for entry in entries {
         let path = Path::new(entry);
         if !path.is_relative()
@@ -118,12 +119,12 @@ fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), Error> {
                 .components()
                 .any(|c| c == std::path::Component::ParentDir)
         {
-            return Err(Error::NotRelativeWatchFile {
+            return Err(ConfigError::NotRelativeWatchFile {
                 entry: entry.clone(),
             });
         }
         if root.join(path).exists() && !root.join(path).is_file() {
-            return Err(Error::WatchFileNotFile {
+            return Err(ConfigError::WatchFileNotFile {
                 entry: entry.clone(),
             });
         }
@@ -131,34 +132,35 @@ fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-fn parse_runtime(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, Error> {
+fn parse_runtime(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
     let raw = demand(lookup, "NCAP_RUNTIME")?;
     if raw == "podman" || raw == "docker" {
         Ok(raw)
     } else {
-        Err(Error::BadRuntime { value: raw })
+        Err(ConfigError::BadRuntime { value: raw })
     }
 }
 
-fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>) -> Result<u64, Error> {
+fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>) -> Result<u64, ConfigError> {
     let raw = demand(lookup, "NCAP_TIMEOUT")?;
-    raw.parse().map_err(|source| Error::BadTimeout { source })
+    raw.parse()
+        .map_err(|source| ConfigError::BadTimeout { source })
 }
 
-fn parse_run_opts(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, Error> {
+fn parse_run_opts(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, ConfigError> {
     let raw = demand(lookup, "NCAP_RUN_OPTS")?;
-    serde_json::from_str(&raw).map_err(|source| Error::NotJsonArray {
+    serde_json::from_str(&raw).map_err(|source| ConfigError::NotJsonArray {
         var: "NCAP_RUN_OPTS",
         source,
     })
 }
 
-fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> Result<bool, Error> {
+fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> Result<bool, ConfigError> {
     let raw = demand(lookup, "NCAP_HARDEN")?;
     match raw.as_str() {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(Error::BadHarden { value: raw }),
+        _ => Err(ConfigError::BadHarden { value: raw }),
     }
 }
 
@@ -191,14 +193,14 @@ fn sanitize(basename: &str) -> Option<String> {
 fn resolve_project(
     lookup: &dyn Fn(&str) -> Option<String>,
     root: Option<&Path>,
-) -> Result<String, Error> {
+) -> Result<String, ConfigError> {
     if let Some(project) = lookup_non_empty(lookup, "NCAP_PROJECT") {
         return Ok(project);
     }
     let root = match root {
         Some(root) => root,
         None => {
-            return Err(Error::Missing {
+            return Err(ConfigError::Missing {
                 var: "NCAP_PROJECT_ROOT",
             });
         }
@@ -210,7 +212,7 @@ fn resolve_project(
         .unwrap_or("");
     match sanitize(basename) {
         Some(name) => Ok(name),
-        None => Err(Error::EmptyProjectName { root: root_str }),
+        None => Err(ConfigError::EmptyProjectName { root: root_str }),
     }
 }
 
@@ -218,7 +220,7 @@ fn resolve_project(
 /// `SetupEnv` share one demand set (normally fully populated by `lib.nix`
 /// plus a sourced `setup-env`): derived vars are demanded non-empty, never
 /// derived here.
-pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error> {
+pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
     // Runtime/timeout are demanded on every command (missing => error naming
     // the var). JSON-array vars consumed by ctl and harden are validated and
     // demanded on every command (missing or malformed => error naming the
@@ -274,7 +276,7 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Error>
 /// root basename, container as `ncap-<project>`, socket/cache/log from the
 /// XDG layout). Fixed order: `PROJECT, CONTAINER, SOCKET, CACHE_DIR,
 /// LOG_DIR`. Needs only `NCAP_PROJECT_ROOT`.
-pub fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, Error> {
+pub fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
     let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
     let root = PathBuf::from(&root_str);
     let project = resolve_project(lookup, Some(&root))?;
@@ -335,45 +337,47 @@ mod tests {
         })
     }
 
-    #[test_case(None => matches Err(Error::Missing { var: "NCAP_HARDEN" }) ; "unset_is_missing")]
-    #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_missing")]
+    #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_HARDEN" }) ; "unset_is_missing")]
+    #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_missing")]
     #[test_case(Some("true") => matches Ok(true) ; "true_sets_harden")]
     #[test_case(Some("false") => matches Ok(false) ; "false_clears_harden")]
-    #[test_case(Some("true ") => matches Err(Error::BadHarden { value }) if value == "true " ; "trailing_space_is_rejected")]
-    #[test_case(Some("yes") => matches Err(Error::BadHarden { value }) if value == "yes" ; "yes_is_not_a_boolean")]
-    #[test_case(Some("True") => matches Err(Error::BadHarden { value }) if value == "True" ; "capitalized_true_is_rejected")]
-    fn harden_is_exact(raw: Option<&str>) -> Result<bool, Error> {
+    #[test_case(Some("true ") => matches Err(ConfigError::BadHarden { value }) if value == "true " ; "trailing_space_is_rejected")]
+    #[test_case(Some("yes") => matches Err(ConfigError::BadHarden { value }) if value == "yes" ; "yes_is_not_a_boolean")]
+    #[test_case(Some("True") => matches Err(ConfigError::BadHarden { value }) if value == "True" ; "capitalized_true_is_rejected")]
+    fn harden_is_exact(raw: Option<&str>) -> Result<bool, ConfigError> {
         parse_harden(&single("NCAP_HARDEN", raw))
     }
 
-    #[test_case(None => matches Err(Error::Missing { var: "NCAP_TIMEOUT" }) ; "missing_is_named")]
-    #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_missing")]
+    #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_TIMEOUT" }) ; "missing_is_named")]
+    #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_missing")]
     #[test_case(Some("30") => matches Ok(30) ; "seconds_parse")]
     #[test_case(Some("0") => matches Ok(0) ; "zero_is_a_number")]
-    #[test_case(Some("-1") => matches Err(Error::BadTimeout { .. }) ; "negative_is_rejected")]
-    #[test_case(Some("1.5") => matches Err(Error::BadTimeout { .. }) ; "fraction_is_rejected")]
-    #[test_case(Some("abc") => matches Err(Error::BadTimeout { .. }) ; "not_a_number_is_rejected")]
-    fn timeout_is_a_number_of_seconds(raw: Option<&str>) -> Result<u64, Error> {
+    #[test_case(Some("-1") => matches Err(ConfigError::BadTimeout { .. }) ; "negative_is_rejected")]
+    #[test_case(Some("1.5") => matches Err(ConfigError::BadTimeout { .. }) ; "fraction_is_rejected")]
+    #[test_case(Some("abc") => matches Err(ConfigError::BadTimeout { .. }) ; "not_a_number_is_rejected")]
+    fn timeout_is_a_number_of_seconds(raw: Option<&str>) -> Result<u64, ConfigError> {
         parse_timeout(&single("NCAP_TIMEOUT", raw))
     }
 
-    #[test_case(None => matches Err(Error::Missing { var: "NCAP_RUNTIME" }) ; "missing_is_named")]
-    #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_missing")]
+    #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_RUNTIME" }) ; "missing_is_named")]
+    #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_missing")]
     #[test_case(Some("podman") => matches Ok(value) if value == "podman" ; "podman_is_valid")]
     #[test_case(Some("docker") => matches Ok(value) if value == "docker" ; "docker_is_valid")]
-    #[test_case(Some("hello-docker") => matches Err(Error::BadRuntime { value }) if value == "hello-docker" ; "substring_is_not_enough")]
-    fn runtime_is_exact(raw: Option<&str>) -> Result<String, Error> {
+    #[test_case(Some("hello-docker") => matches Err(ConfigError::BadRuntime { value }) if value == "hello-docker" ; "substring_is_not_enough")]
+    fn runtime_is_exact(raw: Option<&str>) -> Result<String, ConfigError> {
         parse_runtime(&single("NCAP_RUNTIME", raw))
     }
 
-    #[test_case(None => matches Err(Error::Missing { var: "NCAP_WATCH_FILES" }) ; "unset_is_missing")]
-    #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_unset")]
+    #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_WATCH_FILES" }) ; "unset_is_missing")]
+    #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_unset")]
     #[test_case(Some(r#"["a","b"]"#) => matches Ok(list) if list == ["a".to_owned(), "b".to_owned()] ; "list_parses")]
     #[test_case(Some(r#"["  spaces  "]"#) => matches Ok(list) if list == ["  spaces  ".to_owned()] ; "entries_are_taken_verbatim")]
-    #[test_case(Some("not json") => matches Err(Error::NotJsonArray { var: "NCAP_WATCH_FILES", .. }) ; "malformed_json_names_the_var")]
-    #[test_case(Some(r#"{"a": 1}"#) => matches Err(Error::NotJsonArray { .. }) ; "object_is_not_an_array")]
-    #[test_case(Some(r#"["k", 1]"#) => matches Err(Error::NotJsonArray { .. }) ; "non_string_entry_is_rejected")]
-    fn watch_files_is_a_json_array_of_strings(raw: Option<&str>) -> Result<Vec<String>, Error> {
+    #[test_case(Some("not json") => matches Err(ConfigError::NotJsonArray { var: "NCAP_WATCH_FILES", .. }) ; "malformed_json_names_the_var")]
+    #[test_case(Some(r#"{"a": 1}"#) => matches Err(ConfigError::NotJsonArray { .. }) ; "object_is_not_an_array")]
+    #[test_case(Some(r#"["k", 1]"#) => matches Err(ConfigError::NotJsonArray { .. }) ; "non_string_entry_is_rejected")]
+    fn watch_files_is_a_json_array_of_strings(
+        raw: Option<&str>,
+    ) -> Result<Vec<String>, ConfigError> {
         parse_watch_files(&single("NCAP_WATCH_FILES", raw))
     }
 
@@ -383,11 +387,11 @@ mod tests {
     #[test_case(&["absent"] => matches Ok(()) ; "absent_entry_hashes_its_absence")]
     #[test_case(&["link"] => matches Ok(()) ; "symlink_to_a_file_passes")]
     #[test_case(&["broken"] => matches Ok(()) ; "dangling_symlink_counts_as_absent")]
-    #[test_case(&["/abs/file"] => matches Err(Error::NotRelativeWatchFile { entry }) if entry == "/abs/file" ; "absolute_entry_is_rejected")]
-    #[test_case(&["../escape"] => matches Err(Error::NotRelativeWatchFile { entry }) if entry == "../escape" ; "dotdot_escape_is_rejected")]
-    #[test_case(&["dir/../.."] => matches Err(Error::NotRelativeWatchFile { entry }) if entry == "dir/../.." ; "embedded_dotdot_is_rejected")]
-    #[test_case(&["dir"] => matches Err(Error::WatchFileNotFile { entry }) if entry == "dir" ; "existing_directory_is_rejected")]
-    fn watch_files_are_relative_files(entries: &[&str]) -> Result<(), Error> {
+    #[test_case(&["/abs/file"] => matches Err(ConfigError::NotRelativeWatchFile { entry }) if entry == "/abs/file" ; "absolute_entry_is_rejected")]
+    #[test_case(&["../escape"] => matches Err(ConfigError::NotRelativeWatchFile { entry }) if entry == "../escape" ; "dotdot_escape_is_rejected")]
+    #[test_case(&["dir/../.."] => matches Err(ConfigError::NotRelativeWatchFile { entry }) if entry == "dir/../.." ; "embedded_dotdot_is_rejected")]
+    #[test_case(&["dir"] => matches Err(ConfigError::WatchFileNotFile { entry }) if entry == "dir" ; "existing_directory_is_rejected")]
+    fn watch_files_are_relative_files(entries: &[&str]) -> Result<(), ConfigError> {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(root.path().join("dir")).expect("watched dir");
         std::fs::write(root.path().join("file"), b"x").expect("watched file");
@@ -397,11 +401,11 @@ mod tests {
         validate_watch_files(root.path(), &owned)
     }
 
-    #[test_case(None => matches Err(Error::Missing { var: "NCAP_RUN_OPTS" }) ; "unset_is_missing")]
-    #[test_case(Some("") => matches Err(Error::Missing { .. }) ; "empty_string_counts_as_unset")]
+    #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_RUN_OPTS" }) ; "unset_is_missing")]
+    #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_unset")]
     #[test_case(Some(r#"["--rm"]"#) => matches Ok(list) if list == ["--rm".to_owned()] ; "list_parses")]
-    #[test_case(Some("[1]") => matches Err(Error::NotJsonArray { var: "NCAP_RUN_OPTS", .. }) ; "non_string_entry_names_the_var")]
-    fn run_opts_is_a_json_array_of_strings(raw: Option<&str>) -> Result<Vec<String>, Error> {
+    #[test_case(Some("[1]") => matches Err(ConfigError::NotJsonArray { var: "NCAP_RUN_OPTS", .. }) ; "non_string_entry_names_the_var")]
+    fn run_opts_is_a_json_array_of_strings(raw: Option<&str>) -> Result<Vec<String>, ConfigError> {
         parse_run_opts(&single("NCAP_RUN_OPTS", raw))
     }
 
@@ -409,12 +413,12 @@ mod tests {
     #[test_case(Some(""), Some(Path::new("/tmp/my_project")) => matches Ok(name) if name == "my-project" ; "empty_project_falls_back_to_the_root_basename")]
     #[test_case(None, Some(Path::new("/tmp/my_project")) => matches Ok(name) if name == "my-project" ; "root_basename_is_sanitized")]
     #[test_case(None, Some(Path::new("/tmp/My.App")) => matches Ok(name) if name == "My-App" ; "root_basename_case_is_preserved")]
-    #[test_case(None, Some(Path::new("/")) => matches Err(Error::EmptyProjectName { root }) if root == "/" ; "unsanitizable_root_is_an_error")]
-    #[test_case(None, None => matches Err(Error::Missing { var: "NCAP_PROJECT_ROOT" }) ; "without_root_the_project_var_is_demanded")]
+    #[test_case(None, Some(Path::new("/")) => matches Err(ConfigError::EmptyProjectName { root }) if root == "/" ; "unsanitizable_root_is_an_error")]
+    #[test_case(None, None => matches Err(ConfigError::Missing { var: "NCAP_PROJECT_ROOT" }) ; "without_root_the_project_var_is_demanded")]
     fn project_name_is_derived(
         project: Option<&str>,
         root: Option<&Path>,
-    ) -> Result<String, Error> {
+    ) -> Result<String, ConfigError> {
         resolve_project(&single("NCAP_PROJECT", project), root)
     }
 
@@ -490,7 +494,7 @@ mod tests {
         let err = setup_env(&lookup).expect_err("root is demanded");
         assert!(matches!(
             err,
-            Error::Missing {
+            ConfigError::Missing {
                 var: "NCAP_PROJECT_ROOT"
             }
         ));

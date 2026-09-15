@@ -5,13 +5,26 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
+/// Failure of `nix print-dev-env`: a spawn error rides as `#[source]`, a
+/// failed run carries the captured stderr as a data field.
+#[derive(Debug, thiserror::Error)]
+pub enum PrintDevEnvError {
+    #[error("cannot run `nix print-dev-env`: {source}")]
+    Spawn {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot eval `{devshell}` with `nix print-dev-env`:\n{stderr}")]
+    Failed { devshell: String, stderr: String },
+}
+
 /// Invoke `nix print-dev-env --profile <profile> <devshell>` and return the
 /// captured stdout (the env dump).
 pub async fn print_dev_env(
     nix_bin: &Path,
     profile: &Path,
     devshell: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, PrintDevEnvError> {
     let output = Command::new(nix_bin)
         .args([
             "print-dev-env",
@@ -23,17 +36,20 @@ pub async fn print_dev_env(
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|source| PrintDevEnvError::Spawn { source })?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        Err(PrintDevEnvError::Failed {
+            devshell: devshell.to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
     }
 }
 
 /// `nix profile wipe-history --profile <profile>`.
-pub async fn wipe_history(nix_bin: &Path, profile: &Path) -> Result<(), String> {
-    let output = Command::new(nix_bin)
+pub async fn wipe_history(nix_bin: &Path, profile: &Path) {
+    let _ = Command::new(nix_bin)
         .args([
             "profile",
             "wipe-history",
@@ -41,11 +57,5 @@ pub async fn wipe_history(nix_bin: &Path, profile: &Path) -> Result<(), String> 
             &profile.to_string_lossy(),
         ])
         .output()
-        .await
-        .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-    }
+        .await;
 }

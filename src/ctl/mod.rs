@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod digest;
+pub mod fs_error;
 pub mod nix;
 pub mod paths;
 pub mod runtime;
@@ -10,17 +11,83 @@ pub mod shell;
 pub mod stamp;
 
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
 
 use config::{Cmd, Config};
+use fs_error::FsError;
 use paths::{env_file, hash_file, profile_file, project_stamp_file};
+use stamp::StampError;
+
+/// Failures of the ctl flows: context variants name the failed operation and
+/// its object with the raw cause riding as `#[source]`; sub-module errors and
+/// the shared io variants pass through transparent.
+#[derive(Debug, thiserror::Error)]
+pub enum CtlError {
+    #[error(transparent)]
+    Config(#[from] config::ConfigError),
+    #[error(transparent)]
+    Stamp(#[from] StampError),
+    #[error(transparent)]
+    PrintDevEnv(#[from] nix::PrintDevEnvError),
+    #[error(transparent)]
+    Runtime(#[from] runtime::RuntimeError),
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    #[error("cannot hash the watched files: {source}")]
+    Digest {
+        #[source]
+        source: io::Error,
+    },
+    #[error("socket path `{socket}` has no parent directory")]
+    SocketNoParent { socket: String },
+    #[error("no `ncap-server-*.log` file in `{dir}`")]
+    NoLog { dir: String },
+    #[error("cannot run pager `{prog}`: {source}")]
+    PagerSpawn {
+        prog: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("pager `{prog}` failed")]
+    PagerFailed { prog: String },
+    #[error("referenced unset variable `{name}`")]
+    UnsetVar { name: String },
+    #[error("container `{container}` is not running")]
+    NotRunning { container: String },
+    #[error("no cached dev environment in `{dir}`")]
+    NoCachedEnv { dir: String },
+}
+
+/// Render `err` without the program prefix — the binary applies it — plus,
+/// when the variant carries it, prescriptive advice as a sibling line, and
+/// yield the exit code for the run.
+fn fail(err: CtlError) -> (Option<String>, i32) {
+    let message = err.to_string();
+    let message = if let Some(advice) = match &err {
+        CtlError::NotRunning { .. } | CtlError::NoCachedEnv { .. } => {
+            Some("run `ncap-ctl init` to start this project's container")
+        }
+        CtlError::Config(config::ConfigError::EmptyProjectName { .. })
+        | CtlError::Stamp(StampError::AlreadyClaimed { .. }) => {
+            Some("set `project` to a value mapping to a unique root")
+        }
+        _ => None,
+    } {
+        format!("{message}\n{advice}")
+    } else {
+        message
+    };
+    (Some(message), 1)
+}
 
 /// Entry point from the binary: resolve `cmd` from the process environment and
-/// dispatch. Returns the exit code the process should report.
-pub async fn run(cmd: Cmd) -> i32 {
+/// dispatch. Returns the message to print on stderr, if any (unprefixed, may
+/// be multi-line), and the exit code the process should report.
+pub async fn run(cmd: Cmd) -> (Option<String>, i32) {
     let lookup = |var: &str| std::env::var(var).ok();
     // `setup-env` resolves the derived vars itself, so it must run before
     // the full demand set — a full resolve would reject the empty values it
@@ -29,20 +96,14 @@ pub async fn run(cmd: Cmd) -> i32 {
         return match config::setup_env(&lookup) {
             Ok(script) => {
                 print!("{script}");
-                0
+                (None, 0)
             }
-            Err(err) => {
-                eprintln!("ncap-ctl: {err}");
-                1
-            }
+            Err(err) => fail(err.into()),
         };
     }
     let cfg = match config::resolve(&lookup) {
         Ok(cfg) => cfg,
-        Err(err) => {
-            eprintln!("ncap-ctl: {err}");
-            return 1;
-        }
+        Err(err) => return fail(err.into()),
     };
     let result = match cmd {
         Cmd::Init => init(cfg).await,
@@ -57,11 +118,8 @@ pub async fn run(cmd: Cmd) -> i32 {
         Cmd::SetupEnv => unreachable!("handled before resolve"),
     };
     match result {
-        Ok(()) => 0,
-        Err(err) => {
-            eprintln!("ncap-ctl: {err}");
-            1
-        }
+        Ok(()) => (None, 0),
+        Err(err) => fail(err),
     }
 }
 
@@ -69,12 +127,12 @@ pub async fn run(cmd: Cmd) -> i32 {
 // Flows
 // ---------------------------------------------------------------------------
 
-async fn init(cfg: Config) -> Result<(), String> {
+async fn init(cfg: Config) -> Result<(), CtlError> {
     // Stamp guard first.
     let root = &cfg.root;
     let cache_dir = &cfg.cache_dir;
     let project = &cfg.project;
-    stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
+    stamp::guard(cache_dir, project, root)?;
 
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     let socket = &cfg.socket;
@@ -83,7 +141,10 @@ async fn init(cfg: Config) -> Result<(), String> {
 
     match (live, freshness) {
         (true, digest::Freshness::Fresh) => {
-            eprintln!("container `{}` is already running and fresh", cfg.container);
+            eprintln!(
+                "ncap-ctl: container `{}` is already running and fresh",
+                cfg.container
+            );
             Ok(())
         }
         (true, _) => {
@@ -100,46 +161,46 @@ async fn init(cfg: Config) -> Result<(), String> {
     }
 }
 
-async fn start(cfg: Config) -> Result<(), String> {
+async fn start(cfg: Config) -> Result<(), CtlError> {
     let root = &cfg.root;
     let cache_dir = &cfg.cache_dir;
     let project = &cfg.project;
-    stamp::guard(cache_dir, project, root).map_err(|err| err.to_string())?;
+    stamp::guard(cache_dir, project, root)?;
 
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     let socket = &cfg.socket;
     if rt.is_live(socket).await {
-        eprintln!("container `{}` is already running", cfg.container);
+        eprintln!("ncap-ctl: container `{}` is already running", cfg.container);
         return Ok(());
     }
     start_inner(&cfg).await
 }
 
-async fn stop(cfg: Config) -> Result<(), String> {
+async fn stop(cfg: Config) -> Result<(), CtlError> {
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     if !rt.is_running().await {
-        eprintln!("container `{}` is not running", cfg.container);
+        eprintln!("ncap-ctl: container `{}` is not running", cfg.container);
         return Ok(());
     }
     match rt.stop().await {
         Ok(_) => {
-            eprintln!("container `{}` stopped", cfg.container);
+            eprintln!("ncap-ctl: container `{}` stopped", cfg.container);
             Ok(())
         }
-        Err(stderr) => {
+        Err(err) => {
             // If stop failed but the container is now not-running, treat as
             // success (idempotent).
             if !rt.is_running().await {
-                eprintln!("container `{}` is not running", cfg.container);
+                eprintln!("ncap-ctl: container `{}` is not running", cfg.container);
                 Ok(())
             } else {
-                Err(stderr)
+                Err(err.into())
             }
         }
     }
 }
 
-async fn restart(cfg: Config) -> Result<(), String> {
+async fn restart(cfg: Config) -> Result<(), CtlError> {
     // Non-fatal stop, then init. Resolution is uniform, so the Restart cfg
     // already carries Init's fields — dispatch directly.
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
@@ -147,7 +208,7 @@ async fn restart(cfg: Config) -> Result<(), String> {
     init(cfg).await
 }
 
-async fn status(cfg: Config) -> Result<(), String> {
+async fn status(cfg: Config) -> Result<(), CtlError> {
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     let running = rt.is_running().await;
 
@@ -173,22 +234,23 @@ async fn status(cfg: Config) -> Result<(), String> {
     Ok(())
 }
 
-async fn enter(cfg: Config) -> Result<(), String> {
+async fn enter(cfg: Config) -> Result<(), CtlError> {
     let cache_dir = &cfg.cache_dir;
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     if !rt.is_running().await {
-        return Err(format!(
-            "container `{}` is not running; run `ncap-ctl init` to start it",
-            cfg.container
-        ));
+        return Err(CtlError::NotRunning {
+            container: cfg.container.clone(),
+        });
     }
-    rt.exec_interactive(cache_dir).await
+    rt.exec_interactive(cache_dir).await?;
+    Ok(())
 }
 
-async fn log(cfg: Config) -> Result<(), String> {
+async fn log(cfg: Config) -> Result<(), CtlError> {
     let log_dir = &cfg.log_dir;
-    let newest = paths::newest_server_log_path(log_dir)
-        .ok_or_else(|| format!("no log file in {}", log_dir.display()))?;
+    let newest = paths::newest_server_log_path(log_dir).ok_or_else(|| CtlError::NoLog {
+        dir: log_dir.display().to_string(),
+    })?;
     let (prog, args) = pager_command();
     let mut cmd = tokio::process::Command::new(&prog);
     cmd.args(&args);
@@ -196,18 +258,18 @@ async fn log(cfg: Config) -> Result<(), String> {
     cmd.stdin(std::process::Stdio::inherit());
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
-    let status = cmd.status().await.map_err(|err| err.to_string())?;
+    let status = cmd.status().await.map_err(|source| CtlError::PagerSpawn {
+        prog: prog.clone(),
+        source,
+    })?;
     if status.success() {
         Ok(())
     } else {
-        match status.code() {
-            Some(code) => Err(format!("pager `{prog}` exited with status {code}")),
-            None => Err(format!("pager `{prog}` terminated by signal")),
-        }
+        Err(CtlError::PagerFailed { prog })
     }
 }
 
-async fn clean(cfg: Config) -> Result<(), String> {
+async fn clean(cfg: Config) -> Result<(), CtlError> {
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     // Stop the container (best-effort, idempotent) then remove it.
     if rt.is_running().await {
@@ -232,15 +294,21 @@ async fn clean(cfg: Config) -> Result<(), String> {
         match fs::remove_file(&cfg.socket) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.to_string()),
+            Err(err) => {
+                return Err(FsError::Remove {
+                    path: cfg.socket.display().to_string(),
+                    source: err,
+                }
+                .into());
+            }
         }
         let _ = fs::remove_dir(parent);
     }
-    eprintln!("cleaned project `{}`", cfg.project);
+    eprintln!("ncap-ctl: cleaned project `{}`", cfg.project);
     Ok(())
 }
 
-async fn show_options(cfg: Config) -> Result<(), String> {
+async fn show_options(cfg: Config) -> Result<(), CtlError> {
     for opt in &cfg.run_opts {
         let expanded = expand_one(opt)?;
         println!("{expanded}");
@@ -252,7 +320,7 @@ async fn show_options(cfg: Config) -> Result<(), String> {
 // Helpers shared by init/start
 // ---------------------------------------------------------------------------
 
-async fn ensure_cache(cfg: &Config) -> Result<(), String> {
+async fn ensure_cache(cfg: &Config) -> Result<(), CtlError> {
     let root = &cfg.root;
     let cache_dir = &cfg.cache_dir;
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
@@ -264,26 +332,34 @@ async fn ensure_cache(cfg: &Config) -> Result<(), String> {
     let devshell = &cfg.devshell;
     let profile = profile_file(cache_dir);
 
-    fs::create_dir_all(cache_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(cache_dir).map_err(|source| FsError::CreateDir {
+        dir: cache_dir.display().to_string(),
+        source,
+    })?;
 
-    eprintln!("evaluating devshell `{devshell}` with nix print-dev-env...");
-    let output = nix::print_dev_env(nix_bin, &profile, devshell)
-        .await
-        .map_err(|err| format!("nix print-dev-env failed: {err}"))?;
+    eprintln!("ncap-ctl: evaluating devshell `{devshell}` with nix print-dev-env...");
+    let output = nix::print_dev_env(nix_bin, &profile, devshell).await?;
 
     let env_path = env_file(cache_dir);
-    fs::write(&env_path, &output).map_err(|err| err.to_string())?;
-    eprintln!("devshell cached");
+    fs::write(&env_path, &output).map_err(|source| FsError::Write {
+        path: env_path.display().to_string(),
+        source,
+    })?;
+    eprintln!("ncap-ctl: devshell cached");
 
     // Prune profile history; non-fatal.
-    let _ = nix::wipe_history(nix_bin, &profile).await;
+    nix::wipe_history(nix_bin, &profile).await;
 
-    let digest_hex = digest::compute(root, &cfg.watch_files).map_err(|err| err.to_string())?;
-    digest::store(cache_dir, &digest_hex).map_err(|err| err.to_string())?;
+    let digest_hex =
+        digest::compute(root, &cfg.watch_files).map_err(|source| CtlError::Digest { source })?;
+    digest::store(cache_dir, &digest_hex).map_err(|source| FsError::Write {
+        path: hash_file(cache_dir).display().to_string(),
+        source,
+    })?;
     Ok(())
 }
 
-async fn start_inner(cfg: &Config) -> Result<(), String> {
+async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     let cache_dir = &cfg.cache_dir;
     let socket = &cfg.socket;
     let log_dir = &cfg.log_dir;
@@ -292,14 +368,22 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
 
     // The env dump must exist — otherwise the container cannot source it.
     if !env_file(cache_dir).is_file() {
-        return Err("no cached dev environment found; run `ncap-ctl init` first".to_owned());
+        return Err(CtlError::NoCachedEnv {
+            dir: cache_dir.display().to_string(),
+        });
     }
 
     // Ensure the socket's parent dir exists with 0700.
     if let Some(parent) = socket.parent() {
-        paths::ensure_dir_0700(parent).map_err(|err| err.to_string())?;
+        paths::ensure_dir_0700(parent).map_err(|source| FsError::CreateDir {
+            dir: parent.display().to_string(),
+            source,
+        })?;
     }
-    fs::create_dir_all(log_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(log_dir).map_err(|source| FsError::CreateDir {
+        dir: log_dir.display().to_string(),
+        source,
+    })?;
 
     // Assemble mount set and options. Expansion errors are fatal before the
     // runtime is ever invoked, naming the unset variable.
@@ -331,38 +415,33 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
 
     match run_result {
         Ok(_) => {}
-        Err(stderr) if runtime::is_name_in_use(&stderr) => {
+        Err(runtime::RuntimeError::RunFailed { output, .. })
+            if runtime::is_name_in_use(&output) =>
+        {
             // Concurrent-start race: re-inspect.
             if rt.is_running().await {
-                eprintln!("container `{}` is already running", cfg.container);
+                eprintln!("ncap-ctl: container `{}` is already running", cfg.container);
                 return Ok(());
             }
             // Dead container with the same name — remove and retry once.
             let _ = rt.remove().await;
-            match rt
-                .run_detached(
-                    image,
-                    &env_file(cache_dir),
-                    server,
-                    &server_args,
-                    &mount_args,
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(stderr) => return Err(format!("{} run failed: {stderr}", rt.bin())),
-            }
+            rt.run_detached(
+                image,
+                &env_file(cache_dir),
+                server,
+                &server_args,
+                &mount_args,
+            )
+            .await?;
         }
-        Err(stderr) => {
-            return Err(format!("{} run failed: {stderr}", rt.bin()));
-        }
+        Err(err) => return Err(err.into()),
     };
 
     // Poll the liveness predicate until live within the deadline.
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout);
     loop {
         if rt.is_live(socket).await {
-            eprintln!("container `{}` is running", cfg.container);
+            eprintln!("ncap-ctl: container `{}` is running", cfg.container);
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -372,10 +451,11 @@ async fn start_inner(cfg: &Config) -> Result<(), String> {
     }
 
     let state = rt.inspect_state().await;
-    Err(format!(
-        "container `{}` never became live within {}s (state: {state})",
-        cfg.container, cfg.timeout
-    ))
+    Err(CtlError::Runtime(runtime::RuntimeError::NotLive {
+        container: cfg.container.clone(),
+        timeout: cfg.timeout,
+        state,
+    }))
 }
 
 fn pager_command() -> (String, Vec<String>) {
@@ -396,7 +476,7 @@ fn pager_command() -> (String, Vec<String>) {
 /// links (`profile-<N>-link`) that `nix print-dev-env` creates beside the
 /// profile. Anything else in the dir is left untouched. Then best-effort
 /// remove the dir itself when empty.
-fn clean_cache_dir(cache_dir: &Path) -> Result<(), String> {
+fn clean_cache_dir(cache_dir: &Path) -> Result<(), CtlError> {
     for file in [
         env_file(cache_dir),
         hash_file(cache_dir),
@@ -413,14 +493,23 @@ fn clean_cache_dir(cache_dir: &Path) -> Result<(), String> {
 
 /// Remove every `ncap-server-<digits>.log` file in the log dir, leaving any
 /// other entry untouched. Then best-effort remove the dir itself when empty.
-fn clean_log_dir(log_dir: &Path) -> Result<(), String> {
+fn clean_log_dir(log_dir: &Path) -> Result<(), CtlError> {
     let entries = match fs::read_dir(log_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err.to_string()),
+        Err(err) => {
+            return Err(FsError::ReadDir {
+                dir: log_dir.display().to_string(),
+                source: err,
+            }
+            .into());
+        }
     };
     for entry in entries {
-        let entry = entry.map_err(|err| err.to_string())?;
+        let entry = entry.map_err(|source| FsError::ReadDir {
+            dir: log_dir.display().to_string(),
+            source,
+        })?;
         let name = entry.file_name();
         if paths::parse_server_log_epoch(&name.to_string_lossy()).is_some() {
             remove_file_if_exists(&entry.path())?;
@@ -435,14 +524,23 @@ fn clean_log_dir(log_dir: &Path) -> Result<(), String> {
 /// links `nix print-dev-env` maintains for the profile. A symlink is removed
 /// itself, never followed (`symlink_metadata`); only a real directory
 /// recurses.
-fn remove_profile_generation_links(cache_dir: &Path) -> Result<(), String> {
+fn remove_profile_generation_links(cache_dir: &Path) -> Result<(), CtlError> {
     let entries = match fs::read_dir(cache_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err.to_string()),
+        Err(err) => {
+            return Err(FsError::ReadDir {
+                dir: cache_dir.display().to_string(),
+                source: err,
+            }
+            .into());
+        }
     };
     for entry in entries {
-        let entry = entry.map_err(|err| err.to_string())?;
+        let entry = entry.map_err(|source| FsError::ReadDir {
+            dir: cache_dir.display().to_string(),
+            source,
+        })?;
         let name = entry.file_name();
         let is_link = name
             .to_string_lossy()
@@ -456,35 +554,45 @@ fn remove_profile_generation_links(cache_dir: &Path) -> Result<(), String> {
             continue;
         }
         let path = entry.path();
-        let file_type = fs::symlink_metadata(&path)
-            .map_err(|err| err.to_string())?
-            .file_type();
-        if file_type.is_dir() && !file_type.is_symlink() {
-            fs::remove_dir_all(&path).map_err(|err| err.to_string())?;
+        let file_type = fs::symlink_metadata(&path);
+        let file_type = file_type.map_err(|source| FsError::Read {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let removed = if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(&path)
         } else {
-            fs::remove_file(&path).map_err(|err| err.to_string())?;
-        }
+            fs::remove_file(&path)
+        };
+        removed.map_err(|source| FsError::Remove {
+            path: path.display().to_string(),
+            source,
+        })?;
     }
     Ok(())
 }
 
 /// Remove `path`, treating absence as success.
-fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+fn remove_file_if_exists(path: &Path) -> Result<(), CtlError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.to_string()),
+        Err(err) => Err(FsError::Remove {
+            path: path.display().to_string(),
+            source: err,
+        }
+        .into()),
     }
 }
 
-fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, String> {
+fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, CtlError> {
     let root = &cfg.root;
     let socket = &cfg.socket;
     let cache_dir = &cfg.cache_dir;
     let log_dir = &cfg.log_dir;
-    let socket_dir = socket
-        .parent()
-        .ok_or_else(|| format!("socket path `{}` has no parent directory", socket.display()))?;
+    let socket_dir = socket.parent().ok_or_else(|| CtlError::SocketNoParent {
+        socket: socket.display().to_string(),
+    })?;
 
     let mut args = Vec::new();
 
@@ -548,11 +656,11 @@ fn is_env_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn expand_one(input: &str) -> Result<String, String> {
+fn expand_one(input: &str) -> Result<String, CtlError> {
     expand_with(input, &|name| std::env::var(name).ok())
 }
 
-fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, CtlError> {
     let mut out = String::new();
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -589,7 +697,7 @@ fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<S
                 match lookup(&name) {
                     Some(val) => out.push_str(&val),
                     None => {
-                        return Err(format!("referenced unset variable `{name}`"));
+                        return Err(CtlError::UnsetVar { name });
                     }
                 }
             } else if matches!(chars.peek(), Some(ch) if ch.is_ascii_alphabetic() || *ch == '_') {
@@ -605,7 +713,7 @@ fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<S
                 match lookup(&name) {
                     Some(val) => out.push_str(&val),
                     None => {
-                        return Err(format!("referenced unset variable `{name}`"));
+                        return Err(CtlError::UnsetVar { name });
                     }
                 }
             } else {
@@ -666,11 +774,14 @@ mod tests {
         assert_eq!(out, input);
     }
 
-    #[test_case("x-$UNSET-y", "UNSET" ; "dollar_unset_names_var")]
-    #[test_case("x-${UNSET}-y", "UNSET" ; "braced_unset_names_var")]
-    #[test_case("${UNSET}", "UNSET" ; "braced_alone_names_var")]
-    fn unset_var_is_an_error_naming_it(template: &str, name: &str) {
+    #[test_case("x-$UNSET-y" ; "dollar_unset_names_var")]
+    #[test_case("x-${UNSET}-y" ; "braced_unset_names_var")]
+    #[test_case("${UNSET}" ; "braced_alone_names_var")]
+    fn unset_var_is_an_error_naming_it(template: &str) {
         let err = expand_with(template, &lookup_of(&[])).expect_err("unset must error");
-        assert!(err.contains(name), "err={err}");
+        assert!(
+            matches!(err, CtlError::UnsetVar { ref name } if name == "UNSET"),
+            "err={err}"
+        );
     }
 }

@@ -4,34 +4,52 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::fs_error::FsError;
 use super::paths::project_stamp_file;
 
+#[derive(Debug, thiserror::Error)]
+pub enum StampError {
+    #[error("project name `{project}` is already keyed to root `{existing}`")]
+    AlreadyClaimed { project: String, existing: String },
+    #[error(transparent)]
+    Fs(#[from] FsError),
+}
+
 /// Read `<cache>/project`; absent means "first claim" and is written, a
-/// different root is a hard error with the "set `project`" hint, the same
-/// root passes silently.
-pub fn guard(cache_dir: &Path, project: &str, current_root: &Path) -> io::Result<()> {
+/// different root is a hard error, the same root passes silently.
+pub fn guard(cache_dir: &Path, project: &str, current_root: &Path) -> Result<(), StampError> {
     let stamp = project_stamp_file(cache_dir);
     match fs::read_to_string(&stamp) {
         Ok(existing) => {
             let existing = existing.trim_end_matches(['\n', '\r']);
             if existing != current_root.to_string_lossy().as_ref() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "project name `{project}` is already keyed to root `{existing}`; set `project`"
-                    ),
-                ));
+                return Err(StampError::AlreadyClaimed {
+                    project: project.to_owned(),
+                    existing: existing.to_owned(),
+                });
             }
             Ok(())
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             if let Some(parent) = stamp.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent).map_err(|source| FsError::CreateDir {
+                    dir: parent.display().to_string(),
+                    source,
+                })?;
             }
-            fs::write(&stamp, current_root.to_string_lossy().as_ref())?;
+            fs::write(&stamp, current_root.to_string_lossy().as_ref()).map_err(|source| {
+                FsError::Write {
+                    path: stamp.display().to_string(),
+                    source,
+                }
+            })?;
             Ok(())
         }
-        Err(err) => Err(err),
+        Err(err) => Err(FsError::Read {
+            path: stamp.display().to_string(),
+            source: err,
+        }
+        .into()),
     }
 }
 
@@ -57,13 +75,10 @@ mod tests {
     }
 
     #[test]
-    fn different_root_is_a_hard_error_with_hint() {
+    fn different_root_is_a_hard_error() {
         let cache = tempfile::tempdir().expect("tempdir");
         guard(cache.path(), "proj", Path::new("/tmp/root-a")).expect("first guard");
         let err = guard(cache.path(), "proj", Path::new("/tmp/root-b")).expect_err("must error");
-        let msg = err.to_string();
-        assert!(msg.contains("proj"), "msg={msg}");
-        assert!(msg.contains("/tmp/root-a"), "msg={msg}");
-        assert!(msg.contains("set `project`"), "msg={msg}");
+        matches!(err, StampError::AlreadyClaimed { project, existing } if project == "proj" && existing == "/tmp/root-a");
     }
 }

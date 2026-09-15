@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 /// Error deriving a cache or log dir when neither the XDG var nor `HOME` is set.
 #[derive(Debug, thiserror::Error)]
 #[error("cannot derive the {what}: neither `{var}` nor `HOME` is set")]
-pub struct NoHome {
+pub struct NoHomeError {
     pub what: &'static str,
     pub var: &'static str,
 }
@@ -33,20 +33,20 @@ pub fn socket_path(project: &str) -> PathBuf {
 }
 
 /// The per-project cache dir: `$XDG_CACHE_HOME`, else `$HOME/.cache`.
-pub fn cache_dir(project: &str) -> Result<PathBuf, NoHome> {
+pub fn cache_dir(project: &str) -> Result<PathBuf, NoHomeError> {
     dirs::cache_dir()
         .map(|dir| dir.join("nix-capsule").join(project))
-        .ok_or(NoHome {
+        .ok_or(NoHomeError {
             what: "cache dir",
             var: "XDG_CACHE_HOME",
         })
 }
 
 /// The per-project log dir: `$XDG_STATE_HOME`, else `$HOME/.local/state`.
-pub fn log_dir(project: &str) -> Result<PathBuf, NoHome> {
+pub fn log_dir(project: &str) -> Result<PathBuf, NoHomeError> {
     dirs::state_dir()
         .map(|dir| dir.join("nix-capsule").join(project).join("logs"))
-        .ok_or(NoHome {
+        .ok_or(NoHomeError {
             what: "log dir",
             var: "XDG_STATE_HOME",
         })

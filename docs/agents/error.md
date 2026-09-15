@@ -36,6 +36,10 @@ Rules for the chain:
   `#[error(transparent)]` for pass-through variants (src/ctl/config.rs:85).
 - The colon-join is for `context: cause` only. Don't append unrelated clauses
   or multiple colon-separated causes.
+- When `{source}` is a captured command's stdout/stderr, chain it with a
+  newline instead of a colon-space, since the output may be multi-line. If
+  instead the command's stdout/stderr is piped straight through to the
+  user's terminal, attach no source at all — the context line stands alone.
 
 ## Advice lives outside the message
 
@@ -92,35 +96,6 @@ All io errors get context: a variant names the failed operation and its
 object, with the raw `io::Error` riding as a `#[source]` field. Leaf
 pass-through io variants with `#[error("{0}")]` are banned.
 
-## Known deviations to migrate away from
-
-The current code predates parts of this convention. When one of these sites
-is next touched, fix it — don't carry the deviation forward. Don't sweep
-them; fix on touch.
-
-Embedded advice:
-
-- ``cannot derive a project name from root `{root}`; set `project` ``
-  (src/ctl/config.rs:64) — the fix hint rides inside the message
-- `nix print-dev-env failed: {err}` (src/ctl/mod.rs:272) — names neither the
-  object (`{profile}`) nor the goal; should read
-  ``cannot eval `{devshell}` with print-dev-env: {err}``
-
-String errors:
-
-- `Result<(), String>` / `Result<Vec<String>, String>` throughout
-  `src/ctl/mod.rs` (`init`, `start`, `stop`, `restart`, `status`, `enter`,
-  `log`, `clean`, helpers), `src/ctl/nix.rs:14`, `src/ctl/nix.rs:35`, and
-  `src/ctl/runtime.rs:99-176`
-- `map_err(|err| err.to_string())` chains (`src/ctl/mod.rs:267-282`)
-
-Mid-task rendering:
-
-- `eprintln!` in command code rather than at the toplevel
-  (`src/ctl/mod.rs:112, 239, 269, 276, 337, 365`). The client's runtime
-  server-message forwarding at `client.rs` (the `Error` frame relay) is data
-  relay, not an error diagnostic, and keeps its raw form.
-
 ## Good vs bad
 
 | good | bad |
@@ -133,3 +108,4 @@ Mid-task rendering:
 | `` cannot read `{path}`: {source} `` | `` #[error("{0}")] Io(io::Error) `` — bare io pass-through, no context |
 | `.map_err(...)` into a `thiserror` variant | `Result<(), String>` or `format!("... failed: {err}")` |
 | `` ncap-ctl: container `proj` is not running `` (toplevel, prefixed) | `` container `proj` is not running `` mid-task, prefix-less |
+| `` cannot eval `{devshell}` with print-dev-env: `` + newline + output | `` cannot eval `x`: multi-line output crammed onto one colon-line `` |

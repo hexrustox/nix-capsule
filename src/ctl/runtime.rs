@@ -9,6 +9,51 @@ use tokio::process::Command;
 use super::paths::env_file;
 use super::shell::shell_escape;
 
+/// Failures of the runtime adapter: spawn errors ride as `#[source]`, a
+/// failed run/stop/rm carries the captured output as a data field, exec
+/// failures name the exit status.
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error("cannot spawn `{bin} run`: {source}")]
+    RunSpawn {
+        bin: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{bin} run` failed:\n{output}")]
+    RunFailed { bin: String, output: String },
+    #[error("cannot spawn `{bin} stop`: {source}")]
+    StopSpawn {
+        bin: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{bin} stop` failed:\n{output}")]
+    StopFailed { bin: String, output: String },
+    #[error("cannot spawn `{bin} rm`: {source}")]
+    RemoveSpawn {
+        bin: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{bin} rm` failed:\n{output}")]
+    RemoveFailed { bin: String, output: String },
+    #[error("cannot spawn `{bin} exec`: {source}")]
+    ExecSpawn {
+        bin: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{bin} exec` failed")]
+    ExecFailed { bin: String },
+    #[error("container `{container}` never became live within {timeout}s (state: {state})")]
+    NotLive {
+        container: String,
+        timeout: u64,
+        state: String,
+    },
+}
+
 /// Arguments of the ncap-server binary: exactly its CLI surface
 /// (`--socket`, `--log-dir`, `--timeout`).
 #[derive(Clone, Debug)]
@@ -87,8 +132,8 @@ impl Runtime {
     /// `args`.
     /// `extra_args` are the mounts and options assembled by the ctl
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
-    /// Returns the container id on success, or the combined stderr/stdout on
-    /// failure.
+    /// Returns the container id on success, or the runtime's captured output
+    /// on failure, as a `RuntimeError::Failed`.
     pub async fn run_detached(
         &self,
         image: &str,
@@ -96,7 +141,7 @@ impl Runtime {
         server: &Path,
         args: &ServerArgs,
         extra_args: &[String],
-    ) -> Result<String, String> {
+    ) -> Result<String, RuntimeError> {
         let exec_cmd = format!(
             "source '{}' && exec '{}' --socket '{}' --log-dir '{}' --timeout {}",
             shell_escape(&env_file.to_string_lossy()),
@@ -114,7 +159,10 @@ impl Runtime {
             .args(["-c", &exec_cmd])
             .output()
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|source| RuntimeError::RunSpawn {
+                bin: self.bin.clone(),
+                source,
+            })?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
@@ -122,21 +170,30 @@ impl Runtime {
             if msg.trim().is_empty() {
                 msg = String::from_utf8_lossy(&output.stdout).to_string();
             }
-            Err(msg.trim().to_owned())
+            Err(RuntimeError::RunFailed {
+                bin: self.bin.clone(),
+                output: msg.trim().to_owned(),
+            })
         }
     }
 
     /// `stop <name>`.
-    pub async fn stop(&self) -> Result<String, String> {
+    pub async fn stop(&self) -> Result<String, RuntimeError> {
         let output = Command::new(&self.bin)
             .args(["stop", &self.name])
             .output()
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|source| RuntimeError::StopSpawn {
+                bin: self.bin.clone(),
+                source,
+            })?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+            Err(RuntimeError::StopFailed {
+                bin: self.bin.clone(),
+                output: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            })
         }
     }
 
@@ -155,16 +212,22 @@ impl Runtime {
     }
 
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
-    pub async fn remove(&self) -> Result<String, String> {
+    pub async fn remove(&self) -> Result<String, RuntimeError> {
         let output = Command::new(&self.bin)
             .args(["rm", &self.name])
             .output()
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|source| RuntimeError::RemoveSpawn {
+                bin: self.bin.clone(),
+                source,
+            })?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+            Err(RuntimeError::RemoveFailed {
+                bin: self.bin.clone(),
+                output: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            })
         }
     }
 
@@ -173,7 +236,7 @@ impl Runtime {
     /// Inherits stdio so the user's terminal drives
     /// the container shell directly. Returns `Ok` on exit 0, else an error
     /// naming the exit status.
-    pub async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), String> {
+    pub async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), RuntimeError> {
         let env_file = env_file(cache_dir);
         let cmd_str = format!(
             "source '{}' && exec '{}'",
@@ -189,14 +252,16 @@ impl Runtime {
             .stderr(Stdio::inherit())
             .status()
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|source| RuntimeError::ExecSpawn {
+                bin: self.bin.clone(),
+                source,
+            })?;
         if status.success() {
             Ok(())
         } else {
-            match status.code() {
-                Some(code) => Err(format!("`{}` exec exited with status {code}", self.bin)),
-                None => Err(format!("`{}` exec terminated by signal", self.bin)),
-            }
+            Err(RuntimeError::ExecFailed {
+                bin: self.bin.clone(),
+            })
         }
     }
 }
