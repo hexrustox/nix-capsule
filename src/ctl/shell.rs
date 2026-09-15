@@ -4,7 +4,7 @@
 
 /// Single-quote-escape a value so it is safe inside single-quoted bash text:
 /// each `'` becomes `'\''`, closing and reopening the quotes around it.
-pub fn shell_escape(value: &str) -> String {
+pub(crate) fn shell_escape(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
@@ -20,7 +20,7 @@ mod tests {
     #[test_case("it's" => "it'\\''s" ; "embedded_quote_closes_reopens")]
     #[test_case("'" => "'\\''" ; "lone_quote_closes_reopens")]
     #[test_case("'a'" => "'\\''a'\\''" ; "surrounding_quotes_each_escape")]
-    fn escape_cases(value: &str) -> String {
+    fn escapes_single_quotes_for_bash(value: &str) -> String {
         shell_escape(value)
     }
 }

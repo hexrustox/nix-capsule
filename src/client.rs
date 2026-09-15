@@ -16,30 +16,6 @@ use crate::protocol::{
     CURRENT_VERSION, DecodeError, EncodeError, Exit, FrameCodec, Message, Request, SignalMsg,
 };
 
-/// Exit code for an orderly server shutdown: 128 + SIGTERM. `ServerStopping`
-/// and a clean close without a terminal frame both carry it.
-const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
-
-/// Outcome of a session: the exit code the client process reports plus any
-/// notice the entry point renders on stderr before exiting.
-struct Outcome {
-    code: i32,
-    notice: Option<String>,
-}
-
-impl Outcome {
-    fn just(code: i32) -> Self {
-        Self { code, notice: None }
-    }
-
-    fn with_notice(code: i32, notice: String) -> Self {
-        Self {
-            code,
-            notice: Some(notice),
-        }
-    }
-}
-
 /// Run `command` against the server listening on `socket`.
 ///
 /// `cwd` overrides the working directory the server uses for the child; when
@@ -120,6 +96,30 @@ enum ClientError {
     ServerError { message: String },
 }
 
+/// Exit code for an orderly server shutdown: 128 + SIGTERM. `ServerStopping`
+/// and a clean close without a terminal frame both carry it.
+const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
+
+/// Outcome of a session: the exit code the client process reports plus any
+/// notice the entry point renders on stderr before exiting.
+struct Outcome {
+    code: i32,
+    notice: Option<String>,
+}
+
+impl Outcome {
+    fn just(code: i32) -> Self {
+        Self { code, notice: None }
+    }
+
+    fn with_notice(code: i32, notice: String) -> Self {
+        Self {
+            code,
+            notice: Some(notice),
+        }
+    }
+}
+
 async fn session(
     socket: &Path,
     cwd: Option<PathBuf>,
@@ -180,11 +180,11 @@ async fn session(
                 Some(Ok(frame)) => match Message::from_frame(frame)
                     .map_err(|source| ClientError::Receive { source })?
                 {
-                    Message::Version(version) => {
+                    // Version is advisory on this end: a mismatch never
+                    // rejects the session, mirroring the server's
+                    // warn-and-continue policy.
+                    Message::Version(_) => {
                         version_seen = true;
-                        if version.version != CURRENT_VERSION {
-                            // TODO
-                        }
                     }
                     Message::Stdout(bytes) => {
                         write_stream(Stream::Stdout, &bytes)?;
@@ -376,11 +376,9 @@ fn exit_outcome(exit: &Exit, command: &str) -> Result<Outcome, ClientError> {
 }
 
 /// The session ended without the server ever sending a version frame.
-fn warn_absent_version(seen: bool) {
-    if !seen {
-        // TODO
-    }
-}
+/// Absent version is advisory like a mismatch: nothing actionable, so no
+/// warning is emitted.
+fn warn_absent_version(_seen: bool) {}
 
 /// Which of the client's own streams a relayed chunk goes to.
 enum Stream {

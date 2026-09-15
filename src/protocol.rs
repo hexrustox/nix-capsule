@@ -16,18 +16,28 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire frame type tag. Each byte value is part of the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
+    /// Client → server: run this command.
     Request = 0x01,
+    /// Client → server: stdin bytes for the child.
     Stdin = 0x02,
+    /// Server → client: stdout bytes from the child.
     Stdout = 0x03,
+    /// Server → client: stderr bytes from the child.
     Stderr = 0x04,
+    /// Server → client: the child's terminal status.
     Exit = 0x05,
+    /// Server → client: failure without an exit status.
     Error = 0x06,
+    /// Server → client: orderly shutdown notice.
     ServerStopping = 0x07,
+    /// Server → client: version handshake.
     Version = 0x08,
+    /// Client → server: forwarded host signal.
     Signal = 0x09,
 }
 
 impl FrameType {
+    /// Decode a tag byte into its frame type; `None` for unknown tags.
     pub fn from_u8(b: u8) -> Option<Self> {
         match b {
             0x01 => Some(Self::Request),
@@ -43,6 +53,7 @@ impl FrameType {
         }
     }
 
+    /// Encode the frame type as its wire tag byte.
     pub fn to_byte(self) -> u8 {
         self as u8
     }
@@ -130,6 +141,7 @@ pub enum Message {
 }
 
 impl Message {
+    /// The wire tag identifying this message's frame.
     pub fn frame_type(&self) -> FrameType {
         match self {
             Self::Request(_) => FrameType::Request,
@@ -144,6 +156,7 @@ impl Message {
         }
     }
 
+    /// Serialize the message into a wire frame for transport.
     pub fn into_frame(self) -> Result<Frame, EncodeError> {
         // `Exit` carries exactly one outcome: both fields set is never valid
         // on the wire (`None`, `None` is the unknowable-status exception).
@@ -170,6 +183,7 @@ impl Message {
         })
     }
 
+    /// Deserialize a wire frame into its typed message.
     pub fn from_frame(frame: Frame) -> Result<Self, DecodeError> {
         let Frame {
             frame_type,
@@ -212,6 +226,7 @@ pub enum DecodeError {
     /// A JSON struct payload failed to parse.
     #[error("frame payload parse error: {source}")]
     Json {
+        /// The underlying JSON parse failure.
         #[from]
         #[source]
         source: serde_json::Error,
@@ -222,8 +237,10 @@ pub enum DecodeError {
     /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
     #[error("both `code` and `signal` set in `Exit` frame")]
     InvalidExit,
+    /// Reading a frame off the socket failed.
     #[error(transparent)]
     Read {
+        /// The underlying socket read failure.
         #[from]
         source: std::io::Error,
     },
@@ -238,6 +255,7 @@ pub enum EncodeError {
     /// A JSON struct payload failed to serialize.
     #[error("frame payload serialization error: {source}")]
     Json {
+        /// The underlying JSON serialization failure.
         #[from]
         #[source]
         source: serde_json::Error,
@@ -245,8 +263,10 @@ pub enum EncodeError {
     /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
     #[error("both `code` and `signal` set in `Exit` frame")]
     InvalidExit,
+    /// Writing a frame to the socket failed.
     #[error(transparent)]
     Write {
+        /// The underlying socket write failure.
         #[from]
         source: std::io::Error,
     },

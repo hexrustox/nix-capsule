@@ -8,7 +8,8 @@ use super::fs_error::FsError;
 use super::paths::project_stamp_file;
 
 #[derive(Debug, thiserror::Error)]
-pub enum StampError {
+/// Failures of the project-name stamp guard.
+pub(crate) enum StampError {
     #[error("project name `{project}` is already keyed to root `{existing}`")]
     AlreadyClaimed { project: String, existing: String },
     #[error(transparent)]
@@ -17,7 +18,7 @@ pub enum StampError {
 
 /// Read `<cache>/project`; absent means "first claim" and is written, a
 /// different root is a hard error, the same root passes silently.
-pub fn guard(cache_dir: &Path, project: &str, current_root: &Path) -> Result<(), StampError> {
+pub(crate) fn guard(cache_dir: &Path, project: &str, current_root: &Path) -> Result<(), StampError> {
     let stamp = project_stamp_file(cache_dir);
     match fs::read_to_string(&stamp) {
         Ok(existing) => {
@@ -67,7 +68,7 @@ mod tests {
     }
 
     #[test]
-    fn same_root_passes() {
+    fn accepts_same_root_on_second_guard() {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = Path::new("/tmp/my-root");
         guard(cache.path(), "proj", root).expect("first guard");

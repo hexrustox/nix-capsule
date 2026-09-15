@@ -14,7 +14,7 @@ use crate::server::LogLevel;
 /// failed run/stop/rm carries the captured output as a data field, exec
 /// failures name the exit status.
 #[derive(Debug, thiserror::Error)]
-pub enum RuntimeError {
+pub(crate) enum RuntimeError {
     #[error("cannot spawn `{bin} run`: {source}")]
     RunSpawn {
         bin: String,
@@ -58,29 +58,30 @@ pub enum RuntimeError {
 /// Arguments of the ncap-server binary: exactly its CLI surface
 /// (`--socket`, `--log-dir`, `--timeout`, `--log-level`).
 #[derive(Clone, Debug)]
-pub struct ServerArgs {
+pub(crate) struct ServerArgs {
+    /// Unix socket path the server binds.
     pub socket: PathBuf,
+    /// Directory for per-run server logs.
     pub log_dir: PathBuf,
+    /// Drain grace for live connections at shutdown, seconds.
     pub timeout: u64,
+    /// Minimum severity the server logs at.
     pub log_level: LogLevel,
 }
 
 /// The OCI runtime executable, scoped to a single container: the executable
 /// name, the container name it manages, and the bash path used in commands.
 #[derive(Clone, Debug)]
-pub struct Runtime {
+pub(crate) struct Runtime {
     bin: String,
     name: String,
     bash: PathBuf,
 }
 
 impl Runtime {
-    pub fn new(bin: String, name: String, bash: PathBuf) -> Self {
+    /// Scope the runtime executable to the named container.
+    pub(crate) fn new(bin: String, name: String, bash: PathBuf) -> Self {
         Self { bin, name, bash }
-    }
-
-    pub fn bin(&self) -> &str {
-        &self.bin
     }
 
     /// `inspect -f {{.State.Running}} <name>` against the container it was
@@ -88,7 +89,7 @@ impl Runtime {
     /// init process (the server) is reportedly running. This alone is not
     /// liveness (see `is_live`): any spawn or parse failure is treated as
     /// not-running.
-    pub async fn is_running(&self) -> bool {
+    pub(crate) async fn is_running(&self) -> bool {
         let output = Command::new(&self.bin)
             .args(["inspect", "-f", "{{.State.Running}}", &self.name])
             .output()
@@ -103,7 +104,7 @@ impl Runtime {
     /// One predicate serves both the `init` liveness probe and the `start`
     /// readiness poll. `Running` alone is not live (the container is still
     /// sourcing the Env dump ahead of the Server's bind).
-    pub async fn is_live(&self, socket: &Path) -> bool {
+    pub(crate) async fn is_live(&self, socket: &Path) -> bool {
         if !self.is_running().await {
             return false;
         }
@@ -112,7 +113,7 @@ impl Runtime {
 
     /// Raw `State` JSON via `inspect -f {{json .State}} <name>`, for the
     /// "never became live" failure report.
-    pub async fn inspect_state(&self) -> String {
+    pub(crate) async fn inspect_state(&self) -> String {
         let output = Command::new(&self.bin)
             .args(["inspect", "-f", "{{json .State}}", &self.name])
             .output()
@@ -137,7 +138,7 @@ impl Runtime {
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
     /// Returns the container id on success, or the runtime's captured output
     /// on failure, as a `RuntimeError::Failed`.
-    pub async fn run_detached(
+    pub(crate) async fn run_detached(
         &self,
         image: &str,
         env_file: &Path,
@@ -182,7 +183,7 @@ impl Runtime {
     }
 
     /// `stop <name>`.
-    pub async fn stop(&self) -> Result<String, RuntimeError> {
+    pub(crate) async fn stop(&self) -> Result<String, RuntimeError> {
         let output = Command::new(&self.bin)
             .args(["stop", &self.name])
             .output()
@@ -204,7 +205,7 @@ impl Runtime {
     /// Whether a container with `name` exists at all (running or stopped):
     /// `inspect <name>` succeeding. Used by the start flow to remove an
     /// exists-but-stopped container before launch.
-    pub async fn exists(&self) -> bool {
+    pub(crate) async fn exists(&self) -> bool {
         match Command::new(&self.bin)
             .args(["inspect", &self.name])
             .output()
@@ -216,7 +217,7 @@ impl Runtime {
     }
 
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
-    pub async fn remove(&self) -> Result<String, RuntimeError> {
+    pub(crate) async fn remove(&self) -> Result<String, RuntimeError> {
         let output = Command::new(&self.bin)
             .args(["rm", &self.name])
             .output()
@@ -240,7 +241,7 @@ impl Runtime {
     /// Inherits stdio so the user's terminal drives
     /// the container shell directly. Returns `Ok` on exit 0, else an error
     /// naming the exit status.
-    pub async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), RuntimeError> {
+    pub(crate) async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), RuntimeError> {
         let env_file = env_file(cache_dir);
         let cmd_str = format!(
             "source '{}' && exec '{}'",
@@ -271,7 +272,7 @@ impl Runtime {
 }
 
 /// Whether stderr indicates a concurrent-start "name in use" conflict.
-pub fn is_name_in_use(stderr: &str) -> bool {
+pub(crate) fn is_name_in_use(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("already in use") || lower.contains("name in use")
 }

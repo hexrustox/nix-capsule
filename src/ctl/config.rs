@@ -36,31 +36,48 @@ pub enum Cmd {
 }
 
 /// Resolved configuration for one command. Fields a command does not use are
-/// `None`; the flows unwrap what they demanded upfront, so an `expect`
-/// there is a programmer bug, not a user error.
+/// populated anyway; the flows read what they demanded upfront.
 #[derive(Debug)]
-pub struct Config {
+pub(crate) struct Config {
+    /// Project root the container mounts and runs in.
     pub root: PathBuf,
+    /// Sanitized project name scoping container, socket, cache, and logs.
     pub project: String,
+    /// Container name managed by the runtime adapter.
     pub container: String,
+    /// Unix socket path served by `ncap-server`.
     pub socket: PathBuf,
+    /// Cache dir holding the env dump, hash, profile, and stamp.
     pub cache_dir: PathBuf,
+    /// Log dir holding per-run `ncap-server-*.log` files.
     pub log_dir: PathBuf,
+    /// OCI runtime binary (`podman` or `docker`).
     pub runtime: String,
+    /// Seconds to wait for liveness before reporting not-live.
     pub timeout: u64,
+    /// Project-root-relative watched files gating freshness.
     pub watch_files: Vec<String>,
+    /// Extra runtime options appended after the defaults.
     pub run_opts: Vec<String>,
+    /// Whether to drop capabilities and bind-mount watches read-only.
     pub harden: bool,
+    /// Minimum severity the server logs at.
     pub log_level: LogLevel,
+    /// Container image to launch.
     pub image: String,
+    /// Server binary path executed inside the container.
     pub server: PathBuf,
+    /// Nix binary used for `print-dev-env`.
     pub nix: PathBuf,
+    /// Bash binary used for launch and exec commands.
     pub bash: PathBuf,
+    /// Devshell attribute evaluated by `print-dev-env`.
     pub devshell: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
+/// Failures resolving the `NCAP_*` env contract into a [`Config`].
+pub(crate) enum ConfigError {
     #[error("required `{var}` is not set")]
     Missing { var: &'static str },
     #[error("cannot derive a project name from root `{root}`")]
@@ -88,6 +105,101 @@ pub enum ConfigError {
     BadLevel { value: String },
     #[error(transparent)]
     NoHome(#[from] paths::NoHomeError),
+}
+
+/// Resolve the full configuration from `lookup`. All commands except
+/// `SetupEnv` share one demand set (normally fully populated by `lib.nix`
+/// plus a sourced `setup-env`): derived vars are demanded non-empty, never
+/// derived here.
+pub(crate) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
+    // Runtime/timeout are demanded on every command (missing => error naming
+    // the var). JSON-array vars consumed by ctl and harden are validated and
+    // demanded on every command (missing or malformed => error naming the
+    // var); `NCAP_ENV_FORWARD` is validated by the Client only.
+    let runtime = parse_runtime(lookup)?;
+    let timeout = parse_timeout(lookup)?;
+    // Eagerly validate the JSON-array vars and harden on every command so
+    // malformed values error even where a command does not consume them.
+    let watch_files = parse_watch_files(lookup)?;
+    let run_opts = parse_run_opts(lookup)?;
+    let harden = parse_harden(lookup)?;
+    let log_level = parse_log_level(lookup)?;
+
+    let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
+    let root = PathBuf::from(&root_str);
+    // Relative-path and file checks need the root; still eager on every
+    // command since `setup-env` never calls this function.
+    validate_watch_files(&root, &watch_files)?;
+    // Derived vars are populated by `setup-env` in the shellHook; an empty
+    // value here is a missing var naming it, not a derivation request.
+    let project = demand(lookup, "NCAP_PROJECT")?;
+    let container = demand(lookup, "NCAP_CONTAINER")?;
+    let socket = PathBuf::from(demand(lookup, "NCAP_SOCKET")?);
+    let cache_dir = PathBuf::from(demand(lookup, "NCAP_CACHE_DIR")?);
+    let log_dir = PathBuf::from(demand(lookup, "NCAP_LOG_DIR")?);
+    let devshell = demand(lookup, "NCAP_DEVSHELL")?;
+    let nix = demand(lookup, "NCAP_NIX")?;
+    let image = demand(lookup, "NCAP_IMAGE")?;
+    let server = demand(lookup, "NCAP_SERVER")?;
+    let bash = demand(lookup, "NCAP_BASH")?;
+    Ok(Config {
+        root,
+        project,
+        container,
+        socket,
+        cache_dir,
+        log_dir,
+        runtime,
+        timeout,
+        watch_files,
+        run_opts,
+        harden,
+        log_level,
+        image,
+        server: PathBuf::from(server),
+        nix: PathBuf::from(nix),
+        bash: PathBuf::from(bash),
+        devshell,
+    })
+}
+
+/// Resolve the five project-scoped vars and render them as bash `export`
+/// lines for the Host shell to source. Explicit non-empty values win;
+/// empty/unset values derive per the NCAP_* contract (project from the
+/// root basename, container as `ncap-<project>`, socket/cache/log from the
+/// XDG layout). Fixed order: `PROJECT, CONTAINER, SOCKET, CACHE_DIR,
+/// LOG_DIR`. Needs only `NCAP_PROJECT_ROOT`.
+pub(crate) fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
+    let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
+    let root = PathBuf::from(&root_str);
+    let project = resolve_project(lookup, Some(&root))?;
+    let container =
+        lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_else(|| format!("ncap-{project}"));
+    let socket = if let Some(socket) = lookup_non_empty(lookup, "NCAP_SOCKET") {
+        socket
+    } else {
+        paths::socket_path(&project).to_string_lossy().into_owned()
+    };
+    let cache_dir = match lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
+        Some(dir) => dir,
+        None => paths::cache_dir(&project)?.to_string_lossy().into_owned(),
+    };
+    let log_dir = match lookup_non_empty(lookup, "NCAP_LOG_DIR") {
+        Some(dir) => dir,
+        None => paths::log_dir(&project)?.to_string_lossy().into_owned(),
+    };
+    let pairs = [
+        ("NCAP_PROJECT", project),
+        ("NCAP_CONTAINER", container),
+        ("NCAP_SOCKET", socket),
+        ("NCAP_CACHE_DIR", cache_dir),
+        ("NCAP_LOG_DIR", log_dir),
+    ];
+    let mut out = String::new();
+    for (var, value) in pairs {
+        out.push_str(&format!("export {var}='{}'\n", shell_escape(&value)));
+    }
+    Ok(out)
 }
 
 fn lookup_non_empty(lookup: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<String> {
@@ -176,32 +288,6 @@ fn parse_log_level(lookup: &dyn Fn(&str) -> Option<String>) -> Result<LogLevel, 
     LogLevel::parse(&raw).ok_or(ConfigError::BadLevel { value: raw })
 }
 
-/// Sanitize a basename into a project name: every non-ASCII-alphanumeric
-/// character joins the surrounding run into a single `-`, leading and
-/// trailing `-` are stripped. `None` when nothing survives — the caller
-/// turns that into the hard "set `project`" error.
-fn sanitize(basename: &str) -> Option<String> {
-    let mut name = String::with_capacity(basename.len());
-    let mut run = false;
-    for ch in basename.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if run && !name.is_empty() {
-                name.push('-');
-            }
-            name.push(ch);
-            run = false;
-        } else {
-            run = true;
-        }
-    }
-    let trimmed = name.trim_matches('-').to_owned();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 fn resolve_project(
     lookup: &dyn Fn(&str) -> Option<String>,
     root: Option<&Path>,
@@ -228,99 +314,30 @@ fn resolve_project(
     }
 }
 
-/// Resolve the full configuration from `lookup`. All commands except
-/// `SetupEnv` share one demand set (normally fully populated by `lib.nix`
-/// plus a sourced `setup-env`): derived vars are demanded non-empty, never
-/// derived here.
-pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
-    // Runtime/timeout are demanded on every command (missing => error naming
-    // the var). JSON-array vars consumed by ctl and harden are validated and
-    // demanded on every command (missing or malformed => error naming the
-    // var); `NCAP_ENV_FORWARD` is validated by the Client only.
-    let runtime = parse_runtime(lookup)?;
-    let timeout = parse_timeout(lookup)?;
-    // Eagerly validate the JSON-array vars and harden on every command so
-    // malformed values error even where a command does not consume them.
-    let watch_files = parse_watch_files(lookup)?;
-    let run_opts = parse_run_opts(lookup)?;
-    let harden = parse_harden(lookup)?;
-    let log_level = parse_log_level(lookup)?;
-
-    let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
-    let root = PathBuf::from(&root_str);
-    // Relative-path and file checks need the root; still eager on every
-    // command since `setup-env` never calls this function.
-    validate_watch_files(&root, &watch_files)?;
-    // Derived vars are populated by `setup-env` in the shellHook; an empty
-    // value here is a missing var naming it, not a derivation request.
-    let project = demand(lookup, "NCAP_PROJECT")?;
-    let container = demand(lookup, "NCAP_CONTAINER")?;
-    let socket = PathBuf::from(demand(lookup, "NCAP_SOCKET")?);
-    let cache_dir = PathBuf::from(demand(lookup, "NCAP_CACHE_DIR")?);
-    let log_dir = PathBuf::from(demand(lookup, "NCAP_LOG_DIR")?);
-    let devshell = demand(lookup, "NCAP_DEVSHELL")?;
-    let nix = demand(lookup, "NCAP_NIX")?;
-    let image = demand(lookup, "NCAP_IMAGE")?;
-    let server = demand(lookup, "NCAP_SERVER")?;
-    let bash = demand(lookup, "NCAP_BASH")?;
-    Ok(Config {
-        root,
-        project,
-        container,
-        socket,
-        cache_dir,
-        log_dir,
-        runtime,
-        timeout,
-        watch_files,
-        run_opts,
-        harden,
-        log_level,
-        image,
-        server: PathBuf::from(server),
-        nix: PathBuf::from(nix),
-        bash: PathBuf::from(bash),
-        devshell,
-    })
-}
-
-/// Resolve the five project-scoped vars and render them as bash `export`
-/// lines for the Host shell to source. Explicit non-empty values win;
-/// empty/unset values derive per the NCAP_* contract (project from the
-/// root basename, container as `ncap-<project>`, socket/cache/log from the
-/// XDG layout). Fixed order: `PROJECT, CONTAINER, SOCKET, CACHE_DIR,
-/// LOG_DIR`. Needs only `NCAP_PROJECT_ROOT`.
-pub fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
-    let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
-    let root = PathBuf::from(&root_str);
-    let project = resolve_project(lookup, Some(&root))?;
-    let container =
-        lookup_non_empty(lookup, "NCAP_CONTAINER").unwrap_or_else(|| format!("ncap-{project}"));
-    let socket = if let Some(socket) = lookup_non_empty(lookup, "NCAP_SOCKET") {
-        socket
-    } else {
-        paths::socket_path(&project).to_string_lossy().into_owned()
-    };
-    let cache_dir = match lookup_non_empty(lookup, "NCAP_CACHE_DIR") {
-        Some(dir) => dir,
-        None => paths::cache_dir(&project)?.to_string_lossy().into_owned(),
-    };
-    let log_dir = match lookup_non_empty(lookup, "NCAP_LOG_DIR") {
-        Some(dir) => dir,
-        None => paths::log_dir(&project)?.to_string_lossy().into_owned(),
-    };
-    let pairs = [
-        ("NCAP_PROJECT", project),
-        ("NCAP_CONTAINER", container),
-        ("NCAP_SOCKET", socket),
-        ("NCAP_CACHE_DIR", cache_dir),
-        ("NCAP_LOG_DIR", log_dir),
-    ];
-    let mut out = String::new();
-    for (var, value) in pairs {
-        out.push_str(&format!("export {var}='{}'\n", shell_escape(&value)));
+/// Sanitize a basename into a project name: every non-ASCII-alphanumeric
+/// character joins the surrounding run into a single `-`, leading and
+/// trailing `-` are stripped. `None` when nothing survives — the caller
+/// turns that into the hard "set `project`" error.
+fn sanitize(basename: &str) -> Option<String> {
+    let mut name = String::with_capacity(basename.len());
+    let mut run = false;
+    for ch in basename.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if run && !name.is_empty() {
+                name.push('-');
+            }
+            name.push(ch);
+            run = false;
+        } else {
+            run = true;
+        }
     }
-    Ok(out)
+    let trimmed = name.trim_matches('-').to_owned();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 #[cfg(test)]
@@ -462,7 +479,7 @@ mod tests {
     #[test_case("###" => matches None ; "nothing_surviving_is_none")]
     #[test_case("" => matches None ; "empty_basename_is_none")]
     #[test_case("---" => matches None ; "dashes_only_is_none")]
-    fn sanitize_cases(basename: &str) -> Option<String> {
+    fn sanitizes_basename_with_single_dashes(basename: &str) -> Option<String> {
         sanitize(basename)
     }
 

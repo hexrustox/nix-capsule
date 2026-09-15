@@ -12,7 +12,7 @@ use super::paths::{env_file, hash_file};
 
 /// Whether the cached env dump still matches the watched files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Freshness {
+pub(crate) enum Freshness {
     /// Hash file present and equal to the computed digest.
     Fresh,
     /// Env dump present but the hash differs or is unreadable.
@@ -67,7 +67,7 @@ impl Write for HashWriter<'_> {
 /// dump missing is `Missing`, a matching hash is `Fresh`, everything else is
 /// `Stale`. The cached hash is trimmed before comparing so a trailing newline
 /// (spec: stored with no trailing newline) reads as fresh, matching `status`.
-pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
+pub(crate) fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
     if !env_file(cache_dir).is_file() {
         return Freshness::Missing;
     }
@@ -85,7 +85,7 @@ pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
 }
 
 /// Write `digest` to `<cache>/hash`, lowercase hex with no trailing newline.
-pub fn store(cache_dir: &Path, digest: &str) -> io::Result<()> {
+pub(crate) fn store(cache_dir: &Path, digest: &str) -> io::Result<()> {
     fs::write(hash_file(cache_dir), digest)
 }
 
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn a_content_change_flips_the_digest() {
+    fn content_change_flips_digest() {
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"before");
         let before = compute(root.path(), &entries(&["w.txt"])).expect("digest");
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_appearing_or_disappearing_flips_the_digest() {
+    fn appearing_or_disappearing_file_flips_digest() {
         let root = tempfile::tempdir().expect("tempdir");
         let absent = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         write(&root.path().join("w.txt"), b"");
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mtime_only_touch_keeps_the_digest() {
+    fn mtime_only_touch_keeps_digest() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("w.txt");
         write(&path, b"same");
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stored_hash_has_no_trailing_newline() {
+    fn stored_hash_has_no_trailing_newline() {
         let cache = tempfile::tempdir().expect("tempdir");
         store(cache.path(), "0123456789abcdef").expect("store");
         let raw = fs::read(hash_file(cache.path())).expect("hash file");
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn a_computed_error_reads_stale_never_fresh() {
+    fn computed_error_reads_stale_never_fresh() {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = tempfile::tempdir().expect("tempdir");
         // A directory at a watched path makes `of()` fail with a

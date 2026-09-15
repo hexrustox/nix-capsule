@@ -8,7 +8,7 @@ use tokio::process::Command;
 /// Failure of `nix print-dev-env`: a spawn error rides as `#[source]`, a
 /// failed run carries the captured stderr as a data field.
 #[derive(Debug, thiserror::Error)]
-pub enum PrintDevEnvError {
+pub(crate) enum PrintDevEnvError {
     #[error("cannot run `nix print-dev-env`: {source}")]
     Spawn {
         #[source]
@@ -20,7 +20,7 @@ pub enum PrintDevEnvError {
 
 /// Invoke `nix print-dev-env --profile <profile> <devshell>` and return the
 /// captured stdout (the env dump).
-pub async fn print_dev_env(
+pub(crate) async fn print_dev_env(
     nix_bin: &Path,
     profile: &Path,
     devshell: &str,
@@ -48,7 +48,7 @@ pub async fn print_dev_env(
 }
 
 /// `nix profile wipe-history --profile <profile>`.
-pub async fn wipe_history(nix_bin: &Path, profile: &Path) {
+pub(crate) async fn wipe_history(nix_bin: &Path, profile: &Path) {
     let _ = Command::new(nix_bin)
         .args([
             "profile",

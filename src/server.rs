@@ -16,8 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
@@ -26,128 +25,6 @@ use crate::ctl::paths::server_log_path;
 use crate::protocol::{
     CURRENT_VERSION, DecodeError, ErrorMsg, Exit, FrameCodec, FrameType, Message, VersionMsg,
 };
-
-/// Failures of the Server's startup path: context variants name the failed
-/// operation and its object with the raw cause riding as `#[source]`; the
-/// shared filesystem variants pass through transparent. Socket and
-/// signal-handler io errors are not filesystem operations and carry their
-/// context here.
-#[derive(Debug, thiserror::Error)]
-pub enum ServerError {
-    #[error(transparent)]
-    Fs(#[from] FsError),
-    #[error("socket `{socket}` is owned by a live server")]
-    SocketInUse { socket: String },
-    #[error("cannot bind socket `{socket}`: {source}")]
-    Bind {
-        socket: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("cannot install the `{signal}` handler: {source}")]
-    SignalHandler {
-        signal: &'static str,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Failure modes that end a Connection with a terminal `Error` frame; the
-/// message rides to the Client as the frame's `message` payload. Separate
-/// from the startup `ServerError`: this enum renders on the wire, not on
-/// the Server's stderr.
-#[derive(Debug, thiserror::Error)]
-enum Rejection {
-    #[error("expected a `Request` frame first, got `{got:?}`")]
-    ExpectedRequest { got: FrameType },
-    #[error(transparent)]
-    Decode(#[from] DecodeError),
-    #[error("`cwd` is not a directory: `{cwd}`")]
-    NotADirectory { cwd: String },
-    #[error("invalid env entry `{entry}`")]
-    BadEnvEntry { entry: String },
-    #[error("cannot spawn `{command}`: {source}")]
-    Spawn {
-        command: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("cannot wait for `{command}`: {source}")]
-    Wait {
-        command: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// The minimum severity the Server logs at — exactly `debug`, `info`,
-/// `warning`, `error` (spec/server.md § Logging). Ordering is
-/// `debug` < `info` < `warning` < `error`; the single source the Ctl
-/// contract validates against.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LogLevel {
-    Debug,
-    Info,
-    Warning,
-    Error,
-}
-
-impl LogLevel {
-    /// The tag string the log writer emits for this level.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LogLevel::Debug => "debug",
-            LogLevel::Info => "info",
-            LogLevel::Warning => "warning",
-            LogLevel::Error => "error",
-        }
-    }
-
-    /// Fixed rank for the minimum-severity comparison: `debug` 0 through
-    /// `error` 3.
-    pub fn rank(&self) -> u8 {
-        match self {
-            LogLevel::Debug => 0,
-            LogLevel::Info => 1,
-            LogLevel::Warning => 2,
-            LogLevel::Error => 3,
-        }
-    }
-
-    /// Exact match against the four tag strings; anything else is `None`.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "debug" => Some(LogLevel::Debug),
-            "info" => Some(LogLevel::Info),
-            "warning" => Some(LogLevel::Warning),
-            "error" => Some(LogLevel::Error),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for LogLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Rejection of a `--log-level` value outside the four tags.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum LogLevelParseError {
-    #[error("must be `debug`, `info`, `warning`, or `error`, got `{value}`")]
-    BadLevel { value: String },
-}
-
-impl std::str::FromStr for LogLevel {
-    type Err = LogLevelParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        LogLevel::parse(value).ok_or_else(|| LogLevelParseError::BadLevel {
-            value: value.to_owned(),
-        })
-    }
-}
 
 /// Bind `socket` and serve connections until the process is stopped. A
 /// SIGTERM or SIGINT starts the orderly shutdown: `ServerStopping` to every
@@ -216,6 +93,147 @@ pub async fn run(
     let _ = std::fs::remove_file(&socket);
     log.info("socket removed and server exited");
     Ok(())
+}
+
+/// Failures of the Server's startup path: context variants name the failed
+/// operation and its object with the raw cause riding as `#[source]`; the
+/// shared filesystem variants pass through transparent. Socket and
+/// signal-handler io errors are not filesystem operations and carry their
+/// context here.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    /// Filesystem failures shared with the ctl flows.
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    /// The socket file is owned by a live server; refusing to disturb it.
+    #[error("socket `{socket}` is owned by a live server")]
+    SocketInUse {
+        /// The socket path owned by the live server.
+        socket: String,
+    },
+    /// Binding the socket file failed.
+    #[error("cannot bind socket `{socket}`: {source}")]
+    Bind {
+        /// The socket path that failed to bind.
+        socket: String,
+        /// The underlying bind failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Installing a shutdown signal handler failed.
+    #[error("cannot install the `{signal}` handler: {source}")]
+    SignalHandler {
+        /// The signal whose handler failed to install.
+        signal: &'static str,
+        /// The underlying handler-installation failure.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Failure modes that end a Connection with a terminal `Error` frame; the
+/// message rides to the Client as the frame's `message` payload. Separate
+/// from the startup `ServerError`: this enum renders on the wire, not on
+/// the Server's stderr.
+#[derive(Debug, thiserror::Error)]
+enum Rejection {
+    #[error("expected a `Request` frame first, got `{got:?}`")]
+    ExpectedRequest { got: FrameType },
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("`cwd` is not a directory: `{cwd}`")]
+    NotADirectory { cwd: String },
+    #[error("invalid env entry `{entry}`")]
+    BadEnvEntry { entry: String },
+    #[error("cannot spawn `{command}`: {source}")]
+    Spawn {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot wait for `{command}`: {source}")]
+    Wait {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// The minimum severity the Server logs at — exactly `debug`, `info`,
+/// `warning`, `error` (spec/server.md § Logging). Ordering is
+/// `debug` < `info` < `warning` < `error`; the single source the Ctl
+/// contract validates against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    /// Finest-grained detail: connection opens, request lines, signals.
+    Debug,
+    /// Lifecycle milestones: start, bind, drain, exit.
+    Info,
+    /// Version skew and failed kills; the connection continues.
+    Warning,
+    /// Accept, decode, and spawn failures ending a connection.
+    Error,
+}
+
+impl LogLevel {
+    /// The tag string the log writer emits for this level.
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warning => "warning",
+            LogLevel::Error => "error",
+        }
+    }
+
+    /// Fixed rank for the minimum-severity comparison: `debug` 0 through
+    /// `error` 3.
+    pub(crate) fn rank(&self) -> u8 {
+        match self {
+            LogLevel::Debug => 0,
+            LogLevel::Info => 1,
+            LogLevel::Warning => 2,
+            LogLevel::Error => 3,
+        }
+    }
+
+    /// Exact match against the four tag strings; anything else is `None`.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "debug" => Some(LogLevel::Debug),
+            "info" => Some(LogLevel::Info),
+            "warning" => Some(LogLevel::Warning),
+            "error" => Some(LogLevel::Error),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Rejection of a `--log-level` value outside the four tags.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LogLevelParseError {
+    /// The rejected `--log-level` value.
+    #[error("must be `debug`, `info`, `warning`, or `error`, got `{value}`")]
+    BadLevel {
+        /// The off-vocabulary value that was rejected.
+        value: String,
+    },
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = LogLevelParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        LogLevel::parse(value).ok_or_else(|| LogLevelParseError::BadLevel {
+            value: value.to_owned(),
+        })
+    }
 }
 
 /// Probe an existing socket file before binding: a connectable socket is
@@ -645,7 +663,7 @@ impl Log {
     /// on. A line whose level ranks below the minimum is written to neither
     /// sink — filtering happens here at emit time, before stamping, against
     /// the single `LogLevel` ordering.
-    fn line(&self, level: LogLevel, message: &str) {
+    fn emit_line(&self, level: LogLevel, message: &str) {
         if level.rank() < self.min_level.rank() {
             return;
         }
@@ -658,19 +676,19 @@ impl Log {
     }
 
     fn debug(&self, message: &str) {
-        self.line(LogLevel::Debug, message);
+        self.emit_line(LogLevel::Debug, message);
     }
 
     fn info(&self, message: &str) {
-        self.line(LogLevel::Info, message);
+        self.emit_line(LogLevel::Info, message);
     }
 
     fn warning(&self, message: &str) {
-        self.line(LogLevel::Warning, message);
+        self.emit_line(LogLevel::Warning, message);
     }
 
     fn error(&self, message: &str) {
-        self.line(LogLevel::Error, message);
+        self.emit_line(LogLevel::Error, message);
     }
 }
 
@@ -692,22 +710,31 @@ fn format_utc(secs: u64) -> String {
     let secs_of_day = secs % 86_400;
 
     // Shift the civil era so the era math sees only positive values.
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z % 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if m <= 2 { y + 1 } else { y };
+    let days_since_civil = days + 719_468;
+    let era_index = days_since_civil / 146_097;
+    let day_of_era = days_since_civil % 146_097; // [0, 146096]
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
+    let year_index = year_of_era + era_index * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
+    let month_prime = (5 * day_of_year + 2) / 153; // [0, 11]
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1; // [1, 31]
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    }; // [1, 12]
+    let year = if month <= 2 {
+        year_index + 1
+    } else {
+        year_index
+    };
 
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year,
-        m,
-        d,
+        month,
+        day,
         secs_of_day / 3600,
         (secs_of_day % 3600) / 60,
         secs_of_day % 60,

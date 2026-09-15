@@ -4,11 +4,11 @@
 pub mod config;
 pub mod digest;
 pub mod fs_error;
-pub mod nix;
-pub mod paths;
-pub mod runtime;
-pub mod shell;
-pub mod stamp;
+pub(crate) mod nix;
+pub(crate) mod paths;
+pub(crate) mod runtime;
+pub(crate) mod shell;
+pub(crate) mod stamp;
 
 use std::fs;
 use std::io;
@@ -17,72 +17,12 @@ use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
 
-use config::{Cmd, Config};
-use fs_error::FsError;
-use paths::{env_file, hash_file, profile_file, project_stamp_file};
-use stamp::StampError;
-
-/// Failures of the ctl flows: context variants name the failed operation and
-/// its object with the raw cause riding as `#[source]`; sub-module errors and
-/// the shared io variants pass through transparent.
-#[derive(Debug, thiserror::Error)]
-pub enum CtlError {
-    #[error(transparent)]
-    Config(#[from] config::ConfigError),
-    #[error(transparent)]
-    Stamp(#[from] StampError),
-    #[error(transparent)]
-    PrintDevEnv(#[from] nix::PrintDevEnvError),
-    #[error(transparent)]
-    Runtime(#[from] runtime::RuntimeError),
-    #[error(transparent)]
-    Fs(#[from] FsError),
-    #[error("cannot hash the watched files: {source}")]
-    Digest {
-        #[source]
-        source: io::Error,
-    },
-    #[error("socket path `{socket}` has no parent directory")]
-    SocketNoParent { socket: String },
-    #[error("no `ncap-server-*.log` file in `{dir}`")]
-    NoLog { dir: String },
-    #[error("cannot run pager `{prog}`: {source}")]
-    PagerSpawn {
-        prog: String,
-        #[source]
-        source: io::Error,
-    },
-    #[error("pager `{prog}` failed")]
-    PagerFailed { prog: String },
-    #[error("referenced unset variable `{name}`")]
-    UnsetVar { name: String },
-    #[error("container `{container}` is not running")]
-    NotRunning { container: String },
-    #[error("no cached dev environment in `{dir}`")]
-    NoCachedEnv { dir: String },
-}
-
-/// Render `err` without the program prefix — the binary applies it — plus,
-/// when the variant carries it, prescriptive advice as a sibling line, and
-/// yield the exit code for the run.
-fn fail(err: CtlError) -> Option<String> {
-    let message = err.to_string();
-    let message = if let Some(advice) = match &err {
-        CtlError::NotRunning { .. } | CtlError::NoCachedEnv { .. } => {
-            Some("run `ncap-ctl init` to start this project's container")
-        }
-        CtlError::Config(config::ConfigError::EmptyProjectName { .. })
-        | CtlError::Stamp(StampError::AlreadyClaimed { .. }) => {
-            Some("set `project` to a value mapping to a unique root")
-        }
-        _ => None,
-    } {
-        format!("{message}\n{advice}")
-    } else {
-        message
-    };
-    Some(message)
-}
+use crate::ctl::config::{Cmd, Config, ConfigError};
+use crate::ctl::fs_error::FsError;
+use crate::ctl::nix::PrintDevEnvError;
+use crate::ctl::paths::{env_file, hash_file, profile_file, project_stamp_file};
+use crate::ctl::runtime::RuntimeError;
+use crate::ctl::stamp::StampError;
 
 /// Entry point from the binary: resolve `cmd` from the process environment and
 /// dispatch. Returns the message to print on stderr, if any (unprefixed, may
@@ -121,6 +61,68 @@ pub async fn run(cmd: Cmd) -> Option<String> {
         Ok(()) => None,
         Err(err) => fail(err),
     }
+}
+
+/// Failures of the ctl flows: context variants name the failed operation and
+/// its object with the raw cause riding as `#[source]`; sub-module errors and
+/// the shared io variants pass through transparent.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CtlError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Stamp(#[from] StampError),
+    #[error(transparent)]
+    PrintDevEnv(#[from] PrintDevEnvError),
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    #[error("cannot hash the watched files: {source}")]
+    Digest {
+        #[source]
+        source: io::Error,
+    },
+    #[error("socket path `{socket}` has no parent directory")]
+    SocketNoParent { socket: String },
+    #[error("no `ncap-server-*.log` file in `{dir}`")]
+    NoLog { dir: String },
+    #[error("cannot run pager `{prog}`: {source}")]
+    PagerSpawn {
+        prog: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("pager `{prog}` failed")]
+    PagerFailed { prog: String },
+    #[error("referenced unset variable `{name}`")]
+    UnsetVar { name: String },
+    #[error("container `{container}` is not running")]
+    NotRunning { container: String },
+    #[error("no cached dev environment in `{dir}`")]
+    NoCachedEnv { dir: String },
+}
+
+/// Render `err` without the program prefix — the binary applies it — plus,
+/// when the variant carries it, prescriptive advice as a sibling line, and
+/// yield the exit code for the run.
+fn fail(err: CtlError) -> Option<String> {
+    let message = err.to_string();
+    let message = if let Some(advice) = match &err {
+        CtlError::NotRunning { .. } | CtlError::NoCachedEnv { .. } => {
+            Some("run `ncap-ctl init` to start this project's container")
+        }
+        CtlError::Config(ConfigError::EmptyProjectName { .. })
+        | CtlError::Stamp(StampError::AlreadyClaimed { .. }) => {
+            Some("set `project` to a value mapping to a unique root")
+        }
+        _ => None,
+    } {
+        format!("{message}\n{advice}")
+    } else {
+        message
+    };
+    Some(message)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +404,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
 
     match run_result {
         Ok(_) => {}
-        Err(runtime::RuntimeError::RunFailed { output, .. })
+        Err(RuntimeError::RunFailed { output, .. })
             if runtime::is_name_in_use(&output) =>
         {
             // Concurrent-start race: re-inspect.
@@ -436,7 +438,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     }
 
     let state = rt.inspect_state().await;
-    Err(CtlError::Runtime(runtime::RuntimeError::NotLive {
+    Err(CtlError::Runtime(RuntimeError::NotLive {
         container: cfg.container.clone(),
         timeout: cfg.timeout,
         state,
@@ -632,15 +634,6 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, CtlError> {
     Ok(args)
 }
 
-fn is_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 fn expand_one(input: &str) -> Result<String, CtlError> {
     expand_with(input, &|name| std::env::var(name).ok())
 }
@@ -709,6 +702,15 @@ fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<S
         }
     }
     Ok(out)
+}
+
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
