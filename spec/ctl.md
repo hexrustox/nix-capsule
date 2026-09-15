@@ -16,7 +16,7 @@ contract).
 | `enter` | `<runtime> exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Container running? Socket connectable (§ Liveness)? Cache fresh/stale/missing (§ Freshness and the digest)? |
 | `log` | Open the newest Server log in `$PAGER` (fallback `less -R`). Newest = highest epoch stamp. No log file ⇒ error naming the log dir. |
-| `clean` | Stop the Container, remove the (stopped) container, remove this project's cache files (the four named cache files plus the `profile-<N>-link` generation links) and all `ncap-server-*.log` files in the log dir (best-effort dir removal when empty, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
+| `clean` | Stop the Container, remove the (stopped) container, remove this project's cache files (the four named cache files plus the `profile-<N>-link` generation links) and all `ncap-server-<epoch-millis>.log` files in the log dir (best-effort dir removal when empty, stamp included), and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS`, one arg per line. |
 | `setup-env` | Resolve the five project-scoped vars and print them as `export` lines for the Host shell to source. Needs only `NCAP_PROJECT_ROOT` (§ NCAP_* contract). Never starts containers, never touches the Cache. |
 
@@ -84,7 +84,7 @@ nothing). A `$` that starts neither `${NAME}` nor `$NAME` (name =
 | `-w <project root>` | — | Container working directory. |
 | cache dir → same path | ro | Env dump the Server sources — **read-only so the container can't poison files the host will later source**. |
 | log dir → same path | rw | Server writes its logs there. |
-| `<project root>/.git` → same path | ro, if it exists | Read-only git metadata for tools that read it. |
+| `<project root>/.git` → same path | ro, if it is a real directory (worktree gitfiles and symlinks are skipped) | Read-only git metadata for tools that read it. |
 | `<project root>/<watched files>` → same path | ro, if present and `harden` | Keeps watched files immutable from inside the container (§ Harden). |
 
 Host paths are valid inside the container only because the project root is
@@ -206,7 +206,7 @@ advising to set `project` — two checkouts of one repo
 must never share a socket/container/cache. Absent ⇒ write it (creating the Cache dir if
 needed). The same root passes silently. `clean` removes the project-keyed
 cache files — the four named files plus the `profile-<N>-link` generation
-links — and every `ncap-server-*.log` file in the log dir (best-effort dir
+links — and every `ncap-server-<epoch-millis>.log` file in the log dir (best-effort dir
 removal when empty), and deletes the socket file + best-effort parent dir,
 stamp included — never recursive on an explicit path that may be shared.
 

@@ -69,6 +69,7 @@ let
 
   # ---- wrappers check: returns normalized { name, command, env, cwd } --------
   # String shorthand expands to `command = name; env = []; cwd = null`.
+  # Unknown wrapper fields throw (ADR-0003 strictness).
   checkWrappers =
     opt: v:
     if !builtins.isList v then
@@ -85,8 +86,11 @@ let
           }
         else if builtins.isAttrs elem then
           let
+            extra = builtins.filter (k: !(builtins.elem k [ "name" "command" "env" "cwd" ])) (builtins.attrNames elem);
             name =
-              if elem ? name then
+              if extra != [ ] then
+                throw "option `${opt}`: unknown wrapper field `${builtins.head extra}`"
+              else if elem ? name then
                 checkFieldString opt "name" elem.name
               else
                 throw "option `${opt}`: expected wrapper attrset to have a string `name`, got attrset without one";
@@ -155,13 +159,19 @@ in
       # ---- eval-time type checks ----------------------------------------------
       # Every option is checked before mkShellNoCC runs; a mismatch throws
       # naming the option, the expected shape, and the received type/value.
-      # Null is accepted only where the table default is null. No coercions;
-      # no Nix `path` values for any option.
+      # Unknown top-level options and unknown wrapper fields throw (ADR-0003
+      # strictness). Null is accepted only where the table default is null.
+      # No coercions; no Nix `path` values for any option.
+      unknownOpts = builtins.filter (opt: !(builtins.hasAttr opt checkers)) (builtins.attrNames args);
       checked = builtins.mapAttrs (opt: check: check opt args.${opt}) checkers;
 
       # Force all checks before building the shell. deepSeq catches lazy
       # list entries (plain seq only forces the list spine).
-      checkAll = builtins.deepSeq checked true;
+      checkAll =
+        if unknownOpts != [ ] then
+          throw "option `${builtins.head unknownOpts}`: unknown option"
+        else
+          builtins.deepSeq checked true;
 
       # ---- wrappers --------------------------------------------------------------
       mkWrapperScript =

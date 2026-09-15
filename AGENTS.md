@@ -14,7 +14,7 @@ Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/ag
 
 ### Error messages
 
-See `docs/agents/error.md`.
+Read `docs/agents/error.md` before writing a new or modifying an existing error message.
 
 ## Environment (self-hosted)
 
@@ -49,9 +49,11 @@ See `docs/agents/error.md`.
 
 ## Source-of-truth docs
 
-- `spec/` defines behavior: `protocol.md` (wire format — single source of truth),
-  `client.md`, `server.md`, `ctl.md` (NCAP_* contract), `flake-api.md`.
-  Keep code and specs in sync; change both or neither.
+- `spec/` defines behavior … Keep code and specs in sync; change both or neither.
+  Divergence checks apply only to the working tree: `lib.nix` vs `spec/flake-api.md`.
+  The root `flake.nix` is a *consumer* pinned to the v0.8.0 release — it follows
+  that release's API, not the spec. Never flag the root flake against
+  `spec/flake-api.md` (see Environment § self-hosted).
 - Use `CONTEXT.md` vocabulary exactly: **Host shell** vs **Container shell** (never bare "devshell"),
   **Container** (not capsule/sandbox), **Server** (not daemon), **Wrapper** (not shim).
 - Check `docs/adr/` for the area you touch; flag contradictions instead of silently overriding.

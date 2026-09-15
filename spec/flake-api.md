@@ -109,7 +109,8 @@ strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `project`, `containerName`, `socketPath`, `cacheDir`, `logDir` strings;
 `preShellHook`, `postShellHook` strings. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
-null or string.
+null or string. Unknown top-level options and unknown wrapper fields
+throw at eval time naming the option or field.
 
 ## shellHook
 
@@ -120,7 +121,7 @@ The shellHook runs, in order (empty fragments skipped):
 3. sources `setup-env` output (`source <(ncap-ctl setup-env)`) resolving
    the project-scoped envs per spec/ctl.md § NCAP_* contract,
 4. emits one guarded `watch_file` invocation taking every `watchFiles`
-   entry as arguments (guard: `${DIRENV_DIR:-}` non-empty — inert outside
+   entry as arguments (guard: `command -v watch_file` — inert outside
    direnv); an empty `watchFiles` emits no line,
 5. runs `ncap-ctl init` when `autoStart`,
 6. `postShellHook`.
@@ -138,8 +139,8 @@ wrappers = [ "cargo" ]
 # writes a bin `cargo` → exec ncap cargo "$@"
 ```
 
-Attrset form mirrors Client CLI flags one-to-one — the wrapper surface grows
-with the Client's flags:
+Attrset form exposes exactly `name`/`command`/`env`/`cwd` — `--socket`
+comes from the environment (`NCAP_SOCKET`), never from a wrapper key:
 
 | Key | Type | Default | Maps to |
 | --- | --- | --- | --- |

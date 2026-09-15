@@ -339,7 +339,10 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
             status = child.wait() => status,
             _ = stopping_signalled(stopping.clone()) => {
                 // Best-effort: the client may already be gone.
+                // TERM the group so a pipes-drained-but-running child
+                // cannot hang the drain (spec/server.md § Shutdown).
                 send(&mut framed, Message::ServerStopping).await;
+                let _ = signal_group(pgid, libc::SIGTERM as u8);
                 child.wait().await
             }
         };
