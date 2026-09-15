@@ -10,7 +10,7 @@ contract).
 | Command | Behavior |
 | --- | --- |
 | `init` | Entry point from the shellHook. Stamp guard, probe, hash-check, then start or re-eval + restart (§ init flow). |
-| `start` | Stamp guard, probe: live ⇒ done ("already running"). Not live ⇒ run the Container detached, then await readiness (§ start flow). |
+| `start` | Stamp guard, probe: live ⇒ done. Not live ⇒ run the Container detached, then await readiness (§ start flow). |
 | `stop` | `<runtime> stop <name>` — SIGTERM to the container's init process (the Server), graceful drain. Idempotent: not running ⇒ success. A failed stop whose follow-up probe shows not-running ⇒ success. |
 | `restart` | Non-fatal `stop`, then `init` (which re-ensures the Cache before starting). |
 | `enter` | `<runtime> exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |

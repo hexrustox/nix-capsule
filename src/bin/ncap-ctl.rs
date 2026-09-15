@@ -13,14 +13,10 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let (message, code) = block_on(cli.command);
+    let rt = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
+    let message = rt.block_on(run(cli.command));
     if let Some(message) = message {
         eprintln!("{}: {message}", env!("CARGO_BIN_NAME"));
+        std::process::exit(1);
     }
-    std::process::exit(code);
-}
-
-fn block_on(cmd: Cmd) -> (Option<String>, i32) {
-    let rt = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
-    rt.block_on(run(cmd))
 }

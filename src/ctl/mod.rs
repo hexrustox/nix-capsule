@@ -65,7 +65,7 @@ pub enum CtlError {
 /// Render `err` without the program prefix — the binary applies it — plus,
 /// when the variant carries it, prescriptive advice as a sibling line, and
 /// yield the exit code for the run.
-fn fail(err: CtlError) -> (Option<String>, i32) {
+fn fail(err: CtlError) -> Option<String> {
     let message = err.to_string();
     let message = if let Some(advice) = match &err {
         CtlError::NotRunning { .. } | CtlError::NoCachedEnv { .. } => {
@@ -81,13 +81,13 @@ fn fail(err: CtlError) -> (Option<String>, i32) {
     } else {
         message
     };
-    (Some(message), 1)
+    Some(message)
 }
 
 /// Entry point from the binary: resolve `cmd` from the process environment and
 /// dispatch. Returns the message to print on stderr, if any (unprefixed, may
 /// be multi-line), and the exit code the process should report.
-pub async fn run(cmd: Cmd) -> (Option<String>, i32) {
+pub async fn run(cmd: Cmd) -> Option<String> {
     let lookup = |var: &str| std::env::var(var).ok();
     // `setup-env` resolves the derived vars itself, so it must run before
     // the full demand set — a full resolve would reject the empty values it
@@ -96,7 +96,7 @@ pub async fn run(cmd: Cmd) -> (Option<String>, i32) {
         return match config::setup_env(&lookup) {
             Ok(script) => {
                 print!("{script}");
-                (None, 0)
+                None
             }
             Err(err) => fail(err.into()),
         };
@@ -118,7 +118,7 @@ pub async fn run(cmd: Cmd) -> (Option<String>, i32) {
         Cmd::SetupEnv => unreachable!("handled before resolve"),
     };
     match result {
-        Ok(()) => (None, 0),
+        Ok(()) => None,
         Err(err) => fail(err),
     }
 }
@@ -140,13 +140,7 @@ async fn init(cfg: Config) -> Result<(), CtlError> {
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
 
     match (live, freshness) {
-        (true, digest::Freshness::Fresh) => {
-            eprintln!(
-                "ncap-ctl: container `{}` is already running and fresh",
-                cfg.container
-            );
-            Ok(())
-        }
+        (true, digest::Freshness::Fresh) => Ok(()),
         (true, _) => {
             // Running but stale/missing → re-eval + restart.
             ensure_cache(&cfg).await?;
@@ -170,7 +164,6 @@ async fn start(cfg: Config) -> Result<(), CtlError> {
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     let socket = &cfg.socket;
     if rt.is_live(socket).await {
-        eprintln!("ncap-ctl: container `{}` is already running", cfg.container);
         return Ok(());
     }
     start_inner(&cfg).await
@@ -179,19 +172,14 @@ async fn start(cfg: Config) -> Result<(), CtlError> {
 async fn stop(cfg: Config) -> Result<(), CtlError> {
     let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
     if !rt.is_running().await {
-        eprintln!("ncap-ctl: container `{}` is not running", cfg.container);
         return Ok(());
     }
     match rt.stop().await {
-        Ok(_) => {
-            eprintln!("ncap-ctl: container `{}` stopped", cfg.container);
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(err) => {
             // If stop failed but the container is now not-running, treat as
             // success (idempotent).
             if !rt.is_running().await {
-                eprintln!("ncap-ctl: container `{}` is not running", cfg.container);
                 Ok(())
             } else {
                 Err(err.into())
@@ -304,7 +292,7 @@ async fn clean(cfg: Config) -> Result<(), CtlError> {
         }
         let _ = fs::remove_dir(parent);
     }
-    eprintln!("ncap-ctl: cleaned project `{}`", cfg.project);
+
     Ok(())
 }
 
@@ -337,7 +325,6 @@ async fn ensure_cache(cfg: &Config) -> Result<(), CtlError> {
         source,
     })?;
 
-    eprintln!("ncap-ctl: evaluating devshell `{devshell}` with nix print-dev-env...");
     let output = nix::print_dev_env(nix_bin, &profile, devshell).await?;
 
     let env_path = env_file(cache_dir);
@@ -345,7 +332,6 @@ async fn ensure_cache(cfg: &Config) -> Result<(), CtlError> {
         path: env_path.display().to_string(),
         source,
     })?;
-    eprintln!("ncap-ctl: devshell cached");
 
     // Prune profile history; non-fatal.
     nix::wipe_history(nix_bin, &profile).await;
@@ -420,7 +406,6 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
         {
             // Concurrent-start race: re-inspect.
             if rt.is_running().await {
-                eprintln!("ncap-ctl: container `{}` is already running", cfg.container);
                 return Ok(());
             }
             // Dead container with the same name — remove and retry once.
@@ -441,7 +426,6 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout);
     loop {
         if rt.is_live(socket).await {
-            eprintln!("ncap-ctl: container `{}` is running", cfg.container);
             return Ok(());
         }
         if Instant::now() >= deadline {

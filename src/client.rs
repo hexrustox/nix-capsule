@@ -181,13 +181,7 @@ async fn session(
                     Message::Version(version) => {
                         version_seen = true;
                         if version.version != CURRENT_VERSION {
-                            // A warning, not an error: the session goes on —
-                            // wire compatibility is decided per frame, and the
-                            // terminal frames still arrive and render.
-                            eprintln!(
-                                "ncap: version mismatch: client {CURRENT_VERSION}, server {}",
-                                version.version
-                            );
+                            // TODO
                         }
                     }
                     Message::Stdout(bytes) => {
@@ -202,10 +196,7 @@ async fn session(
                     }
                     Message::Error(message) => {
                         warn_absent_version(version_seen);
-                        // Data relay of the server's own diagnostic; the
-                        // server picked the wording.
-                        eprintln!("ncap: {}", message.message);
-                        return Ok(Outcome::just(1));
+                        return Ok(Outcome::with_notice(1, message.message))
                     }
                     Message::ServerStopping => {
                         return Ok(Outcome::just(SHUTDOWN_EXIT));
@@ -385,7 +376,7 @@ fn exit_outcome(exit: &Exit, command: &str) -> Result<Outcome, ClientError> {
 /// The session ended without the server ever sending a version frame.
 fn warn_absent_version(seen: bool) {
     if !seen {
-        eprintln!("ncap: server did not send a version");
+        // TODO
     }
 }
 

@@ -69,24 +69,15 @@ it directly. The protocol is the only path.
   either side, stopping the Child while the Client keeps streaming would
   leave a half-suspended session.
 
-## Version warnings
-
-- A `Version` frame naming a different version than the Client's own is a
-  warning on stderr, naming both versions.
-- Reaching a terminal `Exit`/`Error` frame without ever receiving a `Version`
-  frame is a warning on stderr. The `ServerStopping` bail and a clean close
-  without a terminal frame (both exit `143`) emit no missing-version warning.
-- Neither is ever a rejection.
-
 ## Exit codes
 
 | Condition | Client exit code |
 | --- | --- |
 | Child exited normally | the Child's code (it travels as u8) |
 | Child killed by signal | `128 + signal` |
-| Terminal `Exit` carries code `127` (spawn `ENOENT`, or a Child's own 127) | error on stderr attributing the failure to the missing executable; exits `127` |
-| Terminal `Exit` carries code `126` (spawn `EACCES`, or a Child's own 126) | error on stderr attributing the failure to the non-executable file; exits `126` |
-| Terminal `Exit` with neither field set (status unknowable) | error on stderr naming the `Exit` frame and its missing field, then `1` |
+| Terminal `Exit` carries code `127` (spawn `ENOENT`, or a Child's own 127) | `127` |
+| Terminal `Exit` carries code `126` (spawn `EACCES`, or a Child's own 126) | `126` |
+| Terminal `Exit` with neither field set (status unknowable) | `1` |
 | Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`, invalid `--env`, a `Signal`-frame send failure) | `1` |
 | `ServerStopping` received — the Client bails immediately and stops streaming — or the socket closed without a terminal frame | `143` (128 + SIGTERM) |
 

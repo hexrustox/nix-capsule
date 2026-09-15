@@ -61,11 +61,6 @@ Prescriptive advice is carried outside the message text:
   Errors return up the stack; `eprintln!()` fires only there, never mid-task
   in command or library code — command handlers surface errors and notices by
   returning values the toplevel renders.
-- **Warnings are not errors**: a detected-but-nonterminal condition (the
-  session goes on, or the exit code carries the signal) may print mid-task as
-  its own prefix-carrying stderr line — e.g. the client's version-mismatch
-  and missing-`Version`-frame warnings (src/client.rs). Everything that
-  fails the run is an error and follows the rule above.
 - Every rendered line carries the binary name as prefix
   (`ncap: {err}` / `ncap-ctl: {err}` / `ncap-server: {err}`); a prefix-less
   error is a bug.

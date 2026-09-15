@@ -60,14 +60,8 @@ JSON conventions:
 ## Guarantees
 
 - **Version is advisory.** Client and Server ship from the same package and
-  are always in lockstep; a mismatch (or a missing version) is a warning — on
-  the Client's stderr and in the Server's log — never a rejection. Comparison
-  is exact string equality. The Client compares the `Version` frame against
-  its own and warns when no `Version` frame arrived before the terminal
-  `Exit`/`Error` frame; the `ServerStopping` bail and a clean close without
-  a terminal frame emit no missing-version warning. The Server compares
-  `Request.version` against its own and warns in
-  its log.
+  are always in lockstep; a mismatch (or a missing version) is never a
+  rejection. Comparison is exact string equality. 
 - **Ordering:** per-stream FIFO is guaranteed; interleaving between `Stdout`
   and `Stderr` is not (independent forwarding).
 - **EOF:** there is no EOF frame type. stdin EOF travels as one empty `Stdin`
@@ -92,7 +86,7 @@ JSON conventions:
   as a `Signal` frame (spec/client.md § Signals).
 - **Exec failures:** spawning the Child failing with `ENOENT` ⇒ terminal
   `Exit { "code": 127 }`, `EACCES` ⇒ terminal `Exit { "code": 126 }` — no
-  `Error` frame; the Client synthesizes the stderr line — see
+  `Error` frame; the Client renders the attribution line itself — see
   spec/client.md § Exit codes. Any other spawn failure ⇒ terminal
   `Error { message }`.
 - **Misdirected frames:** once a Connection is established, a frame arriving
