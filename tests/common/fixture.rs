@@ -29,6 +29,7 @@ const NCAP_VARS: &[&str] = &[
     "NCAP_BASH",
     "NCAP_TIMEOUT",
     "NCAP_HARDEN",
+    "NCAP_LOG_LEVEL",
     "NCAP_DEVSHELL",
     "NCAP_ENV_FORWARD",
     "NCAP_CACHE",
@@ -529,6 +530,11 @@ impl Fixture {
         self
     }
 
+    pub fn with_log_level(mut self, level: &str) -> Self {
+        self.env.insert("NCAP_LOG_LEVEL".into(), level.into());
+        self
+    }
+
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.env.insert(key.into(), value.into());
         self
@@ -954,6 +960,7 @@ fn base_env(
     env.insert("NCAP_WATCH_FILES".into(), "[]".into());
     env.insert("NCAP_RUN_OPTS".into(), "[]".into());
     env.insert("NCAP_HARDEN".into(), "false".into());
+    env.insert("NCAP_LOG_LEVEL".into(), "warning".into());
     // Keep HOME for XDG fallbacks where needed; tests override when testing fallback.
     if let Ok(home) = std::env::var("HOME") {
         env.insert("HOME".into(), home);

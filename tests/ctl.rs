@@ -39,6 +39,7 @@ fn init_refuses_when_a_demanded_var_is_missing() {
         "NCAP_WATCH_FILES",
         "NCAP_RUN_OPTS",
         "NCAP_HARDEN",
+        "NCAP_LOG_LEVEL",
     ];
     for var in demanded {
         // For NCAP_PROJECT_ROOT removal, NCAP_CONTAINER etc. still set so
@@ -808,6 +809,10 @@ fn start_assembles_exact_default_mount_set_and_launch_command() {
         launch.script_contains("--timeout 2"),
         "missing --timeout flag: {launch}"
     );
+    assert!(
+        launch.script_contains("--log-level warning"),
+        "missing --log-level flag: {launch}"
+    );
     // Ensure detached and image/bash shape
     assert!(
         launch.has_arg("run") && launch.has_arg("-d"),
@@ -1030,5 +1035,72 @@ fn extra_options_braced_expansion_and_literal_passthrough() {
     assert!(
         launch.has_arg("-v braced-val:/mnt"),
         "dollar expansion: {launch}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ticket log-level: env-contract validation and launch argv lock-in
+// ---------------------------------------------------------------------------
+
+#[test]
+fn off_vocabulary_log_level_is_rejected_naming_the_var_and_the_four_values() {
+    for bad in ["verbose", "Warning", "warn", "debug "] {
+        let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(bad);
+        let out = fx.status();
+        assert!(
+            !out.status.success(),
+            "log level `{bad}` must fail the command"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("NCAP_LOG_LEVEL"),
+            "error must name the var: stderr={stderr}"
+        );
+        for level in ["debug", "info", "warning", "error"] {
+            assert!(
+                stderr.contains(level),
+                "error must spell out `{level}`: stderr={stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn each_accepted_log_level_survives_as_its_own_launch_argv() {
+    for level in ["debug", "info", "warning", "error"] {
+        let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(level);
+        fx.set_running(false);
+        // Liveness needs a connectable Socket (fresh_empty holds the guard).
+        let out = fx.start();
+        assert!(
+            out.status.success(),
+            "level `{level}`: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let launch = fx.launches();
+        assert!(
+            launch.script_contains(&format!("--log-level {level}")),
+            "level `{level}` must survive as its own argv: {launch}"
+        );
+    }
+}
+
+#[test]
+fn full_env_start_flow_carries_the_log_level() {
+    // End-to-end start flow with a full env set: the validated level reaches
+    // the server launch command.
+    let fx =
+        fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level("error");
+    fx.set_running(false);
+    let out = fx.start();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fx.launches().script_contains("--log-level error"),
+        "full env must carry the level: {}",
+        fx.launches()
     );
 }

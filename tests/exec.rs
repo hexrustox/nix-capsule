@@ -448,6 +448,75 @@ async fn client_reports_what_the_server_frames_imply(
     assert!(out.stderr.contains(stderr), "stderr={}", out.stderr);
 }
 
+// ------------------------------------------------------------ log-level filter
+
+#[tokio::test(flavor = "multi_thread")]
+async fn error_log_level_suppresses_the_version_warning_in_both_sinks() {
+    let server = Server::builder().log_level("error").start().await;
+    let stderr_before = server.stderr();
+
+    let run = run_request(
+        &mut server.raw().await,
+        Request {
+            version: Some("9.9.9".into()),
+            ..request(server.path(), "printf ok")
+        },
+    )
+    .await;
+    assert_eq!(run.stdout, "ok");
+    assert_clean_exit(&run.frames, "the command must still succeed");
+
+    let stderr = server.stderr_since(&stderr_before);
+    assert!(
+        !stderr.contains("declared version `9.9.9`"),
+        "warning below error must not mirror to stderr: {stderr:?}"
+    );
+    let log_file = newest_server_log(server.path().join("logs"));
+    assert!(
+        !log_file.contains("declared version `9.9.9`"),
+        "warning below error must not reach the log file"
+    );
+    server.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_log_level_keeps_the_version_warning_in_both_sinks() {
+    let server = Server::builder().log_level("debug").start().await;
+    let stderr_before = server.stderr();
+
+    let run = run_request(
+        &mut server.raw().await,
+        Request {
+            version: Some("9.9.9".into()),
+            ..request(server.path(), "printf ok")
+        },
+    )
+    .await;
+    assert_eq!(run.stdout, "ok");
+
+    let stderr = server.stderr_since(&stderr_before);
+    assert!(
+        stderr.contains("declared version `9.9.9`"),
+        "warning at debug must mirror to stderr: {stderr:?}"
+    );
+    let log_file = newest_server_log(server.path().join("logs"));
+    assert!(
+        log_file.contains("declared version `9.9.9`"),
+        "warning at debug must reach the log file"
+    );
+    server.stop();
+}
+
+/// Read back the single per-run server log under `dir`.
+fn newest_server_log(dir: std::path::PathBuf) -> String {
+    let entries: Vec<_> = fs::read_dir(&dir)
+        .expect("log dir")
+        .map(|entry| entry.expect("log dir entry").path())
+        .collect();
+    assert_eq!(entries.len(), 1, "one run, one log file");
+    fs::read_to_string(&entries[0]).expect("read log file")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn connect_failure_names_socket_and_suggests_init() {
     let (_dir, socket) = missing_socket();

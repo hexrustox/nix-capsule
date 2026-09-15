@@ -80,12 +80,86 @@ enum Rejection {
     },
 }
 
+/// The minimum severity the Server logs at — exactly `debug`, `info`,
+/// `warning`, `error` (spec/server.md § Logging). Ordering is
+/// `debug` < `info` < `warning` < `error`; the single source the Ctl
+/// contract validates against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+impl LogLevel {
+    /// The tag string the log writer emits for this level.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warning => "warning",
+            LogLevel::Error => "error",
+        }
+    }
+
+    /// Fixed rank for the minimum-severity comparison: `debug` 0 through
+    /// `error` 3.
+    pub fn rank(&self) -> u8 {
+        match self {
+            LogLevel::Debug => 0,
+            LogLevel::Info => 1,
+            LogLevel::Warning => 2,
+            LogLevel::Error => 3,
+        }
+    }
+
+    /// Exact match against the four tag strings; anything else is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "debug" => Some(LogLevel::Debug),
+            "info" => Some(LogLevel::Info),
+            "warning" => Some(LogLevel::Warning),
+            "error" => Some(LogLevel::Error),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Rejection of a `--log-level` value outside the four tags.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LogLevelParseError {
+    #[error("must be `debug`, `info`, `warning`, or `error`, got `{value}`")]
+    BadLevel { value: String },
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = LogLevelParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        LogLevel::parse(value).ok_or_else(|| LogLevelParseError::BadLevel {
+            value: value.to_owned(),
+        })
+    }
+}
+
 /// Bind `socket` and serve connections until the process is stopped. A
 /// SIGTERM or SIGINT starts the orderly shutdown: `ServerStopping` to every
 /// live connection, a group TERM for every child, a drain bounded by
 /// `drain`, then the socket file's removal.
-pub async fn run(socket: PathBuf, log_dir: PathBuf, drain: Duration) -> Result<(), ServerError> {
-    let log = Arc::new(Log::start(&log_dir)?);
+pub async fn run(
+    socket: PathBuf,
+    log_dir: PathBuf,
+    drain: Duration,
+    log_level: LogLevel,
+) -> Result<(), ServerError> {
+    let log = Arc::new(Log::start(&log_dir, log_level)?);
     log.info(&format!("server started (pid {})", std::process::id()));
     probe_socket(&socket).await?;
     let listener = UnixListener::bind(&socket).map_err(|source| ServerError::Bind {
@@ -537,13 +611,16 @@ async fn send(framed: &mut Framed<UnixStream, FrameCodec>, message: Message) -> 
 
 /// The per-run log file `<log-dir>/ncap-server-<epoch>.log`. Every line is
 /// mirrored to stderr so the container runtime captures the same stream.
+/// One emit-time severity gate sits before both sinks, so the file and the
+/// mirror never disagree.
 struct Log {
     file: Mutex<std::fs::File>,
+    min_level: LogLevel,
 }
 
 impl Log {
     /// Create `dir` when missing and open this run's epoch-stamped log file.
-    fn start(dir: &Path) -> Result<Self, FsError> {
+    fn start(dir: &Path, min_level: LogLevel) -> Result<Self, FsError> {
         std::fs::create_dir_all(dir).map_err(|source| FsError::CreateDir {
             dir: dir.display().to_string(),
             source,
@@ -559,13 +636,19 @@ impl Log {
             })?;
         Ok(Self {
             file: Mutex::new(file),
+            min_level,
         })
     }
 
     /// Append one stamped, level-tagged line to the log file and stderr;
     /// logging is best-effort and never disturbs the connection it reports
-    /// on.
-    fn line(&self, level: &str, message: &str) {
+    /// on. A line whose level ranks below the minimum is written to neither
+    /// sink — filtering happens here at emit time, before stamping, against
+    /// the single `LogLevel` ordering.
+    fn line(&self, level: LogLevel, message: &str) {
+        if level.rank() < self.min_level.rank() {
+            return;
+        }
         let line = format!("[{}] {level}: {message}\n", rfc3339_utc());
         if let Ok(mut file) = self.file.lock() {
             let _ = file.write_all(line.as_bytes());
@@ -574,19 +657,19 @@ impl Log {
     }
 
     fn debug(&self, message: &str) {
-        self.line("debug", message);
+        self.line(LogLevel::Debug, message);
     }
 
     fn info(&self, message: &str) {
-        self.line("info", message);
+        self.line(LogLevel::Info, message);
     }
 
     fn warning(&self, message: &str) {
-        self.line("warning", message);
+        self.line(LogLevel::Warning, message);
     }
 
     fn error(&self, message: &str) {
-        self.line("error", message);
+        self.line(LogLevel::Error, message);
     }
 }
 
@@ -664,5 +747,103 @@ mod tests {
     #[test_case::test_case(951_782_400, "2000-02-29T00:00:00Z"; "leap day 2000")]
     fn rfc3339_utc_formats_known_instants(secs: u64, expected: &str) {
         assert_eq!(format_utc(secs), expected);
+    }
+
+    #[test_case::test_case("debug", Some(LogLevel::Debug); "debug_parses")]
+    #[test_case::test_case("info", Some(LogLevel::Info); "info_parses")]
+    #[test_case::test_case("warning", Some(LogLevel::Warning); "warning_parses")]
+    #[test_case::test_case("error", Some(LogLevel::Error); "error_parses")]
+    #[test_case::test_case("Warning", None; "capitalized_is_rejected")]
+    #[test_case::test_case("verbose", None; "off_vocabulary_is_rejected")]
+    #[test_case::test_case("", None; "empty_is_rejected")]
+    fn log_level_parses_exact_tags(raw: &str, expected: Option<LogLevel>) {
+        assert_eq!(LogLevel::parse(raw), expected, "raw={raw}");
+    }
+
+    #[test]
+    fn log_level_ordering_is_debug_info_warning_error() {
+        assert!(
+            LogLevel::Debug.rank()
+                < LogLevel::Info.rank()
+                && LogLevel::Info.rank() < LogLevel::Warning.rank()
+                && LogLevel::Warning.rank() < LogLevel::Error.rank(),
+            "ranks must order debug < info < warning < error"
+        );
+        for level in [
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warning,
+            LogLevel::Error,
+        ] {
+            assert_eq!(
+                LogLevel::parse(level.as_str()),
+                Some(level),
+                "as_str must round-trip"
+            );
+        }
+    }
+
+    /// Emit one line at each level against a `warning` minimum: only
+    /// `warning` and `error` land in the file. The stderr mirror shares the
+    /// single gate before both sinks, so file filtering proves the lockstep.
+    #[test]
+    fn log_emit_filters_below_the_minimum_before_stamping() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = Log::start(dir.path(), LogLevel::Warning).expect("log starts");
+        log.debug("debug line");
+        log.info("info line");
+        log.warning("warning line");
+        log.error("error line");
+        let logged = newest_log_contents(dir.path());
+        assert!(
+            !logged.contains("debug line"),
+            "debug below warning must drop: {logged:?}"
+        );
+        assert!(
+            !logged.contains("info line"),
+            "info below warning must drop: {logged:?}"
+        );
+        assert!(
+            logged.contains("warning: warning line"),
+            "warning at minimum must keep: {logged:?}"
+        );
+        assert!(
+            logged.contains("error: error line"),
+            "error above minimum must keep: {logged:?}"
+        );
+    }
+
+    /// A `debug` minimum keeps every level; an `error` minimum keeps only
+    /// errors — the gate is a single minimum-severity comparison.
+    #[test_case::test_case(LogLevel::Debug, &["debug line", "info line", "warning line", "error line"]; "debug_keeps_everything")]
+    #[test_case::test_case(LogLevel::Error, &["error line"]; "error_keeps_only_errors")]
+    fn log_emit_keeps_lines_at_or_above_the_minimum(
+        min: LogLevel,
+        expected: &[&str],
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = Log::start(dir.path(), min).expect("log starts");
+        log.debug("debug line");
+        log.info("info line");
+        log.warning("warning line");
+        log.error("error line");
+        let logged = newest_log_contents(dir.path());
+        for marker in ["debug line", "info line", "warning line", "error line"] {
+            if expected.contains(&marker) {
+                assert!(logged.contains(marker), "must keep {marker}: {logged:?}");
+            } else {
+                assert!(!logged.contains(marker), "must drop {marker}: {logged:?}");
+            }
+        }
+    }
+
+    /// Read back the single per-run log file `Log::start` created.
+    fn newest_log_contents(dir: &Path) -> String {
+        let entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("log dir")
+            .map(|entry| entry.expect("log dir entry").path())
+            .collect();
+        assert_eq!(entries.len(), 1, "one run, one log file: {entries:?}");
+        std::fs::read_to_string(&entries[0]).expect("read log file")
     }
 }

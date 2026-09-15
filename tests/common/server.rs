@@ -39,6 +39,7 @@ impl Server {
             log_dir: None,
             socket_path: None,
             timeout: None,
+            log_level: None,
             respond: None,
         }
     }
@@ -139,6 +140,7 @@ pub struct ServerBuilder {
     log_dir: Option<PathBuf>,
     socket_path: Option<PathBuf>,
     timeout: Option<u64>,
+    log_level: Option<String>,
     respond: Option<Vec<Message>>,
 }
 
@@ -163,6 +165,13 @@ impl ServerBuilder {
     /// [`Self::TIMEOUT_SECS`].
     pub fn timeout(mut self, seconds: u64) -> Self {
         self.timeout = Some(seconds);
+        self
+    }
+
+    /// Minimum severity handed to a real server; defaults to `debug` so
+    /// tests observe the full stream unless they narrow it.
+    pub fn log_level(mut self, level: &str) -> Self {
+        self.log_level = Some(level.into());
         self
     }
 
@@ -192,6 +201,8 @@ impl ServerBuilder {
                     .arg(log_dir)
                     .arg("--timeout")
                     .arg(self.timeout.unwrap_or(Self::TIMEOUT_SECS).to_string())
+                    .arg("--log-level")
+                    .arg(self.log_level.unwrap_or_else(|| "debug".to_owned()))
                     .stdout(Stdio::null())
                     .stderr(stderr_log)
                     .spawn()

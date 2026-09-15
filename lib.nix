@@ -125,6 +125,7 @@ let
     containerName = checkString;
     cacheDir = checkString;
     logDir = checkString;
+    logLevel = checkString;
     preShellHook = checkString;
     postShellHook = checkString;
     autoStart = checkBool;
@@ -150,6 +151,7 @@ in
       containerName ? "",
       cacheDir ? "",
       logDir ? "",
+      logLevel ? "warning",
       preShellHook ? "",
       postShellHook ? "",
       autoStart ? true,
@@ -230,6 +232,7 @@ in
         NCAP_SOCKET = checked.socketPath;
         NCAP_CACHE_DIR = checked.cacheDir;
         NCAP_LOG_DIR = checked.logDir;
+        NCAP_LOG_LEVEL = checked.logLevel;
         NCAP_IMAGE = checked.image;
         NCAP_DEVSHELL = checked.devShell;
         NCAP_WATCH_FILES = watchFilesJson;

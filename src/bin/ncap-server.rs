@@ -18,6 +18,10 @@ struct Cli {
     /// Drain grace for live connections at shutdown, seconds
     #[arg(long)]
     timeout: u64,
+
+    /// Minimum severity the server logs at
+    #[arg(long, value_name = "LEVEL")]
+    log_level: nix_capsule::server::LogLevel,
 }
 
 fn main() {
@@ -27,6 +31,7 @@ fn main() {
         cli.socket,
         cli.log_dir,
         Duration::from_secs(cli.timeout),
+        cli.log_level,
     ));
     if let Err(err) = result {
         eprintln!("{}: {err}", env!("CARGO_BIN_NAME"));

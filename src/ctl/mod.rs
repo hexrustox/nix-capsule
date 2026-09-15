@@ -381,6 +381,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
         socket: socket.clone(),
         log_dir: log_dir.clone(),
         timeout: cfg.timeout,
+        log_level: cfg.log_level,
     };
 
     // A container with the target name that exists but is not running is

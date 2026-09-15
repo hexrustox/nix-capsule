@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::shell::shell_escape;
 use crate::ctl::paths;
+use crate::server::LogLevel;
 
 /// A `ncap-ctl` subcommand: the variant selects the control flow and the
 /// demand set.
@@ -50,6 +51,7 @@ pub struct Config {
     pub watch_files: Vec<String>,
     pub run_opts: Vec<String>,
     pub harden: bool,
+    pub log_level: LogLevel,
     pub image: String,
     pub server: PathBuf,
     pub nix: PathBuf,
@@ -82,6 +84,8 @@ pub enum ConfigError {
     BadRuntime { value: String },
     #[error("`NCAP_HARDEN` must be `true` or `false`, got `{value}`")]
     BadHarden { value: String },
+    #[error("`NCAP_LOG_LEVEL` must be `debug`, `info`, `warning`, or `error`, got `{value}`")]
+    BadLevel { value: String },
     #[error(transparent)]
     NoHome(#[from] paths::NoHomeError),
 }
@@ -164,6 +168,14 @@ fn parse_harden(lookup: &dyn Fn(&str) -> Option<String>) -> Result<bool, ConfigE
     }
 }
 
+/// The Server's level vocabulary is the contract: exact match against the
+/// four tag strings the log writer emits, mirroring how the runtime adapter
+/// and the harden flag are parsed.
+fn parse_log_level(lookup: &dyn Fn(&str) -> Option<String>) -> Result<LogLevel, ConfigError> {
+    let raw = demand(lookup, "NCAP_LOG_LEVEL")?;
+    LogLevel::parse(&raw).ok_or(ConfigError::BadLevel { value: raw })
+}
+
 /// Sanitize a basename into a project name: every non-ASCII-alphanumeric
 /// character joins the surrounding run into a single `-`, leading and
 /// trailing `-` are stripped. `None` when nothing survives — the caller
@@ -232,6 +244,7 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Config
     let watch_files = parse_watch_files(lookup)?;
     let run_opts = parse_run_opts(lookup)?;
     let harden = parse_harden(lookup)?;
+    let log_level = parse_log_level(lookup)?;
 
     let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
     let root = PathBuf::from(&root_str);
@@ -262,6 +275,7 @@ pub fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, Config
         watch_files,
         run_opts,
         harden,
+        log_level,
         image,
         server: PathBuf::from(server),
         nix: PathBuf::from(nix),
@@ -366,6 +380,20 @@ mod tests {
     #[test_case(Some("hello-docker") => matches Err(ConfigError::BadRuntime { value }) if value == "hello-docker" ; "substring_is_not_enough")]
     fn runtime_is_exact(raw: Option<&str>) -> Result<String, ConfigError> {
         parse_runtime(&single("NCAP_RUNTIME", raw))
+    }
+
+    #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_LOG_LEVEL" }) ; "missing_is_named")]
+    #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_missing")]
+    #[test_case(Some("debug") => matches Ok(level) if level == LogLevel::Debug ; "debug_is_valid")]
+    #[test_case(Some("info") => matches Ok(level) if level == LogLevel::Info ; "info_is_valid")]
+    #[test_case(Some("warning") => matches Ok(level) if level == LogLevel::Warning ; "warning_is_valid")]
+    #[test_case(Some("error") => matches Ok(level) if level == LogLevel::Error ; "error_is_valid")]
+    #[test_case(Some("Warning") => matches Err(ConfigError::BadLevel { value }) if value == "Warning" ; "capitalized_is_rejected")]
+    #[test_case(Some("verbose") => matches Err(ConfigError::BadLevel { value }) if value == "verbose" ; "off_vocabulary_is_rejected")]
+    #[test_case(Some("warn") => matches Err(ConfigError::BadLevel { value }) if value == "warn" ; "abbreviation_is_rejected")]
+    #[test_case(Some("debug ") => matches Err(ConfigError::BadLevel { value }) if value == "debug " ; "trailing_space_is_rejected")]
+    fn log_level_is_exact(raw: Option<&str>) -> Result<LogLevel, ConfigError> {
+        parse_log_level(&single("NCAP_LOG_LEVEL", raw))
     }
 
     #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_WATCH_FILES" }) ; "unset_is_missing")]

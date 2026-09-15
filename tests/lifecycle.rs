@@ -119,6 +119,8 @@ async fn a_live_socket_refuses_startup_naming_the_path_and_leaves_the_owner_unto
         .arg(dir.path().join("logs"))
         .arg("--timeout")
         .arg("10")
+        .arg("--log-level")
+        .arg("debug")
         .stdout(Stdio::null())
         .stderr(stderr_log)
         .spawn()

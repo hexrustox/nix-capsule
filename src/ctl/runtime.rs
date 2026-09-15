@@ -8,6 +8,7 @@ use tokio::process::Command;
 
 use super::paths::env_file;
 use super::shell::shell_escape;
+use crate::server::LogLevel;
 
 /// Failures of the runtime adapter: spawn errors ride as `#[source]`, a
 /// failed run/stop/rm carries the captured output as a data field, exec
@@ -55,12 +56,13 @@ pub enum RuntimeError {
 }
 
 /// Arguments of the ncap-server binary: exactly its CLI surface
-/// (`--socket`, `--log-dir`, `--timeout`).
+/// (`--socket`, `--log-dir`, `--timeout`, `--log-level`).
 #[derive(Clone, Debug)]
 pub struct ServerArgs {
     pub socket: PathBuf,
     pub log_dir: PathBuf,
     pub timeout: u64,
+    pub log_level: LogLevel,
 }
 
 /// The OCI runtime executable, scoped to a single container: the executable
@@ -127,9 +129,10 @@ impl Runtime {
     /// `run -d --name <name> <mounts and options> -- <image> <bash> -c <cmd>` —
     /// detached, against the container it was constructed with. Renders the
     /// server launch command as
-    /// `"source '<env_file>' && exec '<server>' --socket '<socket>' --log-dir '<log_dir>' --timeout <timeout>"`
+    /// `"source '<env_file>' && exec '<server>' --socket '<socket>' --log-dir '<log_dir>' --timeout <timeout> --log-level <log_level>"`
     /// from the raw `env_file`/`server` paths plus the server CLI surface in
-    /// `args`.
+    /// `args`. The validated log level renders bare like the numeric timeout
+    /// (no shell escaping, unlike paths).
     /// `extra_args` are the mounts and options assembled by the ctl
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
     /// Returns the container id on success, or the runtime's captured output
@@ -143,12 +146,13 @@ impl Runtime {
         extra_args: &[String],
     ) -> Result<String, RuntimeError> {
         let exec_cmd = format!(
-            "source '{}' && exec '{}' --socket '{}' --log-dir '{}' --timeout {}",
+            "source '{}' && exec '{}' --socket '{}' --log-dir '{}' --timeout {} --log-level {}",
             shell_escape(&env_file.to_string_lossy()),
             shell_escape(&server.to_string_lossy()),
             shell_escape(&args.socket.to_string_lossy()),
             shell_escape(&args.log_dir.to_string_lossy()),
-            args.timeout
+            args.timeout,
+            args.log_level
         );
         let mut cmd = Command::new(&self.bin);
         cmd.args(["run", "-d", "--name", &self.name]);
