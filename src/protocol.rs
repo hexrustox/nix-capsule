@@ -210,8 +210,12 @@ pub enum DecodeError {
     #[error("frame declares a {0}-byte payload above the 16 MiB cap")]
     PayloadTooLarge(usize),
     /// A JSON struct payload failed to parse.
-    #[error("frame payload parse error: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("frame payload parse error: {source}")]
+    Json {
+        #[from]
+        #[source]
+        source: serde_json::Error,
+    },
     /// `ServerStopping` arrived with a non-empty payload (spec: empty).
     #[error("non-empty `ServerStopping` payload: {0} bytes")]
     NonEmptyServerStopping(usize),
@@ -232,8 +236,12 @@ pub enum EncodeError {
     #[error("frame payload above the 16 MiB cap: {0} bytes")]
     PayloadTooLarge(usize),
     /// A JSON struct payload failed to serialize.
-    #[error("frame payload serialization error: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("frame payload serialization error: {source}")]
+    Json {
+        #[from]
+        #[source]
+        source: serde_json::Error,
+    },
     /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
     #[error("both `code` and `signal` set in `Exit` frame")]
     InvalidExit,

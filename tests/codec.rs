@@ -219,7 +219,7 @@ fn malformed_struct_payloads_fail_decoding_without_panicking(tag: FrameType) {
         .expect("framing tolerates a junk payload");
     assert!(matches!(
         Message::from_frame(frame),
-        Err(DecodeError::Json(_))
+        Err(DecodeError::Json { .. })
     ));
 }
 

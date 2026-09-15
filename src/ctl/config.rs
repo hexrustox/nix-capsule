@@ -78,7 +78,7 @@ pub enum ConfigError {
     NotRelativeWatchFile { entry: String },
     #[error("`NCAP_WATCH_FILES` entry `{entry}` is not a file")]
     WatchFileNotFile { entry: String },
-    #[error("`NCAP_RUNTIME` must be `podman`, `docker`, got `{value}`")]
+    #[error("`NCAP_RUNTIME` must be `podman` or `docker`, got `{value}`")]
     BadRuntime { value: String },
     #[error("`NCAP_HARDEN` must be `true` or `false`, got `{value}`")]
     BadHarden { value: String },
