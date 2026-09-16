@@ -14,8 +14,8 @@ pub(crate) enum PrintDevEnvError {
         #[source]
         source: std::io::Error,
     },
-    #[error("cannot eval `{devshell}` with `nix print-dev-env`:\n{stderr}")]
-    Failed { devshell: String, stderr: String },
+    #[error("cannot eval `{devshell}` with `nix print-dev-env`")]
+    Failed { devshell: String },
 }
 
 /// Invoke `nix print-dev-env --profile <profile> <devshell>` and return the
@@ -32,8 +32,7 @@ pub(crate) async fn print_dev_env(
             &profile.to_string_lossy(),
             devshell,
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .output()
         .await
         .map_err(|source| PrintDevEnvError::Spawn { source })?;
@@ -42,7 +41,6 @@ pub(crate) async fn print_dev_env(
     } else {
         Err(PrintDevEnvError::Failed {
             devshell: devshell.to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         })
     }
 }

@@ -15,35 +15,18 @@ use crate::server::LogLevel;
 /// failures name the exit status.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimeError {
-    #[error("cannot spawn `{bin} run`: {source}")]
-    RunSpawn {
+    #[error("cannot spawn `{bin} {verb}`: {source}")]
+    Spawn {
         bin: String,
+        verb: &'static str,
         #[source]
         source: std::io::Error,
     },
-    #[error("`{bin} run` failed:\n{output}")]
-    RunFailed { bin: String, output: String },
-    #[error("cannot spawn `{bin} stop`: {source}")]
-    StopSpawn {
+    #[error("`{bin} {verb}` failed:\n{output}")]
+    Failed {
         bin: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{bin} stop` failed:\n{output}")]
-    StopFailed { bin: String, output: String },
-    #[error("cannot spawn `{bin} rm`: {source}")]
-    RemoveSpawn {
-        bin: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{bin} rm` failed:\n{output}")]
-    RemoveFailed { bin: String, output: String },
-    #[error("cannot spawn `{bin} exec`: {source}")]
-    ExecSpawn {
-        bin: String,
-        #[source]
-        source: std::io::Error,
+        verb: &'static str,
+        output: String,
     },
     #[error("`{bin} exec` failed")]
     ExecFailed { bin: String },
@@ -127,6 +110,37 @@ impl Runtime {
         }
     }
 
+    /// Spawn `<bin> <verb> <args...>` via `output()`, returning trimmed
+    /// stdout when the runtime exits 0; otherwise a [`RuntimeError::Spawn`]
+    /// (exec failure) or [`RuntimeError::Failed`] carrying the captured
+    /// output — stderr, falling back to stdout when stderr is empty. The
+    /// shared success/$? check behind `run_detached`, `stop`, and `remove`.
+    async fn run_checked(
+        &self,
+        verb: &'static str,
+        args: impl IntoIterator<Item = String>,
+    ) -> Result<String, RuntimeError> {
+        let output = Command::new(&self.bin)
+            .arg(verb)
+            .args(args)
+            .output()
+            .await
+            .map_err(|source| RuntimeError::Spawn {
+                bin: self.bin.clone(),
+                verb,
+                source,
+            })?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        } else {
+            Err(RuntimeError::Failed {
+                bin: self.bin.clone(),
+                verb,
+                output: captured_output(&output),
+            })
+        }
+    }
+
     /// `run -d --name <name> <mounts and options> -- <image> <bash> -c <cmd>` —
     /// detached, against the container it was constructed with. Renders the
     /// server launch command as
@@ -137,7 +151,7 @@ impl Runtime {
     /// `extra_args` are the mounts and options assembled by the ctl
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
     /// Returns the container id on success, or the runtime's captured output
-    /// on failure, as a [`RuntimeError::RunFailed`].
+    /// on failure, as a [`RuntimeError::Failed`].
     pub(crate) async fn run_detached(
         &self,
         image: &str,
@@ -155,51 +169,27 @@ impl Runtime {
             args.timeout,
             args.log_level
         );
-        let mut cmd = Command::new(&self.bin);
-        cmd.args(["run", "-d", "--name", &self.name]);
-        cmd.args(extra_args);
-        cmd.args(["--", image]);
-        let output = cmd
-            .arg(&self.bash)
-            .args(["-c", &exec_cmd])
-            .output()
-            .await
-            .map_err(|source| RuntimeError::RunSpawn {
-                bin: self.bin.clone(),
-                source,
-            })?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        } else {
-            let mut msg = String::from_utf8_lossy(&output.stderr).to_string();
-            if msg.trim().is_empty() {
-                msg = String::from_utf8_lossy(&output.stdout).to_string();
-            }
-            Err(RuntimeError::RunFailed {
-                bin: self.bin.clone(),
-                output: msg.trim().to_owned(),
-            })
-        }
+        let mut run_args = vec![
+            "run".to_owned(),
+            "-d".to_owned(),
+            "--name".to_owned(),
+            self.name.clone(),
+        ];
+        run_args.extend(extra_args.iter().cloned());
+        run_args.extend([
+            "--".to_owned(),
+            image.to_owned(),
+            self.bash.to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            exec_cmd,
+        ]);
+        self.run_checked("run", run_args).await
     }
 
     /// `stop <name>`.
     pub(crate) async fn stop(&self) -> Result<String, RuntimeError> {
-        let output = Command::new(&self.bin)
-            .args(["stop", &self.name])
-            .output()
+        self.run_checked("stop", std::iter::once(self.name.clone()))
             .await
-            .map_err(|source| RuntimeError::StopSpawn {
-                bin: self.bin.clone(),
-                source,
-            })?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        } else {
-            Err(RuntimeError::StopFailed {
-                bin: self.bin.clone(),
-                output: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            })
-        }
     }
 
     /// Whether a container with `name` exists at all (running or stopped):
@@ -218,22 +208,8 @@ impl Runtime {
 
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
     pub(crate) async fn remove(&self) -> Result<String, RuntimeError> {
-        let output = Command::new(&self.bin)
-            .args(["rm", &self.name])
-            .output()
+        self.run_checked("rm", std::iter::once(self.name.clone()))
             .await
-            .map_err(|source| RuntimeError::RemoveSpawn {
-                bin: self.bin.clone(),
-                source,
-            })?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        } else {
-            Err(RuntimeError::RemoveFailed {
-                bin: self.bin.clone(),
-                output: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            })
-        }
     }
 
     /// `exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'" —
@@ -257,8 +233,9 @@ impl Runtime {
             .stderr(Stdio::inherit())
             .status()
             .await
-            .map_err(|source| RuntimeError::ExecSpawn {
+            .map_err(|source| RuntimeError::Spawn {
                 bin: self.bin.clone(),
+                verb: "exec",
                 source,
             })?;
         if status.success() {
@@ -269,6 +246,17 @@ impl Runtime {
             })
         }
     }
+}
+
+/// The captured output of a failed runtime invocation, for the error
+/// payload: stderr, falling back to stdout when stderr is empty, trimmed.
+/// `run` used this fallback; `stop`/`rm` join it via `run_checked`.
+fn captured_output(output: &std::process::Output) -> String {
+    let mut msg = String::from_utf8_lossy(&output.stderr).to_string();
+    if msg.trim().is_empty() {
+        msg = String::from_utf8_lossy(&output.stdout).to_string();
+    }
+    msg.trim().to_owned()
 }
 
 /// Whether stderr indicates a concurrent-start "name in use" conflict.

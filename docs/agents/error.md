@@ -38,7 +38,7 @@ Rules for the chain:
   or multiple colon-separated causes.
 - When `{source}` is a captured command's stdout/stderr, chain it with a
   newline instead of a colon-space, since the output may be multi-line. If
-  instead the command's stdout/stderr is piped straight through to the
+  instead the command's stdout/stderr is printed straight through to the
   user's terminal, attach no source at all — the context line stands alone.
 
 ## Advice lives outside the message
