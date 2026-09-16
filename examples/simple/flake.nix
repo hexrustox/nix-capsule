@@ -17,7 +17,7 @@
           pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [
-              inputs.nix-capsule.overlays.default
+              inputs.nix-capsule.overlays.from-source
             ];
           };
           capsule-lib = inputs.nix-capsule.lib { inherit pkgs; };

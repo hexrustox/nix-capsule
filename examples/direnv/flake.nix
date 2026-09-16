@@ -17,13 +17,12 @@
           pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [
-              inputs.nix-capsule.overlays.default
+              inputs.nix-capsule.overlays.from-source
             ];
           };
           capsule-lib = inputs.nix-capsule.lib { inherit pkgs; };
         in
         {
-          apps.default = capsule-lib.app;
           devShells = {
             default = capsule-lib.mkShell {
               project = "nix-capsule-example-direnv";
@@ -46,8 +45,6 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
       ];
     };
 }
