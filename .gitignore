@@ -1,4 +1,4 @@
 /target
 /result
+/releases
 .direnv/
-.ncap-cache/
