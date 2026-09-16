@@ -2,6 +2,8 @@
 //! send one `Request`, stream the child's stdio back to the terminal, and exit
 //! with the child's status.
 
+pub mod cli;
+
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

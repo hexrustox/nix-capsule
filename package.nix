@@ -21,7 +21,22 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ./Cargo.lock;
 
   stdenv = pkgs.clangStdenv;
-  nativeBuildInputs = [ pkgs.mold ];
+  nativeBuildInputs = [
+    pkgs.mold
+    pkgs.installShellFiles
+  ];
 
   doCheck = false;
+
+  # Build-time helper: `ncap-completions` emits the completion scripts and is
+  # dropped from the package output right after.
+  postInstall = ''
+    for bin in ncap ncap-ctl; do
+      for shell in bash zsh fish; do
+        installShellCompletion --cmd "$bin" \
+          --"$shell" <("$out/bin/ncap-completions" "$bin" "$shell")
+      done
+    done
+    rm "$out/bin/ncap-completions"
+  '';
 }

@@ -1,6 +1,7 @@
 //! Ctl (`ncap-ctl`): the project's lifecycle brain on the host — config from
 //! the `NCAP_*` contract, freshness, stamp guard, and the container flows.
 
+pub mod cli;
 pub mod config;
 pub mod digest;
 pub mod fs_error;

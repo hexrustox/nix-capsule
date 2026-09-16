@@ -1,15 +1,7 @@
 use clap::Parser;
 
-use nix_capsule::ctl::config::Cmd;
+use nix_capsule::ctl::cli::Cli;
 use nix_capsule::ctl::run;
-
-/// Manage the project's container lifecycle
-#[derive(Parser)]
-#[command(version, about)]
-struct Cli {
-    #[command(subcommand)]
-    command: Cmd,
-}
 
 fn main() {
     let cli = Cli::parse();
