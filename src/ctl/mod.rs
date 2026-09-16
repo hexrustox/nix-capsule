@@ -137,7 +137,7 @@ async fn init(cfg: Config) -> Result<(), CtlError> {
     let project = &cfg.project;
     stamp::guard(cache_dir, project, root)?;
 
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     let socket = &cfg.socket;
     let live = rt.is_live(socket).await;
     let freshness = digest::check(cache_dir, root, &cfg.watch_files);
@@ -164,7 +164,7 @@ async fn start(cfg: Config) -> Result<(), CtlError> {
     let project = &cfg.project;
     stamp::guard(cache_dir, project, root)?;
 
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     let socket = &cfg.socket;
     if rt.is_live(socket).await {
         return Ok(());
@@ -173,7 +173,7 @@ async fn start(cfg: Config) -> Result<(), CtlError> {
 }
 
 async fn stop(cfg: Config) -> Result<(), CtlError> {
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     if !rt.is_running().await {
         return Ok(());
     }
@@ -194,13 +194,13 @@ async fn stop(cfg: Config) -> Result<(), CtlError> {
 async fn restart(cfg: Config) -> Result<(), CtlError> {
     // Non-fatal stop, then init. Resolution is uniform, so the Restart cfg
     // already carries Init's fields — dispatch directly.
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     let _ = rt.stop().await;
     init(cfg).await
 }
 
 async fn status(cfg: Config) -> Result<(), CtlError> {
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     let running = rt.is_running().await;
 
     let socket_connectable = UnixStream::connect(&cfg.socket).await.is_ok();
@@ -227,7 +227,7 @@ async fn status(cfg: Config) -> Result<(), CtlError> {
 
 async fn enter(cfg: Config) -> Result<(), CtlError> {
     let cache_dir = &cfg.cache_dir;
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     if !rt.is_running().await {
         return Err(CtlError::NotRunning {
             container: cfg.container.clone(),
@@ -261,7 +261,7 @@ async fn log(cfg: Config) -> Result<(), CtlError> {
 }
 
 async fn clean(cfg: Config) -> Result<(), CtlError> {
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
     // Stop the container (best-effort, idempotent) then remove it.
     if rt.is_running().await {
         let _ = rt.stop().await;
@@ -378,7 +378,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     // runtime is ever invoked, naming the unset variable.
     let mount_args = build_runtime_args(cfg)?;
 
-    let rt = runtime::Runtime::new(cfg.runtime.clone(), cfg.container.clone(), cfg.bash.clone());
+    let rt = cfg.runtime();
 
     let server_args = runtime::ServerArgs {
         socket: socket.clone(),
@@ -444,14 +444,13 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     }))
 }
 
+/// The pager from `PAGER`, split into program and args for `Command`;
+/// `less -R` when `PAGER` is unset or names nothing.
 fn pager_command() -> (String, Vec<String>) {
     if let Ok(pager) = std::env::var("PAGER") {
-        let trimmed = pager.trim();
-        if !trimmed.is_empty() {
-            let parts: Vec<String> = trimmed.split_whitespace().map(|s| s.to_owned()).collect();
-            if !parts.is_empty() {
-                return (parts[0].clone(), parts[1..].to_vec());
-            }
+        let mut parts = pager.split_whitespace().map(str::to_owned);
+        if let Some(prog) = parts.next() {
+            return (prog, parts.collect());
         }
     }
     ("less".to_owned(), vec!["-R".to_owned()])
@@ -641,66 +640,85 @@ fn expand_with(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<S
     let mut out = String::new();
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '$' {
-            if matches!(chars.peek(), Some('{')) {
-                chars.next();
-                let mut name = String::new();
-                while let Some(&ch) = chars.peek() {
-                    if ch == '}' {
-                        break;
-                    }
-                    name.push(ch);
-                    chars.next();
-                }
-                let closed = chars.next();
-                if closed != Some('}') {
-                    // No closing brace — treat as literal.
-                    out.push_str(&format!("${{{name}"));
-                    if let Some(ch) = closed {
-                        out.push(ch);
-                    }
-                    continue;
-                }
-                if name.is_empty() {
-                    out.push_str("${}");
-                    continue;
-                }
-                // Only ${NAME} expands; anything else stays literal per the
-                // name regex (e.g. ${5}, ${foo-bar}).
-                if !is_env_name(&name) {
-                    out.push_str(&format!("${{{name}}}"));
-                    continue;
-                }
-                match lookup(&name) {
-                    Some(val) => out.push_str(&val),
-                    None => {
-                        return Err(CtlError::UnsetVar { name });
-                    }
-                }
-            } else if matches!(chars.peek(), Some(ch) if ch.is_ascii_alphabetic() || *ch == '_') {
-                let mut name = String::new();
-                while let Some(&ch) = chars.peek() {
-                    if ch.is_ascii_alphanumeric() || ch == '_' {
-                        name.push(ch);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                match lookup(&name) {
-                    Some(val) => out.push_str(&val),
-                    None => {
-                        return Err(CtlError::UnsetVar { name });
-                    }
-                }
-            } else {
-                out.push('$');
-            }
-        } else {
+        if c != '$' {
             out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            expand_braced(&mut chars, &mut out, lookup)?;
+        } else if matches!(chars.peek(), Some(ch) if ch.is_ascii_alphabetic() || *ch == '_') {
+            expand_unbraced(&mut chars, &mut out, lookup)?;
+        } else {
+            out.push('$');
         }
     }
     Ok(out)
+}
+
+/// Expand one `${...}` form: its `$` and `{` already consumed. A non-name
+/// body (`${5}`, `${foo-bar}`) stays literal per the name regex; a missing
+/// closing brace leaves the prefix literal.
+fn expand_braced(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    out: &mut String,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), CtlError> {
+    let mut name = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch == '}' {
+            break;
+        }
+        name.push(ch);
+        chars.next();
+    }
+    if chars.next().is_none() {
+        out.push_str("${");
+        out.push_str(&name);
+        return Ok(());
+    }
+    if name.is_empty() {
+        out.push_str("${}");
+        return Ok(());
+    }
+    if !is_env_name(&name) {
+        out.push_str("${");
+        out.push_str(&name);
+        out.push('}');
+        return Ok(());
+    }
+    match lookup(&name) {
+        Some(val) => {
+            out.push_str(&val);
+            Ok(())
+        }
+        None => Err(CtlError::UnsetVar { name }),
+    }
+}
+
+/// Expand one `$NAME` form: its `$` and first name char already consumed,
+/// so `NAME` is appended until a non-`[A-Za-z0-9_]` char.
+fn expand_unbraced(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    out: &mut String,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), CtlError> {
+    let mut name = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            name.push(ch);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    match lookup(&name) {
+        Some(val) => {
+            out.push_str(&val);
+            Ok(())
+        }
+        None => Err(CtlError::UnsetVar { name }),
+    }
 }
 
 fn is_env_name(name: &str) -> bool {

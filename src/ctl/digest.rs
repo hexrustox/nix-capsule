@@ -41,8 +41,8 @@ pub fn compute(root: &Path, entries: &[String]) -> io::Result<String> {
         hasher.write(b"\0");
         hasher.write(if exists { b"1" } else { b"0" });
         hasher.write(b"\0");
-        if let Some(contents) = contents {
-            io::copy(&mut { contents }, &mut HashWriter(&mut hasher))?;
+        if let Some(mut file) = contents {
+            io::copy(&mut file, &mut HashWriter(&mut hasher))?;
         }
     }
     Ok(format!("{:016x}", hasher.finish()))

@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::runtime::Runtime;
 use super::shell::shell_escape;
 use crate::ctl::paths;
 use crate::server::LogLevel;
@@ -73,6 +74,18 @@ pub(crate) struct Config {
     pub bash: PathBuf,
     /// Devshell attribute evaluated by `print-dev-env`.
     pub devshell: String,
+}
+
+impl Config {
+    /// A [`Runtime`] scoped to this config's container: the executable name,
+    /// container name, and bash path cloned from the config each call.
+    pub(crate) fn runtime(&self) -> Runtime {
+        Runtime::new(
+            self.runtime.clone(),
+            self.container.clone(),
+            self.bash.clone(),
+        )
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

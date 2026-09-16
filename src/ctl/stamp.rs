@@ -84,6 +84,9 @@ mod tests {
         let cache = tempfile::tempdir().expect("tempdir");
         guard(cache.path(), "proj", Path::new("/tmp/root-a")).expect("first guard");
         let err = guard(cache.path(), "proj", Path::new("/tmp/root-b")).expect_err("must error");
-        matches!(err, StampError::AlreadyClaimed { project, existing } if project == "proj" && existing == "/tmp/root-a");
+        assert!(matches!(
+            err,
+            StampError::AlreadyClaimed { project, existing } if project == "proj" && existing == "/tmp/root-a"
+        ));
     }
 }

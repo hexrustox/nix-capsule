@@ -137,7 +137,7 @@ impl Runtime {
     /// `extra_args` are the mounts and options assembled by the ctl
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
     /// Returns the container id on success, or the runtime's captured output
-    /// on failure, as a `RuntimeError::Failed`.
+    /// on failure, as a [`RuntimeError::RunFailed`].
     pub(crate) async fn run_detached(
         &self,
         image: &str,
