@@ -44,10 +44,10 @@
               ];
               wrappers = [
                 "cargo"
-                "codebook-lsp"
                 "rust-analyzer"
                 "nixd"
                 "taplo"
+                "typos"
               ];
               preShellHook = ''
                 export CARGO_HOME=''${CARGO_HOME:-$HOME/.cargo}
@@ -56,16 +56,6 @@
             };
             container = pkgs.mkShellNoCC {
               packages = with pkgs; [
-                cargo-deny
-                cargo-edit
-                cargo-machete
-                cargo-llvm-cov
-                clang
-                codebook
-                nixd
-                nixfmt
-                mold
-                taplo
                 (rust-bin.stable.${rustVersion}.default.override {
                   extensions = [
                     "rust-src"
@@ -73,6 +63,20 @@
                     "llvm-tools-preview"
                   ];
                 })
+                cargo-deny
+                cargo-edit
+                cargo-machete
+                cargo-llvm-cov
+                clang
+                mold
+
+                taplo
+
+                nixd
+                nixfmt
+
+                typos
+
                 skills
                 git
               ];
