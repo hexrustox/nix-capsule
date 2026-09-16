@@ -138,10 +138,6 @@
     },
     "root": {
       "inputs": {
-        "flake-parts": [
-          "nix-capsule",
-          "flake-parts"
-        ],
         "nix-capsule": "nix-capsule",
         "nixpkgs": [
           "nix-capsule",
