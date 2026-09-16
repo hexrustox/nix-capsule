@@ -38,6 +38,9 @@
               packages = with pkgs; [
                 cowsay
               ];
+              shellHook = ''
+                ${capsule-lib.devShellGuard}
+              '';
             };
           };
         };

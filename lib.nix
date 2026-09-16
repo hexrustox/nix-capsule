@@ -42,13 +42,7 @@ let
     if !builtins.isList v then
       mkErr opt "list of strings" (showReceived v)
     else
-      map (
-        e:
-        if builtins.isString e then
-          e
-        else
-          mkEntryErr opt "list of strings" (showReceived e)
-      ) v;
+      map (e: if builtins.isString e then e else mkEntryErr opt "list of strings" (showReceived e)) v;
 
   checkFieldString =
     opt: field: v:
@@ -86,7 +80,15 @@ let
           }
         else if builtins.isAttrs elem then
           let
-            extra = builtins.filter (k: !(builtins.elem k [ "name" "command" "env" "cwd" ])) (builtins.attrNames elem);
+            extra = builtins.filter (
+              k:
+              !(builtins.elem k [
+                "name"
+                "command"
+                "env"
+                "cwd"
+              ])
+            ) (builtins.attrNames elem);
             name =
               if extra != [ ] then
                 throw "option `${opt}`: unknown wrapper field `${builtins.head extra}`"
@@ -104,7 +106,12 @@ let
                 mkFieldErr opt "cwd" "null or a string" (showReceived cwdRaw);
           in
           builtins.deepSeq [ name command env cwd ] {
-            inherit name command env cwd;
+            inherit
+              name
+              command
+              env
+              cwd
+              ;
           }
         else
           mkErr opt "a string or attrset" (showReceived elem)
@@ -218,9 +225,11 @@ in
 
       # ---- shellHook construction ---------------------------------------------
       # Order: preHook → export NCAP_PROJECT_ROOT → setup-env → guarded watch_file per entry → init when autoStart → postHook
-      watchFileLines = lib.optionalString (checked.watchFiles != [ ]) "command -v watch_file >/dev/null && watch_file ${
-        lib.concatMapStringsSep " " lib.escapeShellArg checked.watchFiles
-      }";
+      watchFileLines =
+        lib.optionalString (checked.watchFiles != [ ])
+          "command -v watch_file >/dev/null && watch_file ${
+            lib.concatMapStringsSep " " lib.escapeShellArg checked.watchFiles
+          }";
 
       # The setup-env call must not abort shell entry on failure; wrap with warning.
       setupEnvHook = ''
@@ -275,4 +284,11 @@ in
         shellHook = shellHookFragments;
       }
     );
+
+  devShellGuard = ''
+    if [ ! -f /.dockerenv ] && [ ! -f /run/.containerenv ]; then
+      echo "nix-capsule: this devshell must be entered inside a container (neither /.dockerenv nor /run/.containerenv exists)" >&2
+      exit 1
+    fi
+  '';
 }
