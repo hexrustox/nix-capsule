@@ -52,7 +52,8 @@ pub(crate) struct Config {
     pub cache_dir: PathBuf,
     /// Log dir holding per-run `ncap-server-*.log` files.
     pub log_dir: PathBuf,
-    /// OCI runtime binary (`podman` or `docker`).
+    /// OCI runtime binary (`podman`, `docker`; `auto` is resolved at
+    /// config time and never stored here).
     pub runtime: String,
     /// Seconds to wait for liveness before reporting not-live.
     pub timeout: u64,
@@ -110,8 +111,10 @@ pub(crate) enum ConfigError {
     NotRelativeWatchFile { entry: String },
     #[error("`NCAP_WATCH_FILES` entry `{entry}` is not a file")]
     WatchFileNotFile { entry: String },
-    #[error("`NCAP_RUNTIME` must be `podman` or `docker`, got `{value}`")]
+    #[error("`NCAP_RUNTIME` must be `podman`, `docker`, or `auto`, got `{value}`")]
     BadRuntime { value: String },
+    #[error("`NCAP_RUNTIME` is `auto` but neither `podman` nor `docker` is in `PATH`")]
+    NoRuntime,
     #[error("`NCAP_HARDEN` must be `true` or `false`, got `{value}`")]
     BadHarden { value: String },
     #[error("`NCAP_LOG_LEVEL` must be `debug`, `info`, `warning`, or `error`, got `{value}`")]
@@ -129,7 +132,7 @@ pub(crate) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config,
     // the var). JSON-array vars consumed by ctl and harden are validated and
     // demanded on every command (missing or malformed => error naming the
     // var); `NCAP_ENV_FORWARD` is validated by the Client only.
-    let runtime = parse_runtime(lookup)?;
+    let runtime = parse_runtime(lookup, &detect_in_path)?;
     let timeout = parse_timeout(lookup)?;
     // Eagerly validate the JSON-array vars and harden on every command so
     // malformed values error even where a command does not consume them.
@@ -261,13 +264,50 @@ fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), ConfigErr
     Ok(())
 }
 
-fn parse_runtime(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
+fn parse_runtime(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    in_path: &dyn Fn(&str) -> bool,
+) -> Result<String, ConfigError> {
     let raw = demand(lookup, "NCAP_RUNTIME")?;
-    if raw == "podman" || raw == "docker" {
-        Ok(raw)
-    } else {
-        Err(ConfigError::BadRuntime { value: raw })
+    match raw.as_str() {
+        "podman" | "docker" => Ok(raw),
+        "auto" => {
+            if in_path("podman") {
+                Ok("podman".to_owned())
+            } else if in_path("docker") {
+                Ok("docker".to_owned())
+            } else {
+                Err(ConfigError::NoRuntime)
+            }
+        }
+        _ => Err(ConfigError::BadRuntime { value: raw }),
     }
+}
+
+/// Whether `name` is an executable file in a `PATH` directory — the
+/// detection `auto` resolution rides on. PATH existence only: no probe
+/// that the binary actually runs, and no caching across invocations.
+fn detect_in_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file() && is_executable(&candidate)
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.exists()
 }
 
 fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>) -> Result<u64, ConfigError> {
@@ -381,6 +421,17 @@ mod tests {
         })
     }
 
+    /// A detector that rejects every name: the empty-PATH world.
+    fn reject_all(name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// A detector that reports the given names as present in `PATH`.
+    fn in_path_detector<'a>(names: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
+        move |name: &str| names.contains(&name)
+    }
+
     #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_HARDEN" }) ; "unset_is_missing")]
     #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_missing")]
     #[test_case(Some("true") => matches Ok(true) ; "true_sets_harden")]
@@ -409,7 +460,38 @@ mod tests {
     #[test_case(Some("docker") => matches Ok(value) if value == "docker" ; "docker_is_valid")]
     #[test_case(Some("hello-docker") => matches Err(ConfigError::BadRuntime { value }) if value == "hello-docker" ; "substring_is_not_enough")]
     fn runtime_is_exact(raw: Option<&str>) -> Result<String, ConfigError> {
-        parse_runtime(&single("NCAP_RUNTIME", raw))
+        parse_runtime(&single("NCAP_RUNTIME", raw), &reject_all)
+    }
+
+    #[test_case(&["podman", "docker"] => matches Ok(value) if value == "podman" ; "podman_is_preferred")]
+    #[test_case(&["docker"] => matches Ok(value) if value == "docker" ; "docker_is_the_fallback")]
+    #[test_case(&[] => matches Err(ConfigError::NoRuntime) ; "neither_found_is_an_error")]
+    fn auto_resolves_via_path_detector(in_path: &[&str]) -> Result<String, ConfigError> {
+        parse_runtime(
+            &single("NCAP_RUNTIME", Some("auto")),
+            &in_path_detector(in_path),
+        )
+    }
+
+    #[test_case("podman", &["podman", "docker"] => matches Ok(value) if value == "podman" ; "explicit_podman_survives_detection")]
+    #[test_case("docker", &["podman", "docker"] => matches Ok(value) if value == "docker" ; "explicit_docker_survives_detection")]
+    #[test_case("podman", &[] => matches Ok(value) if value == "podman" ; "explicit_value_skips_detection")]
+    fn explicit_runtime_bypasses_detection(
+        raw: &str,
+        in_path: &[&str],
+    ) -> Result<String, ConfigError> {
+        parse_runtime(
+            &single("NCAP_RUNTIME", Some(raw)),
+            &in_path_detector(in_path),
+        )
+    }
+
+    #[test_case(&["podman", "docker"] => matches Err(ConfigError::BadRuntime { value }) if value == "hello-docker" ; "substring_stays_invalid_under_detection")]
+    fn value_rules_stay_exact_under_detection(in_path: &[&str]) -> Result<String, ConfigError> {
+        parse_runtime(
+            &single("NCAP_RUNTIME", Some("hello-docker")),
+            &in_path_detector(in_path),
+        )
     }
 
     #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_LOG_LEVEL" }) ; "missing_is_named")]

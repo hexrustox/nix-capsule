@@ -604,7 +604,8 @@ fn missing_runtime_fails_naming_runtime_var() {
     fs::create_dir_all(&bin_dir).expect("bin dir");
 
     // No NCAP_RUNTIME → error naming it per the contract.
-    // Prepend bin_dir to PATH so `podman` would resolve if defaulted.
+    // Prepend bin_dir to PATH so `auto` would resolve if a default ever
+    // shipped a stub there.
     let fx = fx.with_path_prepend(&bin_dir);
     let out = fx.stop();
     assert!(!out.status.success());
@@ -618,6 +619,95 @@ fn invalid_runtime_fails_naming_runtime_var() {
     let out = fx.stop();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
+}
+
+#[test]
+fn auto_runtime_resolves_podman_from_path() {
+    // `auto` with an executable `podman` in a PATH dir: start succeeds,
+    // proving the adapter resolved `podman` (resolution is the only
+    // difference from the neither-found failure path).
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
+        .with_env("NCAP_RUNTIME", "auto")
+        .with_runtime_discoverable("podman");
+    let out = fx.start();
+    assert!(
+        out.status.success(),
+        "auto must resolve podman: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fx.launches().runs() >= 1,
+        "resolved runtime must have launched: {}",
+        fx.runtime_log()
+    );
+}
+
+#[test]
+fn auto_runtime_falls_back_to_docker() {
+    // `auto` with only `docker` on PATH: start succeeds via docker.
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
+        .with_env("NCAP_RUNTIME", "auto")
+        .with_runtime_discoverable("docker");
+    let out = fx.start();
+    assert!(
+        out.status.success(),
+        "auto must fall back to docker: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fx.launches().runs() >= 1,
+        "resolved runtime must have launched: {}",
+        fx.runtime_log()
+    );
+}
+
+#[test]
+fn auto_runtime_without_either_fails_naming_runtime_var() {
+    // `auto` with neither runtime on PATH (PATH is a runtime-free dir):
+    // the error names `NCAP_RUNTIME` and carries the install advice as a
+    // sibling line.
+    let dir = runtime_free_path_dir();
+    let fx = fixture::Fixture::new(fixture::Config::default())
+        .with_env("NCAP_RUNTIME", "auto")
+        .with_env("PATH", &dir);
+    let out = fx.status();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`NCAP_RUNTIME` is `auto` but neither `podman` nor `docker` is in `PATH`"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("install `podman` or `docker`"),
+        "advice line must ride as its own line: {stderr}"
+    );
+}
+
+/// A runtime-free dir to pin `PATH` to: `auto` resolution then depends
+/// only on the stub world, not the ambient machine.
+fn runtime_free_path_dir() -> String {
+    let dir = std::env::temp_dir().join(format!("ncap-test-empty-path-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("runtime-free path dir");
+    dir.to_string_lossy().into_owned()
+}
+
+#[test]
+fn auto_runtime_status_fails_instead_of_reporting_not_running() {
+    // User story 6: under `auto` + no runtime, even `status` is a hard
+    // config error, never the silent "container is not running" report.
+    let dir = runtime_free_path_dir();
+    let fx = fixture::Fixture::new(fixture::Config::default())
+        .with_env("NCAP_RUNTIME", "auto")
+        .with_env("PATH", &dir);
+    let out = fx.status();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("not running"),
+        "status must not fall through to the not-running report: {stderr}"
+    );
     assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
 }
 

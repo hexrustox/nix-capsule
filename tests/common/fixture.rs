@@ -579,6 +579,26 @@ impl Fixture {
         self
     }
 
+    /// Make the fake Runtime adapter discoverable as `name` (`podman` or
+    /// `docker`) for `NCAP_RUNTIME=auto`: a stub dir holds symlinks to the
+    /// adapter and to the `bash`/`cat` binaries it needs, and `PATH` is set
+    /// to exactly that dir — deterministic regardless of the ambient
+    /// machine (which may carry a real runtime somewhere on `PATH`).
+    pub fn with_runtime_discoverable(self, name: &str) -> Self {
+        let bin = self.tmp_path().join("discover");
+        fs::create_dir_all(&bin).expect("discover dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&self.runtime_bin(), bin.join(name))
+            .expect("symlink fake runtime");
+        for tool in ["bash", "cat"] {
+            if let Some(found) = which(tool) {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(found, bin.join(tool)).expect(tool);
+            }
+        }
+        self.with_env("PATH", &bin.to_string_lossy())
+    }
+
     /// Borrowed views of fixture paths for building launch expectations.
     /// Tests state what they expect; the layout itself stays inside.
     pub fn project_root(&self) -> &Path {
@@ -912,6 +932,23 @@ impl Fixture {
     pub fn tmp_path(&self) -> PathBuf {
         self._tmp.path().to_path_buf()
     }
+
+    /// The fake Runtime adapter binary backing this fixture.
+    fn runtime_bin(&self) -> PathBuf {
+        self._tmp.path().join("fake-runtime")
+    }
+}
+
+/// First `PATH` hit for a bare executable name, for stub-dir assembly.
+/// Executability is deliberately not checked here: the callers only need
+/// to locate real tool binaries to symlink — production `auto` detection
+/// (src/ctl/config.rs `detect_in_path`) is the executable-file check.
+fn which(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|p| p.is_file())
+    })
 }
 
 fn fake_nix(path: &Path, nix_log: &Path, env_content: &str) {

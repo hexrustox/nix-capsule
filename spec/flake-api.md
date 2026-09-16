@@ -91,7 +91,7 @@ flake side makes no guarantee about the derived value.
 | `logLevel` | string | `"warning"` | Sets `NCAP_LOG_LEVEL`. |
 | `preShellHook` / `postShellHook` | strings | `""` | Extra shellHook fragments, run before/after the capsule fragments. |
 | `autoStart` | bool | `true` | Run `ncap-ctl init` from the shellHook. |
-| `runtime` | string | `"podman"` | Sets `NCAP_RUNTIME`. |
+| `runtime` | string | `"auto"` | Sets `NCAP_RUNTIME`. |
 
 ### Type checks
 

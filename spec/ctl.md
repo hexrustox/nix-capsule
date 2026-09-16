@@ -106,8 +106,15 @@ hardening stays opt-in.
 
 ## Runtime adapter
 
-`NCAP_RUNTIME` names the OCI runtime: `podman` or `docker`
-(any other value ⇒ error naming `NCAP_RUNTIME`).
+`NCAP_RUNTIME` names the OCI runtime: `podman`, `docker`, or `auto`
+(any other value ⇒ error naming `NCAP_RUNTIME`). `auto` resolves at
+config time, before any flow runs on Host or Container side: `podman`
+is picked when an executable `podman` exists in a `PATH` directory,
+else `docker`, else an error naming `NCAP_RUNTIME`.
+The check is PATH existence only — no probe that
+the binary runs. Resolution fires on every command, `status`
+included. `auto` resolves to the concrete name; all downstream
+behavior treats `auto` exactly as the resolved value.
 Both runtimes speak the same argument surface; state probes
 use Go-template `inspect` (`State.Running`, the JSON `State` for failure
 reports). Rootless operation is the assumption.

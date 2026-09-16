@@ -156,7 +156,7 @@ let
     preShellHook = "";
     postShellHook = "";
     autoStart = true;
-    runtime = "podman";
+    runtime = "auto";
   };
 in
 {

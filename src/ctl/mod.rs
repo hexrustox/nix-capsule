@@ -117,6 +117,9 @@ fn fail(err: CtlError) -> Option<String> {
         | CtlError::Stamp(StampError::AlreadyClaimed { .. }) => {
             Some("set `project` to a value mapping to a unique root")
         }
+        CtlError::Config(ConfigError::NoRuntime) => {
+            Some("install `podman` or `docker`, or set `NCAP_RUNTIME` to an installed runtime")
+        }
         _ => None,
     } {
         format!("{message}\n{advice}")
