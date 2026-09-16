@@ -17,13 +17,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
       - name: Build for ${{ matrix.system }}
-        run: |
-          nix build ".#packages.${{ matrix.system }}.default" \
-            --no-link --print-out-paths > store-path
-          mkdir -p releases
-          tar czf "releases/${{ matrix.system }}.tar.gz" \
-            -C "$(cat store-path)" bin share
-          rm store-path
+        run: scripts/build-release-tarball ${{ matrix.system }}
       - name: Release
         uses: softprops/action-gh-release@v3
         if: github.ref_type == 'tag'

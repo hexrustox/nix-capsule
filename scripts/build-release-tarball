@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Build a byte-reproducible release tarball for one system.
+#
+# Usage: build-release-tarball <system>
+# Flags pin every byte: sorted entries, epoch-zero mtimes, root owner,
+# and gzip -n (no timestamp/name in the header). Run locally before a
+# release to compute the hash that matches the CI upload.
+set -euo pipefail
+
+[[ $# -eq 1 ]] || {
+  echo "usage: $0 <system>" >&2
+  exit 2
+}
+
+system=$1
+
+nix build ".#packages.${system}.default" \
+  --no-link --print-out-paths > store-path
+mkdir -p releases
+tar c \
+  --sort=name \
+  --mtime='@0' \
+  --owner=0 --group=0 --numeric-owner \
+  --format=gnu \
+  -C "$(cat store-path)" bin share \
+  | gzip -n > "releases/${system}.tar.gz"
+rm store-path
+
+nix hash file --sri --type sha256 "releases/${system}.tar.gz"
+
