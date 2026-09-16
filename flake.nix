@@ -108,6 +108,7 @@
                     "llvm-tools-preview"
                   ];
                 })
+                skills
                 git
               ];
             };
