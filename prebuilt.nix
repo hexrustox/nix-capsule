@@ -9,7 +9,7 @@ let
   system = "x86_64-linux";
   cargoToml = fromTOML (builtins.readFile ./Cargo.toml);
   version = cargoToml.package.version;
-  hash = "";
+  hash = "sha256-fVFx5b7F8SJUI54VXbLNzneP5pPi5ZTLLNih5TI+PZ4=";
 in
 stdenv.mkDerivation {
   inherit version;
