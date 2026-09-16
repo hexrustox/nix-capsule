@@ -20,5 +20,6 @@ pub mod probe;
 pub mod script;
 pub mod server;
 
-pub use client::{Client, ClientOutput, ClientProc, WAIT_LIMIT, bin_path, wait_bounded};
+pub use client::{Client, ClientOutput, ClientProc, bin_path, wait_bounded};
+pub use probe::{WAIT_PHASE, WAIT_ROOMY, WAIT_TIGHT};
 pub use server::{Server, ServerBuilder, missing_socket};

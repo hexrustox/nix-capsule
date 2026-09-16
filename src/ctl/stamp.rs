@@ -18,7 +18,11 @@ pub(crate) enum StampError {
 
 /// Read `<cache>/project`; absent means "first claim" and is written, a
 /// different root is a hard error, the same root passes silently.
-pub(crate) fn guard(cache_dir: &Path, project: &str, current_root: &Path) -> Result<(), StampError> {
+pub(crate) fn guard(
+    cache_dir: &Path,
+    project: &str,
+    current_root: &Path,
+) -> Result<(), StampError> {
     let stamp = project_stamp_file(cache_dir);
     match fs::read_to_string(&stamp) {
         Ok(existing) => {

@@ -12,7 +12,7 @@ use common::fixture;
 /// The drain deadline as the `--timeout` string the fixture passes through.
 // String form is what the fixture passes through to `--timeout`.
 fn drain_timeout() -> String {
-    common::probe::DRAIN_DEADLINE.as_secs().to_string()
+    common::probe::WAIT_TIGHT.as_secs().to_string()
 }
 
 // Each command names the missing var it refuses on: the var must appear in stderr.

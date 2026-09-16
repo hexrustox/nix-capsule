@@ -11,7 +11,7 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{FrameCodec, Message, Request};
 use tempfile::TempDir;
-use tokio::net::UnixStream;
+use tokio::{net::UnixStream, time::timeout};
 use tokio_util::codec::Framed;
 
 /// What a running [`Server`] holds: a real binary child or a scripted task.
@@ -125,7 +125,7 @@ impl Server {
         };
         Some(super::client::wait_bounded(
             child,
-            super::client::WAIT_LIMIT,
+            super::probe::WAIT_PHASE,
             "server",
         ))
     }
@@ -230,6 +230,19 @@ impl ServerBuilder {
                             .await
                             .expect("send frame");
                     }
+                    // Drain the client's trailing frames before dropping:
+                    // the real `ncap` sends one empty `Stdin` EOF frame
+                    // right after its `Request`, and a close with that
+                    // frame unread turns the clean FIN into an RST — the
+                    // client exits `1` on the transport error instead of
+                    // the `143` these stand-ins exist to produce. The
+                    // expected EOF frame is the client's last word here
+                    // (absent relayed signals), so one read suffices; the
+                    // timeout is load-bearing in case it never arrives,
+                    // since the client keeps its write half open for the
+                    // signal relay.
+                    let _ = timeout(super::probe::WAIT_PHASE, framed.next()).await;
+                    let _ = framed.close().await;
                 });
                 ServerProc::Fake(task)
             }

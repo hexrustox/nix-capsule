@@ -16,9 +16,9 @@ use tokio::io::AsyncWriteExt;
 use common::{
     Server,
     probe::{
-        DISCONNECT_TERM_LIMIT, GRACE_LIMIT, REAP_LIMIT, Raw, SHELL_TICK, assert_clean_exit,
-        poll_until, read_until_terminal, request_and_vanish, second_connection_succeeds,
-        send_request, stdout_of, wait_for_marker, zombies_under,
+        Raw, SHELL_TICK, WAIT_PHASE, WAIT_ROOMY, WAIT_TIGHT, assert_clean_exit, poll_until,
+        read_until_terminal, request_and_vanish, second_connection_succeeds, send_request,
+        stdout_of, wait_for_marker, zombies_under,
     },
     script::{group_trap_script, trapping_ticker_script},
 };
@@ -30,8 +30,8 @@ async fn full_close_terms_group_and_next_connection_succeeds() {
     request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
 
     assert!(
-        wait_for_marker(&marker, "gone", DISCONNECT_TERM_LIMIT).await,
-        "the group outlived {DISCONNECT_TERM_LIMIT:?} after the client vanished"
+        wait_for_marker(&marker, "gone", WAIT_TIGHT).await,
+        "the group outlived {WAIT_TIGHT:?} after the client vanished"
     );
 
     second_connection_succeeds(
@@ -53,8 +53,8 @@ async fn disconnect_terms_whole_group_including_grandchild() {
     let script = group_trap_script(&marker);
     request_and_vanish(&server, &script, "READY").await;
 
-    let child_gone = wait_for_marker(&marker, "child-gone", DISCONNECT_TERM_LIMIT).await;
-    let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", DISCONNECT_TERM_LIMIT).await;
+    let child_gone = wait_for_marker(&marker, "child-gone", WAIT_TIGHT).await;
+    let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", WAIT_TIGHT).await;
     let recorded = fs::read_to_string(&marker).unwrap_or_default();
     server.stop();
 
@@ -72,12 +72,12 @@ async fn disconnect_termed_child_is_reaped_leaving_no_zombie() {
     request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
 
     assert!(
-        wait_for_marker(&marker, "gone", DISCONNECT_TERM_LIMIT).await,
-        "the group outlived {DISCONNECT_TERM_LIMIT:?} after the client vanished"
+        wait_for_marker(&marker, "gone", WAIT_TIGHT).await,
+        "the group outlived {WAIT_TIGHT:?} after the client vanished"
     );
 
     let server_pid = server.pid().expect("real server has a pid");
-    let reaped = poll_until(REAP_LIMIT, || zombies_under(server_pid).is_empty()).await;
+    let reaped = poll_until(WAIT_ROOMY, || zombies_under(server_pid).is_empty()).await;
     let left_behind = zombies_under(server_pid);
     server.stop();
 
@@ -158,7 +158,7 @@ async fn term_trapping_child_holds_only_own_connection_and_others_keep_working()
     request_and_vanish(&server, &script, "A-READY").await;
 
     assert!(
-        wait_for_marker(&marker, "trapped", DISCONNECT_TERM_LIMIT).await,
+        wait_for_marker(&marker, "trapped", WAIT_TIGHT).await,
         "the child never received (or never survived) the disconnect TERM"
     );
 
@@ -175,7 +175,7 @@ async fn term_trapping_child_holds_only_own_connection_and_others_keep_working()
     // escalated to SIGKILL: the grace after the TERM is the child's. The
     // wait and read precede `server.stop()`, whose teardown takes the
     // tempdir — marker included — with it.
-    let full_grace = wait_for_marker(&marker, "alive-5", GRACE_LIMIT).await;
+    let full_grace = wait_for_marker(&marker, "alive-5", WAIT_PHASE).await;
     let recorded = fs::read_to_string(&marker).unwrap_or_default();
     server.stop();
 

@@ -404,9 +404,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
 
     match run_result {
         Ok(_) => {}
-        Err(RuntimeError::RunFailed { output, .. })
-            if runtime::is_name_in_use(&output) =>
-        {
+        Err(RuntimeError::RunFailed { output, .. }) if runtime::is_name_in_use(&output) => {
             // Concurrent-start race: re-inspect.
             if rt.is_running().await {
                 return Ok(());

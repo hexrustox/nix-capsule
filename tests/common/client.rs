@@ -10,9 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Upper bound on one client-wait phase; a red run fails on the assertion,
-/// never on the harness itself.
-pub const WAIT_LIMIT: Duration = Duration::from_secs(30);
+use super::probe::WAIT_PHASE;
 
 /// One Client per test: drives the real `ncap` binary against a Server socket,
 /// one command per connection, streaming stdio back as a [`ClientOutput`].
@@ -154,7 +152,7 @@ impl ClientProc {
     /// Wait for the client to exit and collect its output. Bounded: a client
     /// that never exits is killed and the test fails with a named panic.
     pub fn wait(self) -> ClientOutput {
-        self.wait_within(WAIT_LIMIT, "client")
+        self.wait_within(WAIT_PHASE, "client")
     }
 }
 

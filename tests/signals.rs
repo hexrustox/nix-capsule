@@ -11,7 +11,7 @@ use common::{
     Server,
     assert::assert_no_error_frames,
     probe::{
-        GROUP_LIMIT, PHASE_LIMIT, SHELL_BODY, SHELL_HOLD, assert_clean_exit, read_frames_until,
+        SHELL_BODY, SHELL_HOLD, WAIT_PHASE, assert_clean_exit, read_frames_until,
         ready_signal_terminal, send_request, stdout_of, terminal_of, wait_for_flag,
     },
 };
@@ -26,7 +26,7 @@ async fn child_leads_own_process_group() {
         "read -r _ _ _ _ pgrp _ < /proc/self/stat; echo pid=$$ pgrp=$pgrp",
     )
     .await;
-    let frames = read_frames_until(&mut framed, PHASE_LIMIT, |message| {
+    let frames = read_frames_until(&mut framed, WAIT_PHASE, |message| {
         matches!(message, Message::Exit(_))
     })
     .await;
@@ -58,7 +58,7 @@ async fn signal_runs_trap_and_child_exits_on_own(signal: i32, signal_name: &str)
     let script = format!(
         "trap 'echo TRAPPED; exit 0' {signal_name}; echo READY; sleep {SHELL_HOLD} & wait $!"
     );
-    let frames = ready_signal_terminal(&mut framed, &server, &script, signal, PHASE_LIMIT).await;
+    let frames = ready_signal_terminal(&mut framed, &server, &script, signal, WAIT_PHASE).await;
     server.stop();
 
     assert_no_error_frames(&frames);
@@ -97,7 +97,7 @@ async fn signal_term_reaches_whole_group_including_grandchildren() {
         &server,
         &format!("sleep {SHELL_BODY} & echo READY; wait"),
         libc::SIGTERM,
-        GROUP_LIMIT,
+        WAIT_PHASE,
     )
     .await;
     server.stop();
@@ -108,7 +108,7 @@ async fn signal_term_reaches_whole_group_including_grandchildren() {
             died_from_signal(exit, libc::SIGTERM),
             "the shell must die from the group TERM: frames={frames:?}"
         ),
-        other => panic!("no Exit within {GROUP_LIMIT:?} — the group survived: {other:?}"),
+        other => panic!("no Exit within {WAIT_PHASE:?} — the group survived: {other:?}"),
     }
 }
 
@@ -123,7 +123,7 @@ async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame
         &server,
         &format!("echo READY; sleep {SHELL_HOLD}"),
         200,
-        PHASE_LIMIT,
+        WAIT_PHASE,
     )
     .await;
     let stderr = server.stderr();

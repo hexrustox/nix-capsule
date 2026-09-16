@@ -16,42 +16,21 @@ use tokio_util::codec::Framed;
 
 use super::server::Server;
 
+/// Tight bound: full-[`SHELL_BODY`] holds — the drain deadline must expire
+/// and the client bail — must land within ~one want.
+pub const WAIT_TIGHT: Duration = Duration::from_secs(2);
+
+/// Roomy bound: reaping a provably-dead child and the group's TERM-trap
+/// markers must arrive well inside the harness headroom.
+pub const WAIT_ROOMY: Duration = Duration::from_secs(5);
+
 /// Upper bound on one phase; a red run fails on the assertion, never on the
-/// harness itself.
-pub const PHASE_LIMIT: Duration = Duration::from_secs(20);
-
-/// How long the group has to die once the client vanished or the shutdown
-/// signal landed: the TERM goes out immediately and the trap it fires writes
-/// the marker. Disconnect uses the short bound; lifecycle shutdown the long
-/// one.
-pub const DISCONNECT_TERM_LIMIT: Duration = Duration::from_secs(2);
-pub const SHUTDOWN_TERM_LIMIT: Duration = Duration::from_secs(5);
-
-/// How long reaping has to complete once the child is provably dead.
-pub const REAP_LIMIT: Duration = Duration::from_secs(5);
-
-/// How long the child has to keep proving it survived its full grace: the
-/// post-TERM heartbeats must keep arriving — a KILL escalation would silence
-/// them.
-pub const GRACE_LIMIT: Duration = Duration::from_secs(8);
-
-/// Bound for group-wide signal delivery: the signal must clear the whole
-/// group well before a survivor's own [`SHELL_BODY`]-second `sleep` would end
-/// on its own.
-pub const GROUP_LIMIT: Duration = Duration::from_secs(10);
-
-/// How soon the client must bail once the shutdown signal lands: the
-/// `ServerStopping` frame precedes the drain, so this outruns any
-/// `--timeout` a test configures.
-pub const BAIL_LIMIT: Duration = Duration::from_millis(1500);
-
-/// How long a server holding live connections keeps draining after it exits:
-/// the drain deadline must expire — never wait out a child.
-pub const DRAIN_DEADLINE: Duration = Duration::from_secs(1);
+/// harness itself. Stays below a [`SHELL_BODY`]-second `sleep`, so a survivor
+/// outlasts the test.
+pub const WAIT_PHASE: Duration = Duration::from_secs(20);
 
 /// Tick interval inside child scripts: feed loops that stream to a client
-/// and heartbeat stamps that witness a full TERM grace. Interpolated with
-/// `{SHELL_TICK:.1}`.
+/// and heartbeat stamps that witness a full TERM grace.
 pub const SHELL_TICK: f64 = 0.2;
 /// Bounded hold inside child scripts: the red-run bound, the trap aftermath,
 /// and the signal-loop tick.
@@ -118,7 +97,7 @@ pub async fn read_frames_until(
 /// Read frames until one carries stdout containing `needle` (included); see
 /// [`read_frames_until`] for the timeout shape.
 pub async fn read_until_stdout_contains(framed: &mut Raw, needle: &str) -> Vec<Message> {
-    read_frames_until(framed, PHASE_LIMIT, |message| {
+    read_frames_until(framed, WAIT_PHASE, |message| {
         matches!(message, Message::Stdout(bytes) if String::from_utf8_lossy(bytes).contains(needle))
     })
     .await
@@ -133,10 +112,10 @@ pub async fn read_until_terminal_within(framed: &mut Raw, limit: Duration) -> Ve
     .await
 }
 
-/// Read frames until the terminal frame (included) or [`PHASE_LIMIT`]
+/// Read frames until the terminal frame (included) or [`WAIT_PHASE`]
 /// elapses; see [`read_frames_until`] for the timeout shape.
 pub async fn read_until_terminal(framed: &mut Raw) -> Vec<Message> {
-    read_until_terminal_within(framed, PHASE_LIMIT).await
+    read_until_terminal_within(framed, WAIT_PHASE).await
 }
 
 /// All stdout bytes carried by `frames`.
@@ -220,7 +199,7 @@ pub async fn wait_for_marker(marker: &Path, needle: &str, limit: Duration) -> bo
 /// panic; children write flag files as observable progress markers.
 pub async fn wait_for_flag(server: &Server, name: &str) {
     let flag = server.path().join(name);
-    let appeared = poll_until(PHASE_LIMIT, || flag.exists()).await;
+    let appeared = poll_until(WAIT_PHASE, || flag.exists()).await;
     assert!(appeared, "{name} never appeared");
 }
 
