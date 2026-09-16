@@ -6,7 +6,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-parts.url = "github:hercules-ci/flake-parts";
-    nix-capsule.url = "gitlab:codnixus/nix-capsule?ref=v0.8.0";
+    nix-capsule.url = "github:hexrustox/nix-capsule?ref=v0.9.0";
   };
 
   outputs =
@@ -58,7 +58,6 @@
           capsule-lib = inputs.nix-capsule.lib { inherit pkgs; };
         in
         {
-          apps.default = capsule-lib.app;
           packages =
             let
               pkgs = import inputs.nixpkgs {
@@ -85,10 +84,6 @@
 
           devShells = {
             default = capsule-lib.mkShell {
-              socketPath = "/tmp/nix-capsule/ncap-socket";
-              containerName = "nix-capsule";
-              image = "alpine:latest";
-              devShell = "container";
               extraOptions = [
                 "-e"
                 "NIX_PATH"
