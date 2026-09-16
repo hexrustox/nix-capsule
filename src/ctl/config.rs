@@ -297,17 +297,11 @@ fn detect_in_path(name: &str) -> bool {
     })
 }
 
-#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|meta| meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.exists()
 }
 
 fn parse_timeout(lookup: &dyn Fn(&str) -> Option<String>) -> Result<u64, ConfigError> {
@@ -476,20 +470,13 @@ mod tests {
     #[test_case("podman", &["podman", "docker"] => matches Ok(value) if value == "podman" ; "explicit_podman_survives_detection")]
     #[test_case("docker", &["podman", "docker"] => matches Ok(value) if value == "docker" ; "explicit_docker_survives_detection")]
     #[test_case("podman", &[] => matches Ok(value) if value == "podman" ; "explicit_value_skips_detection")]
+    #[test_case("hello-docker", &["podman", "docker"] => matches Err(ConfigError::BadRuntime { value }) if value == "hello-docker" ; "substring_stays_invalid_under_detection")]
     fn explicit_runtime_bypasses_detection(
         raw: &str,
         in_path: &[&str],
     ) -> Result<String, ConfigError> {
         parse_runtime(
             &single("NCAP_RUNTIME", Some(raw)),
-            &in_path_detector(in_path),
-        )
-    }
-
-    #[test_case(&["podman", "docker"] => matches Err(ConfigError::BadRuntime { value }) if value == "hello-docker" ; "substring_stays_invalid_under_detection")]
-    fn value_rules_stay_exact_under_detection(in_path: &[&str]) -> Result<String, ConfigError> {
-        parse_runtime(
-            &single("NCAP_RUNTIME", Some("hello-docker")),
             &in_path_detector(in_path),
         )
     }

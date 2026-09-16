@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{self, fs::PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -84,8 +84,7 @@ fn shim_runtime_env(env: &mut HashMap<String, String>) {
     };
     let shim = parent.join("podman");
     if !shim.exists() {
-        #[cfg(unix)]
-        let _ = std::os::unix::fs::symlink(&rt_path, &shim);
+        let _ = unix::fs::symlink(&rt_path, &shim);
         if !shim.exists() {
             let _ = fs::copy(&rt_path, &shim);
         }
@@ -587,16 +586,9 @@ impl Fixture {
     pub fn with_runtime_discoverable(self, name: &str) -> Self {
         let bin = self.tmp_path().join("discover");
         fs::create_dir_all(&bin).expect("discover dir");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&self.runtime_bin(), bin.join(name))
-            .expect("symlink fake runtime");
-        for tool in ["bash", "cat"] {
-            if let Some(found) = which(tool) {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(found, bin.join(tool)).expect(tool);
-            }
-        }
-        self.with_env("PATH", &bin.to_string_lossy())
+        let runtime = self.tmp_path().join("fake-runtime");
+        unix::fs::symlink(&runtime, bin.join(name)).expect("symlink fake runtime");
+        self.with_path_prepend(&bin)
     }
 
     /// Borrowed views of fixture paths for building launch expectations.
@@ -932,23 +924,6 @@ impl Fixture {
     pub fn tmp_path(&self) -> PathBuf {
         self._tmp.path().to_path_buf()
     }
-
-    /// The fake Runtime adapter binary backing this fixture.
-    fn runtime_bin(&self) -> PathBuf {
-        self._tmp.path().join("fake-runtime")
-    }
-}
-
-/// First `PATH` hit for a bare executable name, for stub-dir assembly.
-/// Executability is deliberately not checked here: the callers only need
-/// to locate real tool binaries to symlink — production `auto` detection
-/// (src/ctl/config.rs `detect_in_path`) is the executable-file check.
-fn which(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|p| p.is_file())
-    })
 }
 
 fn fake_nix(path: &Path, nix_log: &Path, env_content: &str) {

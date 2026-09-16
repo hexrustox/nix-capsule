@@ -662,11 +662,19 @@ fn auto_runtime_falls_back_to_docker() {
     );
 }
 
+/// A runtime-free dir to pin `PATH` to: `auto` resolution then depends
+/// only on the stub world, not the ambient machine.
+fn runtime_free_path_dir() -> String {
+    let dir = std::env::temp_dir().join(format!("ncap-test-empty-path-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("runtime-free path dir");
+    dir.to_string_lossy().into_owned()
+}
+
 #[test]
-fn auto_runtime_without_either_fails_naming_runtime_var() {
-    // `auto` with neither runtime on PATH (PATH is a runtime-free dir):
-    // the error names `NCAP_RUNTIME` and carries the install advice as a
-    // sibling line.
+fn auto_runtime_without_either_fails_instead_of_reporting_not_running() {
+    // User story 6: under `auto` + no runtime, even `status` is a hard
+    // config error, never the silent "container is not running" report.
     let dir = runtime_free_path_dir();
     let fx = fixture::Fixture::new(fixture::Config::default())
         .with_env("NCAP_RUNTIME", "auto")
@@ -682,33 +690,10 @@ fn auto_runtime_without_either_fails_naming_runtime_var() {
         stderr.contains("install `podman` or `docker`"),
         "advice line must ride as its own line: {stderr}"
     );
-}
-
-/// A runtime-free dir to pin `PATH` to: `auto` resolution then depends
-/// only on the stub world, not the ambient machine.
-fn runtime_free_path_dir() -> String {
-    let dir = std::env::temp_dir().join(format!("ncap-test-empty-path-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("runtime-free path dir");
-    dir.to_string_lossy().into_owned()
-}
-
-#[test]
-fn auto_runtime_status_fails_instead_of_reporting_not_running() {
-    // User story 6: under `auto` + no runtime, even `status` is a hard
-    // config error, never the silent "container is not running" report.
-    let dir = runtime_free_path_dir();
-    let fx = fixture::Fixture::new(fixture::Config::default())
-        .with_env("NCAP_RUNTIME", "auto")
-        .with_env("PATH", &dir);
-    let out = fx.status();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("not running"),
         "status must not fall through to the not-running report: {stderr}"
     );
-    assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
 }
 
 // XDG fallback is exercised via unit tests; this smoke pins the runtime dir mode.
