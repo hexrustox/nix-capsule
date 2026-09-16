@@ -238,6 +238,14 @@ impl LaunchView {
         self.runs
     }
 
+    /// The full argv the fake adapter saw for the launch, verb first,
+    /// one entry per argv element. Escape hatch for exact-sequence
+    /// assertion: whole-shape regression tests (a duplicated or
+    /// misordered verb fails here, `has_arg` cannot).
+    pub fn argv(&self) -> &[String] {
+        &self.args
+    }
+
     /// Exact argv present (detached `-d`, image separator `--`,
     /// single-argv flags like `--cap-drop=all`, whole extra options).
     pub fn has_arg(&self, arg: &str) -> bool {

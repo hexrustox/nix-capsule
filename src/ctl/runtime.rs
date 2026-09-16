@@ -115,21 +115,21 @@ impl Runtime {
     /// (exec failure) or [`RuntimeError::Failed`] carrying the captured
     /// output — stderr, falling back to stdout when stderr is empty. The
     /// shared success/$? check behind `run_detached`, `stop`, and `remove`.
+    /// `configure` receives the command after `<bin> <verb>` and may append
+    /// arbitrary args before spawn.
     async fn run_checked(
         &self,
         verb: &'static str,
-        args: impl IntoIterator<Item = String>,
+        configure: impl FnOnce(&mut Command),
     ) -> Result<String, RuntimeError> {
-        let output = Command::new(&self.bin)
-            .arg(verb)
-            .args(args)
-            .output()
-            .await
-            .map_err(|source| RuntimeError::Spawn {
-                bin: self.bin.clone(),
-                verb,
-                source,
-            })?;
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg(verb);
+        configure(&mut cmd);
+        let output = cmd.output().await.map_err(|source| RuntimeError::Spawn {
+            bin: self.bin.clone(),
+            verb,
+            source,
+        })?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
@@ -160,36 +160,31 @@ impl Runtime {
         args: &ServerArgs,
         extra_args: &[String],
     ) -> Result<String, RuntimeError> {
-        let exec_cmd = format!(
-            "source '{}' && exec '{}' --socket '{}' --log-dir '{}' --timeout {} --log-level {}",
-            shell_escape(&env_file.to_string_lossy()),
-            shell_escape(&server.to_string_lossy()),
-            shell_escape(&args.socket.to_string_lossy()),
-            shell_escape(&args.log_dir.to_string_lossy()),
-            args.timeout,
-            args.log_level
-        );
-        let mut run_args = vec![
-            "run".to_owned(),
-            "-d".to_owned(),
-            "--name".to_owned(),
-            self.name.clone(),
-        ];
-        run_args.extend(extra_args.iter().cloned());
-        run_args.extend([
-            "--".to_owned(),
-            image.to_owned(),
-            self.bash.to_string_lossy().into_owned(),
-            "-c".to_owned(),
-            exec_cmd,
-        ]);
-        self.run_checked("run", run_args).await
+        self.run_checked("run", |cmd| {
+            let exec_cmd = format!(
+                "source '{}' && exec '{}' --socket '{}' --log-dir '{}' --timeout {} --log-level {}",
+                shell_escape(&env_file.to_string_lossy()),
+                shell_escape(&server.to_string_lossy()),
+                shell_escape(&args.socket.to_string_lossy()),
+                shell_escape(&args.log_dir.to_string_lossy()),
+                args.timeout,
+                args.log_level
+            );
+            cmd.args(["-d", "--name", &self.name]);
+            cmd.args(extra_args);
+            cmd.args(["--", image]);
+            cmd.arg(&self.bash);
+            cmd.args(["-c", &exec_cmd]);
+        })
+        .await
     }
 
     /// `stop <name>`.
     pub(crate) async fn stop(&self) -> Result<String, RuntimeError> {
-        self.run_checked("stop", std::iter::once(self.name.clone()))
-            .await
+        self.run_checked("stop", |cmd| {
+            cmd.arg(&self.name);
+        })
+        .await
     }
 
     /// Whether a container with `name` exists at all (running or stopped):
@@ -208,8 +203,10 @@ impl Runtime {
 
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
     pub(crate) async fn remove(&self) -> Result<String, RuntimeError> {
-        self.run_checked("rm", std::iter::once(self.name.clone()))
-            .await
+        self.run_checked("rm", |cmd| {
+            cmd.arg(&self.name);
+        })
+        .await
     }
 
     /// `exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'" —

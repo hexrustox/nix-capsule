@@ -851,6 +851,59 @@ fn start_mounts_exact_default_set_and_executes_server() {
 }
 
 #[test]
+fn launch_argv_is_the_exact_expected_sequence() {
+    // Whole-shape regression: the launch argv must match element for
+    // element. Membership probes (`has_arg`) pass even when a verb is
+    // duplicated (`run run -d ...`); an exact sequence cannot.
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
+    fx.set_running(false);
+    let out = fx.start();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let root = fx.project_root().display().to_string();
+    let cache = fx.cache_dir().display().to_string();
+    let logs = fx.log_dir().display().to_string();
+    let sock_parent = fx.socket_parent_dir().display().to_string();
+    let sock = fx.socket_path().display().to_string();
+
+    // Order follows build_runtime_args + run_detached; harden off and
+    // empty run opts seed nothing extra. The args log records `$@`,
+    // verb (`run`) included, so the verb is argv[0].
+    let expected = vec![
+        "run".to_owned(),
+        "-d".to_owned(),
+        "--name".to_owned(),
+        "ncap-test".to_owned(),
+        "-v".to_owned(),
+        "/nix:/nix:ro".to_owned(),
+        "-v".to_owned(),
+        format!("{sock_parent}:{sock_parent}"),
+        "-v".to_owned(),
+        format!("{root}:{root}"),
+        "-w".to_owned(),
+        root.clone(),
+        "-v".to_owned(),
+        format!("{cache}:{cache}:ro"),
+        "-v".to_owned(),
+        format!("{logs}:{logs}"),
+        "--".to_owned(),
+        "alpine:latest".to_owned(),
+        "/nix/store/fake/bin/bash".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "source '{cache}/env' && exec '/nix/store/fake/bin/ncap-server' \
+             --socket '{sock}' --log-dir '{logs}' --timeout 2 --log-level warning"
+        ),
+    ];
+
+    assert_eq!(fx.launches().argv(), &expected[..]);
+}
+
+#[test]
 fn git_mount_present_readonly_when_git_dir_exists() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     fx.seed_git();
