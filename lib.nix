@@ -131,31 +131,55 @@ let
     autoStart = checkBool;
     runtime = checkString;
   };
+
+  # Fallback for every option, mirroring checkers and the spec table
+  # (spec/flake-api.md § Options). mkShell's `? null` head delegates all
+  # defaulting here so `args` never needs an attribute to exist.
+  defaults = {
+    project = "";
+    image = "alpine:latest";
+    devShell = ".#container";
+    watchFiles = [
+      "flake.nix"
+      "flake.lock"
+    ];
+    envForward = [ ];
+    wrappers = [ ];
+    extraOptions = [ ];
+    harden = false;
+    timeout = 10;
+    socketPath = "";
+    containerName = "";
+    cacheDir = "";
+    logDir = "";
+    logLevel = "warning";
+    preShellHook = "";
+    postShellHook = "";
+    autoStart = true;
+    runtime = "podman";
+  };
 in
 {
   mkShell =
     {
-      project ? "",
-      image ? "alpine:latest",
-      devShell ? ".#container",
-      watchFiles ? [
-        "flake.nix"
-        "flake.lock"
-      ],
-      envForward ? [ ],
-      wrappers ? [ ],
-      extraOptions ? [ ],
-      harden ? false,
-      timeout ? 10,
-      socketPath ? "",
-      containerName ? "",
-      cacheDir ? "",
-      logDir ? "",
-      logLevel ? "warning",
-      preShellHook ? "",
-      postShellHook ? "",
-      autoStart ? true,
-      runtime ? "podman",
+      project ? null,
+      image ? null,
+      devShell ? null,
+      watchFiles ? null,
+      envForward ? null,
+      wrappers ? null,
+      extraOptions ? null,
+      harden ? null,
+      timeout ? null,
+      socketPath ? null,
+      containerName ? null,
+      cacheDir ? null,
+      logDir ? null,
+      logLevel ? null,
+      preShellHook ? null,
+      postShellHook ? null,
+      autoStart ? null,
+      runtime ? null,
     }@args:
     let
       # ---- eval-time type checks ----------------------------------------------
@@ -165,7 +189,7 @@ in
       # strictness). Null is accepted only where the table default is null.
       # No coercions; no Nix `path` values for any option.
       unknownOpts = builtins.filter (opt: !(builtins.hasAttr opt checkers)) (builtins.attrNames args);
-      checked = builtins.mapAttrs (opt: check: check opt args.${opt}) checkers;
+      checked = builtins.mapAttrs (opt: check: check opt (args.${opt} or defaults.${opt})) checkers;
 
       # Force all checks before building the shell. deepSeq catches lazy
       # list entries (plain seq only forces the list spine).
@@ -223,6 +247,7 @@ in
         ]
       );
     in
+    assert builtins.attrNames defaults == builtins.attrNames checkers;
     builtins.seq checkAll (
       pkgs.mkShellNoCC {
         name = "nix-capsule-shell";
