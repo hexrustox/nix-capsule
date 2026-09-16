@@ -139,12 +139,11 @@ let
     runtime = checkString;
   };
 
-  # Fallback for every option, mirroring checkers and the spec table
-  # (spec/flake-api.md § Options). mkShell's `? null` head delegates all
+  # defaults: `image` has no default — an omitted image is Nix's built-in
+  # "missing argument" error. mkShell's `? null` heads delegate all other
   # defaulting here so `args` never needs an attribute to exist.
   defaults = {
     project = "";
-    image = "alpine:latest";
     devShell = ".#container";
     watchFiles = [
       "flake.nix"
@@ -170,7 +169,8 @@ in
   mkShell =
     {
       project ? null,
-      image ? null,
+      # Required reference to the Container image
+      image,
       devShell ? null,
       watchFiles ? null,
       envForward ? null,
@@ -256,7 +256,6 @@ in
         ]
       );
     in
-    assert builtins.attrNames defaults == builtins.attrNames checkers;
     builtins.seq checkAll (
       pkgs.mkShellNoCC {
         name = "nix-capsule-shell";

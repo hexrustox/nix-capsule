@@ -76,7 +76,7 @@ flake side makes no guarantee about the derived value.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `project` | string | `""` | Sets `NCAP_PROJECT`. |
-| `image` | string | `"alpine:latest"` | Sets `NCAP_IMAGE`. |
+| `image` | string | required | Sets `NCAP_IMAGE`. |
 | `devShell` | string | `".#container"` | Sets `NCAP_DEVSHELL`. |
 | `watchFiles` | list of strings | `[ "flake.nix" "flake.lock" ]` | Sets `NCAP_WATCH_FILES`. |
 | `envForward` | list of strings | `[ ]` | Sets `NCAP_ENV_FORWARD`. |

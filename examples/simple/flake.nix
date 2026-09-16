@@ -26,6 +26,7 @@
           devShells = {
             default = capsule-lib.mkShell {
               project = "nix-capsule-example-simple";
+              image = "alpine:latest";
               wrappers = [
                 "cowsay"
               ];
