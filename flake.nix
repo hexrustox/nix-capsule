@@ -18,14 +18,28 @@
       flake = {
         lib = { pkgs }: import ./lib.nix { inherit pkgs; };
 
-        overlays.default =
-          final: prev:
-          let
-            system = prev.stdenv.targetPlatform.system;
-          in
-          {
-            ncap = self.packages.${system}.default;
-          };
+        overlays = {
+          default =
+            final: prev:
+            let
+              system = prev.stdenv.targetPlatform.system;
+            in
+            {
+              ncap =
+                if system == "x86_64-linux" then
+                  self.packages.x86_64-linux.ncap-prebuilt
+                else
+                  self.packages.${system}.default;
+            };
+          from-source =
+            final: prev:
+            let
+              system = prev.stdenv.targetPlatform.system;
+            in
+            {
+              ncap = self.packages.${system}.default;
+            };
+        };
 
       };
       perSystem =
@@ -62,7 +76,13 @@
                   rustc = rust;
                 };
               };
+              ncap-prebuilt =
+                if system == "x86_64-linux" then
+                  pkgs.callPackage ./prebuilt.nix { }
+                else
+                  throw "ncap-prebuilt: no prebuilt artifact for ${system}; use packages.${system}.default";
             };
+
           devShells = {
             default = capsule-lib.mkShell {
               socketPath = "/tmp/nix-capsule/ncap-socket";

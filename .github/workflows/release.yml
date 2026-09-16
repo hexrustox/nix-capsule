@@ -2,7 +2,6 @@ name: Release
 on:
   push:
     tags: [ 'v*' ]
-  workflow_dispatch:
 
 jobs:
   build:
@@ -19,7 +18,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Build for ${{ matrix.system }}
         run: |
-          nix build ".#packages.${{ matrix.system }}.ncap" \
+          nix build ".#packages.${{ matrix.system }}.default" \
             --no-link --print-out-paths > store-path
           mkdir -p releases
           tar czf "releases/${{ matrix.system }}.tar.gz" \
