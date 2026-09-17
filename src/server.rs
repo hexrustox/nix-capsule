@@ -461,6 +461,11 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
             code: status.code().map(|code| code as u8),
             signal: status.signal().map(|signal| signal as u8),
         };
+        match (exit.code, exit.signal) {
+            (Some(code), _) => log.debug(&format!("child exited with code {code}")),
+            (_, Some(signal)) => log.debug(&format!("child exited with signal {signal}")),
+            (None, None) => log.debug("child exited with an unknowable status"),
+        }
         send(&mut framed, Message::Exit(exit)).await;
     } else {
         // The connection ended before the terminal frame — the only notice
@@ -472,6 +477,7 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
         // Accepted limitation: a silent child — no output, stdin already
         // EOF'd — of a vanished client runs to completion; nothing
         // observable triggers detection.
+        log.warning("client vanished before the terminal frame: TERMed and awaited the child's process group");
         let _ = signal_group(pgid, libc::SIGTERM as u8);
         let _ = child.wait().await;
     }
@@ -517,6 +523,7 @@ async fn bridge(
                             // pipe gives the child EOF while the connection
                             // stays open for `Signal` frames.
                             stdin = None;
+                            log.debug("stdin EOF: dropping the child's stdin pipe");
                         } else {
                             let pipe_failed = match stdin.as_mut() {
                                 Some(pipe) => pipe.write_all(&bytes).await.is_err(),
@@ -524,6 +531,7 @@ async fn bridge(
                             };
                             if pipe_failed {
                                 stdin = None;
+                                log.debug("write to the child's stdin failed: dropping the pipe");
                             }
                         }
                     }
@@ -550,6 +558,7 @@ async fn bridge(
                     // disconnect surfaces as a failed send on the rx branch.
                     stdin = None;
                     client_writes_open = false;
+                    log.debug("client write half closed: dropping the child's stdin pipe");
                 }
             },
             _ = stopping_signalled(stopping.clone()), if stopping_open => {
@@ -560,6 +569,7 @@ async fn bridge(
                 // delivers its terminal frame.
                 send(framed, Message::ServerStopping).await;
                 let _ = signal_group(pgid, libc::SIGTERM as u8);
+                log.info("sent `ServerStopping` and TERMed the child's process group");
             }
         }
     }
