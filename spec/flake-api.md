@@ -55,10 +55,10 @@ consumer's flake names both shells; only the linkage between them matters.
 
 ## mkShell
 
-`mkShell` wraps `pkgs.mkShellNoCC` and produces:
+`mkShell` wraps `pkgs.mkShellNoCC` (shell name `nix-capsule-shell`) and produces:
 
-- `ncap` and `ncap-ctl` on PATH,
-- one `writeShellScriptBin` per `wrappers` entry, shadowing real binaries on
+- `ncap` and `ncap-ctl` on PATH (plus the wrapper bins below),
+- one wrapper bin per `wrappers` entry, shadowing real binaries on
   PATH (§ Wrappers),
 - all configuration exported as `NCAP_*` env vars (the contract is
   spec/ctl.md § NCAP_* contract),
@@ -66,6 +66,10 @@ consumer's flake names both shells; only the linkage between them matters.
 
 The container shell is an ordinary devshell defined by the consumer — any
 attr, any name.
+
+Additionally the flake exposes `devShellGuard`: a shell fragment that refuses
+to run outside a container (checked via the container-runtime marker files).
+It is for the Container shell's own hook, not the Host shell.
 
 ## Options
 
@@ -100,9 +104,10 @@ Every option is checked when `mkShell` is evaluated, before
 the option, the expected shape, and the received type/value. No
 coercions: a
 value of the wrong type is an error, never silently converted.
-`lib.nix` performs type checks only; value transformation and
-validation (runtime names, timeout range, devshell shape, log-level
-values) is `ctl`'s job.
+Type checking is check-plus-render only: lists render to JSON, `timeout`
+renders to string, `harden` renders to `"true"`/`"false"`; value
+transformation and validation (runtime names, timeout range, devshell shape, log-level
+values) is `ctl`'s job per spec/ctl.md § NCAP_* contract.
 
 Checked shapes: `image`, `devShell`,
 `runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
@@ -112,7 +117,8 @@ strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `preShellHook`, `postShellHook` strings; `logLevel` a string. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
 null or string. Unknown top-level options and unknown wrapper fields
-throw at eval time naming the option or field.
+throw at eval time naming the option or field. `image` has no default —
+omitting it is the evaluator's missing-argument error.
 
 ## shellHook
 
@@ -130,7 +136,8 @@ The shellHook runs, in order (empty fragments skipped):
 
 A failing `ncap-ctl setup-env` or `ncap-ctl init` prints a warning on
 stderr and does not abort shell entry — wrapped commands surface the
-failure later through the Client's connect-error hint.
+failure later through the Client's connect-error hint
+(spec/client.md § CLI).
 
 ## Wrappers
 
@@ -141,6 +148,7 @@ wrappers = [ "cargo" ]
 # writes a bin `cargo` → exec ncap cargo "$@"
 ```
 
+A string entry normalizes to `command = name`, `env = []`, `cwd = null`.
 Attrset form exposes exactly `name`/`command`/`env`/`cwd` — `--socket`
 comes from the environment (`NCAP_SOCKET`), never from a wrapper key:
 
@@ -151,23 +159,17 @@ comes from the environment (`NCAP_SOCKET`), never from a wrapper key:
 | `env` | list of `"KEY=VALUE"` | `[ ]` | one `--env` per entry |
 | `cwd` | string | `null` | `--cwd` |
 
-Wrapped and bare invocations share every Client behavior — a wrapper is just
-a pre-filled command line (spec/client.md § CLI).
+Each wrapper bin runs `exec ncap` with one shell-escaped `--env` per `env`
+entry, an optional shell-escaped `--cwd`, and the shell-escaped command,
+passing through `"$@"`. Wrapped and bare invocations share every Client
+behavior — a wrapper is just a pre-filled command line
+(spec/client.md § CLI).
 
 ## Environment layering
 
-A Child inside the container sees four layers; for a given KEY, the highest
-layer defining it wins:
-
-| # | Layer | Resolved | Changes take effect |
-| --- | --- | --- | --- |
-| 1 | Env dump (Server's inherited env) | at init, inside the container | after re-eval + restart |
-| 2 | `envForward` | by the Client, from the host env, **per request** | immediately |
-| 3 | wrapper `env` | in the wrapper script | after flake edit (wrapper regen) |
-| 4 | `-e KEY=VALUE` | CLI flag, per invocation | immediately |
-
-The Client merges layers 2–4 into the request's env list; the Server applies
-that list over its inherited environment.
+The layering and merge rules are spec/env.md § Merge rules: the Client
+merges layers 2–4 into the request's env list; the Server applies that list
+over its inherited environment.
 
 Note the split: forwarded *values* never require a restart (the Client
 re-reads them each invocation). Only editing the `envForward` *list* touches
@@ -179,7 +181,7 @@ required.
 Entering the Host shell runs `ncap-ctl init` — `nix develop` and a direnv
 reload are two interchangeable triggers for the same shellHook; direnv is
 optional. The hash check governs only the container Env dump —
-see spec/ctl.md § Freshness and the digest: fresh means no `nix
+see spec/paths.md § Freshness and the digest: fresh means no `nix
 print-dev-env`, stale means re-eval + restart.
 
 Sessions never auto-refresh: a user sitting in a long-lived `nix develop`
@@ -215,7 +217,7 @@ direnv; full manual control is `autoStart = false`.
 
 A `watch_file` in `.envrc` only triggers a direnv reload; it does not
 affect nix-capsule's cache freshness. Freshness is decided solely by the
-`watchFiles` content hash (spec/ctl.md § Freshness and the digest). Adding
+`watchFiles` content hash (spec/paths.md § Freshness and the digest). Adding
 `watch_file foo.nix` to `.envrc` without `watchFiles = [ … "foo.nix" ]`
 reloads direnv on `foo.nix` edits, but the hash matches, so there is no
 re-eval and no restart. To watch extra files, use `watchFiles` instead.

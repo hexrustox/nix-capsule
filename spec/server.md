@@ -12,7 +12,8 @@ on re-init (spec/ctl.md § init flow).
 ## Startup
 
 CLI: `--socket`, `--log-dir`, `--timeout` (drain grace, seconds),
-`--log-level` (minimum severity; the levels are § Logging).
+`--log-level` (minimum severity; the levels are § Logging). All four are
+required; `--timeout` is a non-negative integer number of seconds.
 
 - If the socket path exists: probe it. Connectable ⇒ another Server owns it —
   error out naming the path, leaving the owner untouched. Stale (connect
@@ -26,17 +27,18 @@ One Connection = one Child; connections are handled concurrently.
    frame, ⇒ `Error` and close. A client that leaves before its first frame is
    dropped silently.
 2. Send `Version`.
-3. Version comparison: a `Request` version differing from the Server's own is
-   one line in the Server's log per § Logging — advisory, never a rejection
-   (spec/protocol.md § Guarantees).
+3. Version comparison: a `Request` version differing from the Server's own, or
+   a missing version, is one warning line in the Server's log per § Logging —
+   advisory, never a rejection (spec/protocol.md § Guarantees).
 4. Validate `cwd`: it must be an existing directory inside the container; the
-   same-path mount contract (spec/ctl.md § Mounts) makes host cwds work,
+   same-path mount contract (spec/runtime.md § Mounts) makes host cwds work,
    anything else fails with `Error`.
 5. Spawn the Child:
    - `command` + `args` from the request, `cwd` from the request,
-   - request env applied over the inherited Env dump — entries override
-     same-named inherited keys and never clear inherited keys; an entry
-     without `=` is an `Error` (invalid request env),
+   - request env applied over the inherited Env dump per
+     spec/env.md § Merge rules — entries override same-named inherited
+     keys and never clear inherited keys; an entry without `=` is an `Error`
+     (invalid request env),
    - spawned as its own process group leader — every signal below targets
      the group (`kill(-pgid, …)`), so grandchildren die with their
      progenitor,
@@ -51,11 +53,11 @@ One Connection = one Child; connections are handled concurrently.
      A client write-half close is observably identical on this transport.
      A failed write to the Child's stdin (pipe already closed) drops the
      stdin pipe; the Connection continues.
-    - Child stdout → `Stdout`, stderr → `Stderr`, read in chunks; each stream
+    - Child stdout → `Stdout`, stderr → `Stderr`, read in ~8 KiB chunks; each stream
       is FIFO, cross-stream order is not guaranteed.
     - `Signal` frames → the signal number is forwarded verbatim to
       `kill(-pgid, sig)`; kill failures (an already-exited group, an
-      out-of-range number) produce one line in the Server's log per
+      out-of-range number) produce one warning line in the Server's log per
       § Logging and the Connection continues to its normal terminal frame.
 8. Child exits ⇒ wait for it, send `Exit { code | signal }` and close. Both
    fields null happens only if the exit status is somehow unknowable.
@@ -81,7 +83,9 @@ One Connection = one Child; connections are handled concurrently.
   still waiting for its first frame — then TERM every Child's process group.
   `ServerStopping` is terminal for the Client but non-terminal here: each
   bridge keeps running, so a Child that finishes inside the drain grace
-  still delivers its terminal frame (spec/protocol.md § Guarantees).
+  still delivers its terminal frame (spec/protocol.md § Guarantees). A
+  shutdown landing after the pipes drained but before the Child is reaped
+  still sends `ServerStopping` before the terminal `Exit`.
 - Drain all connections within `--timeout` seconds. `--timeout 0` skips
   awaiting entirely: the socket file is removed immediately and
   connections are dropped with container teardown. Connections that miss the
@@ -91,12 +95,12 @@ One Connection = one Child; connections are handled concurrently.
 
 ## Logging
 
-The Server logs to `<log-dir>/ncap-server-<epoch-millis>.log` (millisecond
-epochs keep runs started in the same second apart). Every line is stamped
-with the UTC time in compact RFC 3339 form (`[YYYY-MM-DDTHH:MM:SSZ]`) and
-mirrored to stderr so the container runtime captures the same stream.
-Logging is best-effort and never disturbs the Connection it reports on. How
-lines read follows `docs/agents/log.md`.
+The Server logs to the per-run file defined in spec/paths.md § Server log files
+(millisecond epochs keep runs started in the same second apart). Every line
+is stamped with the UTC time in compact RFC 3339 form
+(`[YYYY-MM-DDTHH:MM:SSZ]`, second precision) and mirrored to stderr so the
+container runtime captures the same stream. Logging is best-effort and never
+disturbs the Connection it reports on. The log dir is created when missing.
 
 `--log-level` (required) sets the minimum severity the Server logs
 at. The levels are exactly `debug` < `info` < `warning` < `error`; a
@@ -104,13 +108,13 @@ line whose level ranks below the minimum is not written — neither to
 the log file nor to the stderr mirror. Filtering happens at emit
 time, before the line is stamped; nothing is buffered or replayed.
 
-This section inventories what gets logged — the spec's say on logging stops
-here; it does not carry the lines' format or levels. Events listed elsewhere
+This section inventories what gets logged — the behavior say on logging stops
+here; it does not pin line text. Events listed elsewhere
 in this spec reference it rather than describe the log inline:
 
 - a connection opened
-- the Client's `Request` version differing from the Server's own (one line,
-  advisory — never a rejection, spec/protocol.md § Guarantees)
+- the Client's `Request` version differing from the Server's own, or missing
+  (one line, advisory — never a rejection, spec/protocol.md § Guarantees)
 - an `exec` request received
 - bookkeeping during the bridge and teardown
 - Server started, socket bound

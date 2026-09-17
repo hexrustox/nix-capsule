@@ -3,7 +3,8 @@
 The Client is the Host shell's entry to the Container: it sends one command
 per Connection to the Server and streams the Child's stdio back to the
 terminal. The wire behavior it relies on is spec/protocol.md § Frames; the Host shell
-that provides `ncap` and its Wrappers is spec/flake-api.md § mkShell.
+that provides `ncap` and its Wrappers is spec/flake-api.md § Wrappers; the
+environment merge rules are spec/env.md § Merge rules.
 
 ## CLI
 
@@ -11,42 +12,43 @@ that provides `ncap` and its Wrappers is spec/flake-api.md § mkShell.
 ncap [--socket PATH | $NCAP_SOCKET] [--env KEY[=VALUE]]… [--cwd PATH] [--] COMMAND [ARGS…]
 ```
 
+- Short flags (`-s`, `-e`, `-c`) match the long forms. `COMMAND` is required —
+  an empty command is rejected before any request is built.
 - `--socket` is required; `NCAP_SOCKET` supplies the default. Neither present
   is a usage error.
-- `--env KEY=VALUE` sets an override — layer 4 of the environment layering
-  (spec/flake-api.md § Environment layering). Valid forms are `KEY` and
-  `KEY=VALUE`: bare `KEY` copies that variable from the Client's environment
-  if set; silently omitted otherwise. `KEY=` is an explicit empty value; a
-  value may itself contain `=`. An empty key (`=VALUE`, or the empty string)
-  is a usage error.
-- `--cwd` defaults to the Client's current directory. The same-path mount
-  contract (spec/ctl.md § Mounts) makes host cwds valid inside the container;
+- `--env` forms and the `NCAP_ENV_FORWARD` merge are spec/env.md § Merge rules
+  and spec/env.md § Flag forms.
+- `--cwd` defaults to the Client's current directory. A current directory that
+  cannot be resolved is a local error before any connection attempt — identical
+  whether or not the Server is up. The same-path mount contract
+  (spec/runtime.md § Mounts) makes host cwds valid inside the container;
   anything not mounted is invisible — the Server reports the failure.
+- Local errors (unresolvable cwd, malformed `NCAP_ENV_FORWARD`, invalid
+  `--env`) fire before any connection attempt, so they fail identically
+  whether or not the Server is up.
 - Connect failure errors with a static hint naming the socket path and
   suggesting `ncap-ctl init`. No implicit auto-start — init may need to
   evaluate Nix, and surprises are worse than a hint.
 
 ## Request construction
 
-- The request env is the merge of, in order: every name in `NCAP_ENV_FORWARD`
-  (a JSON array of variable names) resolved from this process, then every
-  `--env` flag — later wins by key, deduplicated, unset entries silently
-  omitted. The authoritative merge rules are spec/flake-api.md § Environment layering.
+- The request env is the merge described in spec/env.md § Merge rules.
   Values are read per invocation — a changed host value reaches the
   next command without any restart.
-- `NCAP_ENV_FORWARD` that is not a JSON array of names is a local error
-  (exit `1`).
 - The request carries the Client's version.
-- `cwd` defaults to the Client's current directory (see CLI).
+- `cwd` defaults to the Client's current directory (see CLI). `command`,
+  `args`, `cwd`, and `env` convert lossily (`U+FFFD`) per
+  spec/protocol.md § Guarantees — never rejected.
 
 ## stdin
 
-A blocking reader thread pumps host stdin into `Stdin` frames. EOF on host
-stdin is one empty `Stdin` frame — the socket's write half stays open so the
-signal relay keeps working; the frame is best-effort, since a Child that
-finished first never needs it (a failed send is not fatal). The Client never
-allocates a TTY and never puts the terminal in raw mode — Ctrl-C reaches the
-Client's own signal handler, not the Child.
+A blocking reader thread pumps host stdin into `Stdin` frames in ~8 KiB
+chunks; an interrupted read retries. EOF on host stdin is one empty `Stdin`
+frame — the socket's write half stays open so the signal relay keeps working;
+the frame is best-effort, since a Child that finished first never needs it (a
+failed send is not fatal). The Client never allocates a TTY and never puts
+the terminal in raw mode — Ctrl-C reaches the Client's own signal handler,
+not the Child.
 
 ## Signals
 
@@ -58,7 +60,7 @@ it directly. The protocol is the only path.
   forwarded repeatedly — and keeps streaming until the terminal frame, then
   exits per the Child's outcome. A `Signal`-frame send failure (the Server
   already closed the Connection) is a local transport failure: the Client
-  prints `ncap: …` and exits `1` — the next-loop clean-close `143` is
+  exits `1` — the next-loop clean-close `143` is
   unreachable in that race. The Child may trap and clean up after, or
   ignore it; that grace is the Child's, not the Client's. The Client never
   interprets a signal.

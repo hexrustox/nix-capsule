@@ -3,7 +3,8 @@
 The Socket is the sole channel between Client and Server: one Unix socket, one
 Connection per command, byte-stream framing. This file is the single source of
 truth for framing, frame types, and the guarantees both ends rely on;
-spec/client.md § Request construction and spec/server.md § Connection handling describe each end's behavior on top of it.
+spec/client.md § Request construction and spec/server.md § Connection handling
+describe each end's behavior on top of it.
 
 ## Framing
 
@@ -11,11 +12,12 @@ Every frame is: 1 tag byte, a 4-byte big-endian payload length, then the
 payload.
 
 - Struct frames (`Request`, `Exit`, `Error`, `Version`, `Signal`): payload is
-  JSON.
+  JSON. Receivers tolerate unknown JSON fields.
 - Stream frames (`Stdin`, `Stdout`, `Stderr`): payload is raw bytes. Producers
   chunk ~8 KiB; framing is chunk-agnostic — receivers make no assumption about
   chunk boundaries.
-- Payload length is capped at **16 MiB**. A frame declaring more is a
+- Payload length is capped at **16 MiB**. The cap is checked on the header
+  before any payload bytes are buffered. A frame declaring more is a
   transport violation: the receiver treats the connection as failed (the
   Server sends `Error` first when it can) and the Client exits `1`. An unknown
   tag byte is the same transport violation.
@@ -61,7 +63,7 @@ JSON conventions:
 
 - **Version is advisory.** Client and Server ship from the same package and
   are always in lockstep; a mismatch (or a missing version) is never a
-  rejection. Comparison is exact string equality. 
+  rejection. Comparison is exact string equality.
 - **Ordering:** per-stream FIFO is guaranteed; interleaving between `Stdout`
   and `Stderr` is not (independent forwarding).
 - **EOF:** there is no EOF frame type. stdin EOF travels as one empty `Stdin`
@@ -94,6 +96,6 @@ JSON conventions:
   first-frame rule is stricter: spec/server.md § Connection handling.)
 - **Path translation:** none — host paths are valid inside the container only
   because the project root is bind-mounted at the same absolute path
-  (spec/ctl.md § Mounts); anything not mounted is invisible.
+  (spec/runtime.md § Mounts); anything not mounted is invisible.
 - **Encoding:** `command`, `args`, `env`, `cwd` travel as UTF-8 JSON strings;
   non-UTF-8 host bytes convert lossily (`U+FFFD`). Accepted limitation.
