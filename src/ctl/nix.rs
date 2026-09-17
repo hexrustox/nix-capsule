@@ -32,8 +32,11 @@ pub(crate) async fn print_dev_env(
             &profile.to_string_lossy(),
             devshell,
         ])
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .output()
+        .spawn()
+        .map_err(|source| PrintDevEnvError::Spawn { source })?
+        .wait_with_output()
         .await
         .map_err(|source| PrintDevEnvError::Spawn { source })?;
     if output.status.success() {
