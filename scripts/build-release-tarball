@@ -25,6 +25,3 @@ tar c \
   -C "$(cat store-path)" bin share \
   | gzip -n > "releases/${system}.tar.gz"
 rm store-path
-
-nix hash file --sri --type sha256 "releases/${system}.tar.gz"
-
