@@ -1,4 +1,5 @@
 {
+  system,
   stdenv,
   fetchurl,
   autoPatchelfHook,
@@ -6,18 +7,19 @@
 }:
 
 let
-  system = "x86_64-linux";
   cargoToml = fromTOML (builtins.readFile ./Cargo.toml);
   version = cargoToml.package.version;
-  hash = "sha256-b1L+XdfD1Y4CYTW4axavfLSnQ4hZ5a9o+34FnAl3VgU=";
+
+  hashes = import ./prebuilt-hashes.nix;
+  hash = hashes.${system} or (throw "ncap-prebuilt: no prebuilt artifact for ${system}; use packages.${system}.default or the from-source overlay");
 in
 stdenv.mkDerivation {
   inherit version;
   pname = "ncap";
 
   src = fetchurl {
-    inherit hash;
     url = "https://github.com/hexrustox/nix-capsule/releases/download/v${version}/${system}.tar.gz";
+    inherit hash;
   };
 
   nativeBuildInputs = [ autoPatchelfHook ];

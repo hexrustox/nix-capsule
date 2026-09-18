@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Rebuild the release tarball for a system and refresh the hash in prebuilt.nix.
-#
-# Usage: update-prebuilt-hash [system]
-# Runs build-release-tarball, computes the SRI hash of the resulting
-# tarball, and rewrites the hash = "..." line in prebuilt.nix so a
-# local build and the published artifact stay in sync.
 set -euo pipefail
 
 system=${1:-x86_64-linux}
@@ -15,4 +9,4 @@ cd "$script_dir/.."
 ./scripts/build-release-tarball "$system"
 
 hash=$(nix hash file --sri --type sha256 "releases/${system}.tar.gz")
-sed -i "s|hash = \"sha256-[^\"]*\";|hash = \"${hash}\";|" prebuilt.nix
+sed -i "s|\"${system}\" = \"sha256-[^\"]*\";|\"${system}\" = \"${hash}\";|" prebuilt-hashes.nix

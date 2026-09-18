@@ -22,9 +22,14 @@
             final: prev:
             let
               system = prev.stdenv.targetPlatform.system;
+              hashes = import ./prebuilt-hashes.nix;
             in
             {
-              ncap = self.packages.${system}.ncap-prebuilt;
+              ncap =
+                if builtins.hasAttr system hashes then
+                  self.packages.${system}.ncap-prebuilt
+                else
+                  self.packages.${system}.default;
             };
           from-source =
             final: prev:
@@ -59,11 +64,9 @@
                 rustc = rust;
               };
             };
-            ncap-prebuilt =
-              if system == "x86_64-linux" then
-                pkgs.callPackage ./prebuilt.nix { }
-              else
-                throw "ncap-prebuilt: no prebuilt artifact for ${system}; use packages.${system}.default";
+            ncap-prebuilt = pkgs.callPackage ./prebuilt.nix {
+              inherit system;
+            };
           };
         };
 
