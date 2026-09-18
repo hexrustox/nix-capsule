@@ -4,7 +4,7 @@
     nixpkgs.follows = "root/nixpkgs";
     rust-overlay.follows = "root/rust-overlay";
     flake-parts.follows = "root/flake-parts";
-    nix-capsule.url = "github:hexrustox/nix-capsule?ref=v0.10.2";
+    nix-capsule.url = "github:hexrustox/nix-capsule?ref=v0.10.3";
   };
 
   outputs =
