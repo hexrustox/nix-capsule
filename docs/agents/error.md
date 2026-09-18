@@ -7,12 +7,16 @@ Scope: all user-visible messages — `thiserror` `#[error(...)]` attributes and
 `eprintln!` diagnostics. Ad-hoc `String` errors are not in scope because they
 are banned outright (see [No string errors](#no-string-errors)).
 
+> **Every example below is from a fictitious project** — `wafflectl`, a
+> manager of waffle irons. None of the messages, identifiers, or snippets is
+> drawn from this codebase; they exist only to illustrate the rules.
+
 ## Message shape
 
 One sentence fragment, starting lowercase, ending without a period.
 
-- good: `` missing `name` field ``
-- bad: `The name field was not provided.`
+- good: `` missing `iron` field ``
+- bad: `The iron field was not provided.`
 
 ## Tokens
 
@@ -20,8 +24,8 @@ Backtick what the message names: flags, env vars, field names, frame names,
 format names, paths. Leave raw data unquoted: numbers, counts.
 
 - good: `` unknown option `--recursive` ``
-- good: `` frame declares a 1000009-byte payload above the 16 MiB cap ``
-- bad: `` list index `3` out of range `` — `3` is data, not a token
+- good: `` iron `iron-7` declares a 1000009-byte payload above the 16 MiB cap ``
+- bad: `` iron id `3` out of range `` — `3` is data, not a token
 
 ## Context chaining
 
@@ -30,10 +34,23 @@ There is no context-carrying error crate in this repo; context chains through
 Rules for the chain:
 
 - State what is wrong + the subject first; the underlying cause rides last
-  after a colon: ``cannot connect to socket `{socket}`: {source}``
-  (src/client.rs:52).
+  after a colon: ``cannot connect to iron `iron-7`: {source}``.
 - Wire it with a `#[source]` field and a `{source}` placeholder; use
-  `#[error(transparent)]` for pass-through variants (src/ctl/config.rs:85).
+  `#[error(transparent)]` for pass-through variants:
+
+  ```rust
+  // context variant
+  #[error("cannot parse `--heat` value: {source}")]
+  ParseHeat {
+      #[source]
+      source: std::num::ParseIntError,
+  }
+
+  // pass-through variant
+  #[error(transparent)]
+  Wrapper(#[from] InnerError)
+  ```
+
 - The colon-join is for `context: cause` only. Don't append unrelated clauses
   or multiple colon-separated causes.
 - When `{source}` is a captured command's stdout/stderr, chain it with a
@@ -51,9 +68,9 @@ Prescriptive advice is carried outside the message text:
   upstream carries it, or
 - dropped entirely when the cause already implies it.
 
-- message: `` cannot open `conf.yaml` ``
-- advice: `` create the file first, or point `--config` at an existing path ``
-- bad: `` cannot open `conf.yaml`: create the file first ``
+- message: `` cannot open `irons.toml` ``
+- advice: `` create the file first, or point `--irons` at an existing path ``
+- bad: `` cannot open `irons.toml`: create the file first ``
 
 ## Rendering
 
@@ -62,11 +79,10 @@ Prescriptive advice is carried outside the message text:
   in command or library code — command handlers surface errors and notices by
   returning values the toplevel renders.
 - Every rendered line carries the binary name as prefix
-  (`ncap: {err}` / `ncap-ctl: {err}` / `ncap-server: {err}`); a prefix-less
-  error is a bug.
-- Progress notices (`evaluating devshell \`{devshell}\` with nix
-  print-dev-env...`) are their own prefix-carrying stderr lines produced at
-  the toplevel — never mixed into error output.
+  (`<bin-name>: {err}`); a prefix-less error is a bug.
+- Progress notices (`heating iron \`iron-7\` to 180°C...`) are their own
+  prefix-carrying stderr lines produced at the toplevel — never mixed into
+  error output.
 - If an error may be an internal bug rather than a user mistake, say so in a
   separate sentence when surfaced, never inside the message text
   (`this is likely an internal error`).
@@ -80,11 +96,11 @@ chain, make messages ungreppable, and drift from the one-voice rules.
 
 ```rust
 // good
-#[error("cannot read `{path}`: {source}")]
-Read { path: PathBuf, #[source] source: io::Error }
+#[error("cannot heat `{iron}`: {source}")]
+Heat { iron: String, #[source] source: io::Error }
 
 // bad — string error
-.map_err(|err| format!("cannot eval `{devshell}`: {err}"))?;
+.map_err(|err| format!("cannot heat `{iron}`: {err}"))?;
 ```
 
 All io errors get context: a variant names the failed operation and its
@@ -95,12 +111,12 @@ pass-through io variants with `#[error("{0}")]` are banned.
 
 | good | bad |
 | --- | --- |
-| `` cannot connect to socket `{socket}` `` + `: {source}` | `Failed to establish a connection to the socket.` |
-| `` missing `name` field `` | `The name field was not provided.` |
+| `` cannot connect to iron `iron-7` `` + `: {source}` | `Failed to establish a connection to the iron.` |
+| `` missing `iron` field `` | `The iron field was not provided.` |
 | `` unknown option `--recursive` `` | `error: you must use a valid option` |
-| `` frame declares a 1000009-byte payload above the 16 MiB cap `` | `` frame declares a `1000009`-byte payload `` |
-| `` cannot derive a project name from root `/tmp/proj` `` | `` cannot derive a project name from root `/tmp/proj`; set `project` `` |
+| `` iron `iron-7` declares a 1000009-byte payload above the 16 MiB cap `` | `` iron `iron-7` declares a `1000009`-byte payload `` |
+| `` cannot derive an iron name from root `/tmp/waffle` `` | `` cannot derive an iron name from root `/tmp/waffle`; set `name` `` |
 | `` cannot read `{path}`: {source} `` | `` #[error("{0}")] Io(io::Error) `` — bare io pass-through, no context |
 | `.map_err(...)` into a `thiserror` variant | `Result<(), String>` or `format!("... failed: {err}")` |
-| `` ncap-ctl: container `proj` is not running `` (toplevel, prefixed) | `` container `proj` is not running `` mid-task, prefix-less |
-| `` cannot eval `{devshell}` with print-dev-env: `` + newline + output | `` cannot eval `x`: multi-line output crammed onto one colon-line `` |
+| `` wafflectl: iron `iron-7` is not hot `` (toplevel, prefixed) | `` iron `iron-7` is not hot `` mid-task, prefix-less |
+| `` cannot heat `iron-7`: `` + newline + output | `` cannot heat `iron-7`: multi-line output crammed onto one colon-line `` |
