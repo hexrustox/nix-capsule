@@ -35,7 +35,8 @@ ncap [--socket PATH | $NCAP_SOCKET] [--env KEY[=VALUE]]… [--cwd PATH] [--] COM
 - The request env is the merge described in spec/env.md § Merge rules.
   Values are read per invocation — a changed host value reaches the
   next command without any restart.
-- The request carries the Client's version.
+- The Client never opens a Version probe Connection (spec/protocol.md
+  § Version probe); its Connections are exec-only.
 - `cwd` defaults to the Client's current directory (see CLI). `command`,
   `args`, `cwd`, and `env` convert lossily (`U+FFFD`) per
   spec/protocol.md § Guarantees — never rejected.

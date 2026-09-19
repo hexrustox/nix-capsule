@@ -36,6 +36,24 @@ Liveness is spec/runtime.md § Liveness: one predicate (`Running` and
 socket-connectable) serving both the `init` liveness probe and the `start`
 readiness poll.
 
+## Version probe
+
+After liveness/connectability, `status` and `start` open one Version probe
+Connection (spec/protocol.md § Connection lifecycle): send `RequestVersion`,
+await `ServerVersion`, compare the reply against the host binaries' version
+by exact string inequality — **Version skew**. Skew ⇒ one warning line on
+stderr naming the Server's and the host's version and advising
+`ncap-ctl restart`; the three status lines, exit status, and all other
+output are unchanged. The warning never fails the command.
+
+A Server that predates the probe rejects `RequestVersion` as an unknown tag
+(`Error` and close) — the same warning prints; the stale Server is advice
+identical. A probe whose socket is unreachable is skipped silently:
+liveness/readiness already report that. `init` never probes — a warning
+inside the shellHook's live-and-fresh "done" contradicts it; the documented
+remedy is `restart` (spec/protocol.md § Guarantees — freshness tracks
+watched files, not the package version, so nothing auto-heals skew).
+
 ## init flow
 
 1. Read the stamp guard (spec/paths.md § Stamp guard).

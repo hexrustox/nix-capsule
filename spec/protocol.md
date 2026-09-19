@@ -11,8 +11,8 @@ describe each end's behavior on top of it.
 Every frame is: 1 tag byte, a 4-byte big-endian payload length, then the
 payload.
 
-- Struct frames (`Request`, `Exit`, `Error`, `Version`, `Signal`): payload is
-  JSON. Receivers tolerate unknown JSON fields.
+- Struct frames (`Request`, `Exit`, `Error`, `ServerVersion`, `Signal`):
+  payload is JSON.
 - Stream frames (`Stdin`, `Stdout`, `Stderr`): payload is raw bytes. Producers
   chunk ~8 KiB; framing is chunk-agnostic — receivers make no assumption about
   chunk boundaries.
@@ -26,30 +26,32 @@ payload.
 
 | Tag | Frame | Direction | Payload |
 | --- | --- | --- | --- |
-| `0x01` | `Request` | client → server | `{ "command": str, "args": [str], "cwd": str, "env": ["KEY=VALUE"], "version": str? }` |
+| `0x01` | `Request` | client → server | `{ "command": str, "args": [str], "cwd": str, "env": ["KEY=VALUE"] }` |
 | `0x02` | `Stdin` | client → server | raw bytes; an empty payload marks stdin EOF |
 | `0x03` | `Stdout` | server → client | raw bytes |
 | `0x04` | `Stderr` | server → client | raw bytes |
 | `0x05` | `Exit` | server → client | `{ "code": u8?, "signal": u8? }` — exactly one set in practice; unset fields are omitted |
 | `0x06` | `Error` | server → client | `{ "message": str }` |
 | `0x07` | `ServerStopping` | server → client | empty |
-| `0x08` | `Version` | server → client | `{ "version": str }` — tag pinned for backward compatibility |
+| `0x08` | `Version` | (none) | reserved — sent by no one; a receiver ignores it wherever it arrives |
 | `0x09` | `Signal` | client → server | `{ "signal": u8 }` (POSIX signal number, e.g. 2, 9, 15) |
+| `0x0A` | `RequestVersion` | client → server | empty — exactly 0 bytes |
+| `0x0B` | `ServerVersion` | server → client | `{ "version": str }` |
 
 JSON conventions:
 
-- Receivers tolerate unknown JSON fields and a `Request` without `version`.
+- Receivers tolerate unknown JSON fields.
 - Receivers reject a `ServerStopping` frame with a non-empty payload and an
   `Exit` frame with both `code` and `signal` set. (`None`, `None` is the
   unknowable-status exception, spec/server.md § Connection handling.)
 
 ## Connection lifecycle
 
-1. Client connects, sends `Request` (carrying its version).
-2. Server replies `Version` with its own.
-3. Both directions then stream: `Stdin` from the client; `Stdout`/`Stderr`
+1. Client connects, sends `Request` (or opens the Version probe with
+   `RequestVersion` — § Version probe).
+2. Both directions then stream: `Stdin` from the client; `Stdout`/`Stderr`
    from the server.
-4. The Server sends exactly one terminal frame — `Exit` on Child completion
+3. The Server sends exactly one terminal frame — `Exit` on Child completion
    (exec-failure codes included), `Error` on any other failure — and nothing
    after it. `ServerStopping` is not a terminal frame; it may precede one.
    Split semantics: `ServerStopping` is terminal for the Client — the Client
@@ -57,13 +59,23 @@ JSON conventions:
    server-side, where the bridge keeps running so a Child that finishes
    inside the drain grace still delivers its terminal frame
    (spec/server.md § Shutdown).
-5. Either side may then close.
+4. Either side may then close.
+
+## Version probe
+
+The Server replies `ServerVersion` carrying its own version and closes
+immediately. The reply is terminal for that connection — no `Exit` or `Error`
+follows it — and no Child is spawned, so the Connection sits outside the
+drain and `ServerStopping` rules (spec/server.md § Connection handling). The
+probe is how Ctl reads the running Server's version (spec/ctl.md § Version
+probe); the exec-path Client never opens one.
 
 ## Guarantees
 
-- **Version is advisory.** Client and Server ship from the same package and
-  are always in lockstep; a mismatch (or a missing version) is never a
-  rejection. Comparison is exact string equality.
+- **Version is off the exec path.** Exec Connections carry no version frames
+  in either direction. Version comparison — exact string equality — happens
+  only in Ctl, on the Version probe (§ Version probe, spec/ctl.md
+  § Version probe).
 - **Ordering:** per-stream FIFO is guaranteed; interleaving between `Stdout`
   and `Stderr` is not (independent forwarding).
 - **EOF:** there is no EOF frame type. stdin EOF travels as one empty `Stdin`
@@ -93,7 +105,8 @@ JSON conventions:
   `Error { message }`.
 - **Misdirected frames:** once a Connection is established, a frame arriving
   from the side that never sends it is ignored — never fatal. (The
-  first-frame rule is stricter: spec/server.md § Connection handling.)
+  first-frame rule is stricter: spec/server.md
+  § Connection handling.)
 - **Path translation:** none — host paths are valid inside the container only
   because the project root is bind-mounted at the same absolute path
   (spec/runtime.md § Mounts); anything not mounted is invisible.

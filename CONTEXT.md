@@ -104,6 +104,14 @@ _Avoid_: escalation, signal policy
 The single frame — `Exit` or `Error` — that ends every connection; nothing arrives after it. Exception: `ServerStopping` is terminal for the Client but not for the Server's bridge.
 _Avoid_: final frame, exit message
 
+**Version probe**:
+The one-shot Connection opening with `RequestVersion` and answered by `ServerVersion` — no Child, reply terminal; how Ctl reads the running Server's version.
+_Avoid_: version handshake, version check
+
+**Version skew**:
+The host binary's version differing from the running Server's; surfaced by Ctl at `status` and `start` as a warning, resolved by `restart`.
+_Avoid_: version mismatch, stale server
+
 **Drain grace**:
 The bounded time a stopping Server grants live connections to finish before they're dropped with container teardown.
 _Avoid_: drain timeout, --timeout (as prose)

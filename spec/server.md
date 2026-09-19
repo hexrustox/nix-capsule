@@ -21,19 +21,20 @@ required; `--timeout` is a non-negative integer number of seconds.
 
 ## Connection handling
 
-One Connection = one Child; connections are handled concurrently.
+One Connection = one Child (the Version probe is the exception: it spawns
+none); connections are handled concurrently.
 
-1. Expect `Request` as the first frame; anything else, or an undecodable
-   frame, ⇒ `Error` and close. A client that leaves before its first frame is
-   dropped silently.
-2. Send `Version`.
-3. Version comparison: a `Request` version differing from the Server's own, or
-   a missing version, is one warning line in the Server's log per § Logging —
-   advisory, never a rejection (spec/protocol.md § Guarantees).
-4. Validate `cwd`: it must be an existing directory inside the container; the
+1. Expect `Request` or `RequestVersion` as the first frame; anything else, or
+   an undecodable frame, ⇒ `Error` and close. A client that leaves before its
+   first frame is dropped silently.
+   - `RequestVersion` opens the Version probe (spec/protocol.md § Version
+     probe): a non-empty or undecodable payload ⇒ terminal `Error` and close;
+     the probe never runs cwd/env validation.
+   - A `Request` continues to step 2.
+2. Validate `cwd`: it must be an existing directory inside the container; the
    same-path mount contract (spec/runtime.md § Mounts) makes host cwds work,
    anything else fails with `Error`.
-5. Spawn the Child:
+3. Spawn the Child:
    - `command` + `args` from the request, `cwd` from the request,
    - request env applied over the inherited Env dump per
      spec/env.md § Merge rules — entries override same-named inherited
@@ -43,11 +44,11 @@ One Connection = one Child; connections are handled concurrently.
      the group (`kill(-pgid, …)`), so grandchildren die with their
      progenitor,
    - all three stdio pipes. Never a TTY (accepted limitation).
-6. Spawn failure with `ENOENT` ⇒ `Exit { code: 127 }`; with `EACCES` ⇒
+4. Spawn failure with `ENOENT` ⇒ `Exit { code: 127 }`; with `EACCES` ⇒
    `Exit { code: 126 }` — terminal frame only, no `Error` (the Client
    synthesizes the message). Any other spawn failure ⇒ `Error { message }`
    and close.
-7. Bridge:
+5. Bridge:
    - `Stdin` frames → Child stdin; an empty frame is stdin EOF — drop the
      pipe (Child sees EOF) and keep the Connection open for `Signal` frames.
      A client write-half close is observably identical on this transport.
@@ -59,7 +60,7 @@ One Connection = one Child; connections are handled concurrently.
       `kill(-pgid, sig)`; kill failures (an already-exited group, an
       out-of-range number) produce one warning line in the Server's log per
       § Logging and the Connection continues to its normal terminal frame.
-8. Child exits ⇒ wait for it, send `Exit { code | signal }` and close. Both
+6. Child exits ⇒ wait for it, send `Exit { code | signal }` and close. Both
    fields null happens only if the exit status is somehow unknowable.
 
 ## Disconnect before the terminal frame
@@ -113,8 +114,7 @@ here; it does not pin line text. Events listed elsewhere
 in this spec reference it rather than describe the log inline:
 
 - a connection opened
-- the Client's `Request` version differing from the Server's own, or missing
-  (one line, advisory — never a rejection, spec/protocol.md § Guarantees)
+- a version probe served (debug)
 - an `exec` request received
 - bookkeeping during the bridge and teardown
 - Server started, socket bound
