@@ -56,11 +56,7 @@ pub fn request(cwd: &Path, script: &str) -> Request {
 /// Send the `RequestVersion` probe frame (empty payload) over `framed`.
 pub async fn send_request_version(framed: &mut Raw) {
     framed
-        .send(
-            Message::RequestVersion
-                .into_frame()
-                .expect("encode probe"),
-        )
+        .send(Message::RequestVersion.into_frame().expect("encode probe"))
         .await
         .expect("send probe");
 }

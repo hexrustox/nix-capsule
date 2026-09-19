@@ -179,10 +179,6 @@ async fn session(
                 Some(Ok(frame)) => match Message::from_frame(frame)
                     .map_err(|source| ClientError::Receive { source })?
                 {
-                    // Version is off the exec path: exec Connections carry
-                    // no version frames in either direction. A stray one is
-                    // ignored, per the misdirected-frame rule.
-                    Message::Version(_) | Message::ServerVersion(_) => {}
                     Message::Stdout(bytes) => {
                         write_stream(Stream::Stdout, &bytes)?;
                     }
@@ -198,6 +194,10 @@ async fn session(
                     Message::ServerStopping => {
                         return Ok(Outcome::just(SHUTDOWN_EXIT));
                     }
+                    // Version is off the exec path: exec Connections carry
+                    // no version frames in either direction. A stray one is
+                    // ignored, per the misdirected-frame rule.
+                    Message::Version(_) | Message::ServerVersion(_) => {}
                     // Server misuse of client-only frames carries nothing
                     // actionable.
                     Message::Request(_) | Message::RequestVersion | Message::Stdin(_)

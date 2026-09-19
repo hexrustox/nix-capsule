@@ -18,7 +18,8 @@ use common::{
     assert::assert_exit_and_stdout,
     missing_socket,
     probe::{
-        assert_clean_exit, request, run_request, send_request, send_request_version,
+        SHELL_HOLD, assert_clean_exit, read_until_stdout_contains, read_until_terminal, request,
+        run_request, send_request, send_request_version, send_signal,
     },
 };
 
@@ -297,10 +298,8 @@ async fn version_probe_serves_server_version_then_closes_without_child() {
     let mut framed = server.raw().await;
     send_request_version(&mut framed).await;
 
-    let frames = common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| {
-        false
-    })
-    .await;
+    let frames =
+        common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| false).await;
 
     assert_eq!(
         frames,
@@ -311,15 +310,15 @@ async fn version_probe_serves_server_version_then_closes_without_child() {
     );
 
     // The reply is terminal: whatever follows the close carries no Exit/Error.
-    let after = common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| {
-        false
-    })
-    .await;
+    let after =
+        common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| false).await;
     let logs = read_newest_server_log(server.path().join("logs"));
     server.stop();
 
     assert!(
-        !after.iter().any(|frame| matches!(frame, Message::Exit(_) | Message::Error(_))),
+        !after
+            .iter()
+            .any(|frame| matches!(frame, Message::Exit(_) | Message::Error(_))),
         "no terminal frame may follow the probe reply: frames={after:?}"
     );
     assert!(
@@ -394,6 +393,73 @@ async fn old_style_request_with_version_field_still_decodes_and_runs() {
 
     assert_clean_exit(&run, "an old-style versioned Request must still run");
     assert_eq!(common::probe::stdout_of(&run), "ok");
+}
+
+// A failed kill is the test vehicle only: the subject is the emit-time
+// severity gate shared by the log file and the stderr mirror. The signal
+// number 200 is invalid, so the failure does not race the child's life like
+// an already-exited group would.
+const OUT_OF_RANGE_SIGNAL: u8 = 200;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn error_log_level_suppresses_kill_warning_in_both_sinks() {
+    let server = Server::builder().log_level("error").start().await;
+    let stderr_before = server.stderr();
+    let mut framed = server.raw().await;
+    // The child holds the full hold after `READY`, so the signal frame —
+    // already sent — is near-certainly processed before the terminal read
+    // finishes; absence of the warning is the assertion, not proof it fired.
+    send_request(
+        &mut framed,
+        server.path(),
+        &format!("echo READY; sleep {SHELL_HOLD}"),
+    )
+    .await;
+    read_until_stdout_contains(&mut framed, "READY").await;
+    send_signal(&mut framed, OUT_OF_RANGE_SIGNAL).await;
+    let frames = read_until_terminal(&mut framed).await;
+    let stderr = server.stderr_since(&stderr_before);
+    let log_file = read_newest_server_log(server.path().join("logs"));
+    server.stop();
+
+    assert_clean_exit(&frames, "the connection must continue past the bad signal");
+    assert!(
+        !stderr.contains("kill(-"),
+        "warning below error must not mirror to stderr: {stderr:?}"
+    );
+    assert!(
+        !log_file.contains("kill(-"),
+        "warning below error must not reach the log file: {log_file:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_log_level_keeps_kill_warning_in_both_sinks() {
+    let server = Server::builder().log_level("debug").start().await;
+    let stderr_before = server.stderr();
+    let mut framed = server.raw().await;
+    send_request(
+        &mut framed,
+        server.path(),
+        &format!("echo READY; sleep {SHELL_HOLD}"),
+    )
+    .await;
+    read_until_stdout_contains(&mut framed, "READY").await;
+    send_signal(&mut framed, OUT_OF_RANGE_SIGNAL).await;
+    let frames = read_until_terminal(&mut framed).await;
+    let stderr = server.stderr_since(&stderr_before);
+    let log_file = read_newest_server_log(server.path().join("logs"));
+    server.stop();
+
+    assert_clean_exit(&frames, "the connection must continue past the bad signal");
+    assert!(
+        stderr.contains("kill(-") && stderr.contains(&OUT_OF_RANGE_SIGNAL.to_string()),
+        "warning at debug must mirror to stderr: {stderr:?}"
+    );
+    assert!(
+        log_file.contains("kill(-") && log_file.contains(&OUT_OF_RANGE_SIGNAL.to_string()),
+        "warning at debug must reach the log file: {log_file:?}"
+    );
 }
 
 // Read back the single per-run server log under `dir`: one run writes one log file.
