@@ -18,16 +18,13 @@ fn main() {
     );
 }
 
-/// Print the completion script of `bin` for `shell` on stdout
+/// Print the completion script of `BIN` for `SHELL` on stdout
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Binary to describe: `ncap` or `ncap-ctl`
-    #[arg()]
+    #[arg(value_name = "BIN")]
     bin: Binary,
-
-    /// Shell to emit: `bash`, `zsh`, `fish`, `elvish`, or `powershell`
-    #[arg()]
+    #[arg(value_name = "SHELL")]
     shell: Shell,
 }
 
