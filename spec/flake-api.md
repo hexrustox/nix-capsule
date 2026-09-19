@@ -98,6 +98,7 @@ flake side makes no guarantee about the derived value.
 | `autoStart` | bool | `true` | Run `ncap-ctl init` from the shellHook. |
 | `runtime` | string | `"auto"` | Sets `NCAP_RUNTIME`. |
 | `packages` | list of packages | `[ ]` | Extra packages added to the Host shell's `packages`, alongside `ncap`, `ncap-ctl`, and the wrapper bins. |
+| `override` | attrset | `{ }` | Attrset merged verbatim over the result of `mkShellNoCC` (`} // override`) — the escape hatch for consumers to set or replace the Host shell's attributes directly. |
 
 ### Type checks
 
@@ -116,7 +117,9 @@ Checked shapes: `image`, `devShell`,
 strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `harden`, `autoStart` bools; `timeout` integer number;
 `project`, `containerName`, `socketPath`, `cacheDir`, `logDir` strings;
-`preShellHook`, `postShellHook` strings; `logLevel` a string. `packages` is
+`preShellHook`, `postShellHook` strings; `logLevel` a string; `override` an
+attrset, merged verbatim (§ Options table above) — its values are
+pass-through, no shape check on entries. `packages` is
 the one deliberate exception: its entries are pass-through values (typically
 derivations), appended verbatim to the shell's `packages` — no shape check or
 render applies. Wrapper attrsets require `name` (string);

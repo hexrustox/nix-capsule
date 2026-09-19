@@ -6,10 +6,14 @@ let
     v:
     if v == null then
       "null"
+    else if builtins.isBool v then
+      "boolean ${if v then "true" else "false"}"
     else if builtins.isString v then
       "string `\"${v}\"`"
     else if builtins.isPath v then
       "nix path `${toString v}`"
+    else if builtins.isAttrs v then
+      "attrset with keys `${builtins.concatStringsSep " " (builtins.attrNames v)}`"
     else
       "${builtins.typeOf v} `${toString v}`";
 
@@ -110,6 +114,8 @@ let
           mkErr opt "a string or attrset" (showReceived elem)
       ) v;
 
+  checkOverride = opt: v: if builtins.isAttrs v then v else mkErr opt "attrset" (showReceived v);
+
   checkers = {
     project = checkString;
     image = checkString;
@@ -129,7 +135,8 @@ let
     postShellHook = checkString;
     autoStart = checkBool;
     runtime = checkString;
-    packages = v: v;
+    packages = _: v: v;
+    override = checkOverride;
   };
 
   defaults = {
@@ -153,7 +160,8 @@ let
     postShellHook = "";
     autoStart = true;
     runtime = "auto";
-    packages = [];
+    packages = [ ];
+    override = { };
   };
 in
 {
@@ -238,10 +246,11 @@ in
         NCAP_NIX = "${pkgs.nix}/bin/nix";
         NCAP_BASH = "${pkgs.bash}/bin/bash";
 
-        packages = [ pkgs.ncap ] ++ wrapperBins ++ args.packages;
+        packages = [ pkgs.ncap ] ++ wrapperBins ++ checked.packages;
 
         shellHook = shellHookFragments;
       }
+      // checked.override
     );
 
   devShellGuard = ''
