@@ -57,7 +57,8 @@ consumer's flake names both shells; only the linkage between them matters.
 
 `mkShell` wraps `pkgs.mkShellNoCC` (shell name `nix-capsule-shell`) and produces:
 
-- `ncap` and `ncap-ctl` on PATH (plus the wrapper bins below),
+- `ncap` and `ncap-ctl` on PATH (plus the wrapper bins below, and any
+  consumer-supplied `packages`),
 - one wrapper bin per `wrappers` entry, shadowing real binaries on
   PATH (§ Wrappers),
 - all configuration exported as `NCAP_*` env vars (the contract is
@@ -96,6 +97,7 @@ flake side makes no guarantee about the derived value.
 | `preShellHook` / `postShellHook` | strings | `""` | Extra shellHook fragments, run before/after the capsule fragments. |
 | `autoStart` | bool | `true` | Run `ncap-ctl init` from the shellHook. |
 | `runtime` | string | `"auto"` | Sets `NCAP_RUNTIME`. |
+| `packages` | list of packages | `[ ]` | Extra packages added to the Host shell's `packages`, alongside `ncap`, `ncap-ctl`, and the wrapper bins. |
 
 ### Type checks
 
@@ -114,7 +116,10 @@ Checked shapes: `image`, `devShell`,
 strings; `wrappers` a list of strings or attrsets (§ Wrappers);
 `harden`, `autoStart` bools; `timeout` integer number;
 `project`, `containerName`, `socketPath`, `cacheDir`, `logDir` strings;
-`preShellHook`, `postShellHook` strings; `logLevel` a string. Wrapper attrsets require `name` (string);
+`preShellHook`, `postShellHook` strings; `logLevel` a string. `packages` is
+the one deliberate exception: its entries are pass-through values (typically
+derivations), appended verbatim to the shell's `packages` — no shape check or
+render applies. Wrapper attrsets require `name` (string);
 `command` defaults to `name`; `env` is a list of strings; `cwd` is
 null or string. Unknown top-level options and unknown wrapper fields
 throw at eval time naming the option or field. `image` has no default —

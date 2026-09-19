@@ -129,6 +129,7 @@ let
     postShellHook = checkString;
     autoStart = checkBool;
     runtime = checkString;
+    packages = v: v;
   };
 
   defaults = {
@@ -152,6 +153,7 @@ let
     postShellHook = "";
     autoStart = true;
     runtime = "auto";
+    packages = [];
   };
 in
 {
@@ -236,7 +238,7 @@ in
         NCAP_NIX = "${pkgs.nix}/bin/nix";
         NCAP_BASH = "${pkgs.bash}/bin/bash";
 
-        packages = [ pkgs.ncap ] ++ wrapperBins;
+        packages = [ pkgs.ncap ] ++ wrapperBins ++ args.packages;
 
         shellHook = shellHookFragments;
       }
