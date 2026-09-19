@@ -1183,15 +1183,7 @@ fn full_env_start_propagates_log_level_to_launch() {
 
 use common::fixture::Responder;
 
-/// A pinned Server version that must differ from the host binaries'
-/// version (build-time string).
-fn skew_server_version() -> &'static str {
-    if nix_capsule::protocol::CURRENT_VERSION == "9.9.9-test" {
-        "9.9.8-test"
-    } else {
-        "9.9.9-test"
-    }
-}
+const SKEW_SERVER_VERSION: &str = "skew_version";
 
 /// stderr of `out` as lossy lines.
 fn stderr_lines(out: &std::process::Output) -> Vec<String> {
@@ -1205,7 +1197,7 @@ fn stderr_lines(out: &std::process::Output) -> Vec<String> {
 fn status_warns_one_line_when_server_version_skews() {
     let fx = fixture::Fixture::new(
         fixture::Config::fresh_live()
-            .with_responder(Responder::Skew(skew_server_version().to_owned())),
+            .with_responder(Responder::Skew(SKEW_SERVER_VERSION.to_owned())),
     );
     let out = fx.status();
     assert!(out.status.success(), "status must not fail: {out:?}");
@@ -1220,7 +1212,7 @@ fn status_warns_one_line_when_server_version_skews() {
     assert_eq!(stderr.len(), 2, "one warning + one advice line: {stderr:?}");
     let warning = &stderr[0];
     assert!(
-        warning.contains(skew_server_version()),
+        warning.contains(SKEW_SERVER_VERSION),
         "warning must name the Server's version: {warning}"
     );
     assert!(
@@ -1249,14 +1241,14 @@ fn status_stays_silent_when_versions_match() {
 fn start_warns_when_live_server_version_skews() {
     let fx = fixture::Fixture::new(
         fixture::Config::fresh_live()
-            .with_responder(Responder::Skew(skew_server_version().to_owned())),
+            .with_responder(Responder::Skew(SKEW_SERVER_VERSION.to_owned())),
     );
     let out = fx.start();
     assert!(out.status.success(), "warning never fails: {out:?}");
     let stderr = stderr_lines(&out);
     assert_eq!(stderr.len(), 2, "{stderr:?}");
     assert!(
-        stderr[0].contains(skew_server_version())
+        stderr[0].contains(SKEW_SERVER_VERSION)
             && stderr[0].contains(nix_capsule::protocol::CURRENT_VERSION),
         "{stderr:?}"
     );
@@ -1269,7 +1261,7 @@ fn start_warns_when_live_server_version_skews() {
 fn start_warns_after_fresh_readiness_when_version_skews() {
     let fx = fixture::Fixture::new(
         fixture::Config::fresh_empty()
-            .with_responder(Responder::Skew(skew_server_version().to_owned())),
+            .with_responder(Responder::Skew(SKEW_SERVER_VERSION.to_owned())),
     );
     let out = fx.start();
     assert!(
@@ -1278,7 +1270,7 @@ fn start_warns_after_fresh_readiness_when_version_skews() {
     );
     let stderr = stderr_lines(&out);
     assert_eq!(stderr.len(), 2, "{stderr:?}");
-    assert!(stderr[0].contains(skew_server_version()), "{stderr:?}");
+    assert!(stderr[0].contains(SKEW_SERVER_VERSION), "{stderr:?}");
     assert!(stderr[1].contains("ncap-ctl restart"), "{stderr:?}");
     assert!(fx.launches().runs() >= 1);
 }
@@ -1341,7 +1333,7 @@ fn init_never_probes_for_version() {
             freshness: fixture::Freshness::Fresh,
             ..Default::default()
         }
-        .with_responder(Responder::Skew(skew_server_version().to_owned())),
+        .with_responder(Responder::Skew(SKEW_SERVER_VERSION.to_owned())),
     );
     let out = fx.init();
     assert!(

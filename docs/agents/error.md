@@ -77,7 +77,10 @@ Prescriptive advice is carried outside the message text:
 - Errors render once, on stderr, at the program's entry point and exit 1.
   Errors return up the stack; `eprintln!()` fires only there, never mid-task
   in command or library code — command handlers surface errors and notices by
-  returning values the toplevel renders.
+  returning values the toplevel renders. **Exception**: the Version-skew
+  warning (spec/ctl.md § Version probe) — a non-fatal notice, not an error —
+  prints itself mid-task with `eprintln!()` in `ncap-ctl`'s Version probe;
+  it carries the binary prefix itself and never fails the command.
 - Every rendered line carries the binary name as prefix
   (`<bin-name>: {err}`); a prefix-less error is a bug.
 - Progress notices (`heating iron \`iron-7\` to 180°C...`) are their own
