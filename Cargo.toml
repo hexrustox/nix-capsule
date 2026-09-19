@@ -11,7 +11,15 @@ tokio-util = { version = "0.7", features = ["codec"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "signal"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "process",
+  "time",
+  "signal",
+] }
 futures-util = { version = "0.3", features = ["sink"] }
 libc = "0.2.189"
 twox-hash = "2.1.2"
@@ -22,3 +30,6 @@ proptest = "1.11.0"
 test-case = "3.3.1"
 tempfile = "3"
 
+[profile.release]
+strip = "symbols"
+lto = "fat"
