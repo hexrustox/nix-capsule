@@ -9,4 +9,4 @@ cd "$script_dir/.."
 ./scripts/build-release-tarball "$system"
 
 hash=$(nix hash file --sri --type sha256 "releases/${system}.tar.gz")
-sed -i "s|\"${system}\" = \"sha256-[^\"]*\";|\"${system}\" = \"${hash}\";|" prebuilt-hashes.nix
+sed -i "s|\"${system}\" = \"sha256-[^\"]*\";|\"${system}\" = \"${hash}\";|" ./nix/prebuilt-hashes.nix
