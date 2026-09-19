@@ -7,7 +7,9 @@ mod common;
 use std::{fs, os::unix::fs::PermissionsExt};
 
 use futures_util::SinkExt;
-use nix_capsule::protocol::{Exit, Message, Request};
+use nix_capsule::protocol::{
+    CURRENT_VERSION, Exit, Frame, FrameType, Message, Request, VersionMsg,
+};
 use proptest::prelude::*;
 use test_case::test_case;
 
@@ -15,7 +17,9 @@ use common::{
     Client, Server,
     assert::assert_exit_and_stdout,
     missing_socket,
-    probe::{assert_clean_exit, request, run_request},
+    probe::{
+        assert_clean_exit, request, run_request, send_request, send_request_version,
+    },
 };
 
 #[test_case(
@@ -288,92 +292,118 @@ async fn non_request_first_frame_is_error_and_close() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn version_mismatch_warns_once_and_continues_to_cwd_validation() {
+async fn version_probe_serves_server_version_then_closes_without_child() {
     let server = Server::builder().start().await;
-    let warnings_before = server.stderr();
+    let mut framed = server.raw().await;
+    send_request_version(&mut framed).await;
 
-    let run = run_request(
-        &mut server.raw().await,
-        Request {
-            version: Some("9.9.9".into()),
-            ..request(server.path(), "printf ok")
-        },
-    )
+    let frames = common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| {
+        false
+    })
     .await;
-    assert_eq!(run.stdout, "ok");
-    assert!(
-        run.frames
-            .iter()
-            .any(|frame| matches!(frame, Message::Version(v) if v.version == nix_capsule::protocol::CURRENT_VERSION)),
-        "the server must still send its Version frame: frames={:?}",
-        run.frames
-    );
-    assert_clean_exit(
-        &run.frames,
-        "a mismatched version must not stop the command",
+
+    assert_eq!(
+        frames,
+        vec![Message::ServerVersion(VersionMsg {
+            version: CURRENT_VERSION.to_string(),
+        })],
+        "the probe gets exactly one ServerVersion frame: frames={frames:?}"
     );
 
-    let run = run_request(
-        &mut server.raw().await,
-        Request {
-            cwd: "/nonexistent-xyz-abc-123".into(),
-            version: Some("9.9.9".into()),
-            ..request(server.path(), "")
-        },
-    )
+    // The reply is terminal: whatever follows the close carries no Exit/Error.
+    let after = common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| {
+        false
+    })
     .await;
-    assert!(
-        matches!(run.terminal.as_ref(), Some(Message::Error(err)) if err.message.contains("cwd")),
-        "bad cwd must still fail with Error: frames={:?}",
-        run.frames
-    );
-
-    let stderr = server.stderr_since(&warnings_before);
+    let logs = read_newest_server_log(server.path().join("logs"));
     server.stop();
 
-    let new_warnings: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.contains("declared version `9.9.9`"))
-        .collect();
-    assert_eq!(
-        new_warnings.len(),
-        2,
-        "one warning per mismatched connection: {stderr:?}"
+    assert!(
+        !after.iter().any(|frame| matches!(frame, Message::Exit(_) | Message::Error(_))),
+        "no terminal frame may follow the probe reply: frames={after:?}"
     );
     assert!(
-        new_warnings.iter().all(|line| line.contains("9.9.9")),
-        "warnings name the client version: {new_warnings:?}"
+        logs.contains("version probe served"),
+        "the debug probe line must appear: {logs:?}"
+    );
+    assert!(
+        !logs.contains("exec request"),
+        "no Child may spawn for a probe: {logs:?}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn missing_version_warns_once_and_command_still_succeeds() {
+async fn version_probe_with_non_empty_payload_is_error_and_close() {
     let server = Server::builder().start().await;
-    let warnings_before = server.stderr();
-
-    let run = run_request(
-        &mut server.raw().await,
-        Request {
-            version: None,
-            ..request(server.path(), "printf ok")
-        },
-    )
-    .await;
-    assert_clean_exit(&run.frames, "a missing version must not stop the command");
-    assert_eq!(run.stdout, "ok");
-
-    let stderr = server.stderr_since(&warnings_before);
+    let mut framed = server.raw().await;
+    framed
+        .send(Frame {
+            frame_type: FrameType::RequestVersion,
+            payload: b"junk".to_vec(),
+        })
+        .await
+        .unwrap();
+    let frames = common::probe::read_until_terminal(&mut framed).await;
     server.stop();
 
-    let new_warnings: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.contains("declared no version"))
-        .collect();
-    assert_eq!(
-        new_warnings.len(),
-        1,
-        "one warning for the missing version: {stderr:?}"
+    assert!(
+        matches!(common::probe::terminal_of(&frames), Some(Message::Error(_))),
+        "expected Error: frames={frames:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reserved_version_frame_mid_bridge_is_ignored() {
+    let server = Server::builder().start().await;
+    let mut framed = server.raw().await;
+    send_request(&mut framed, server.path(), "printf ok").await;
+    framed
+        .send(
+            Message::Version(VersionMsg {
+                version: "9.9.9".into(),
+            })
+            .into_frame()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let run = common::probe::read_until_terminal(&mut framed).await;
+    server.stop();
+
+    assert_clean_exit(&run, "a stray Version frame must not kill the bridge");
+    assert_eq!(common::probe::stdout_of(&run), "ok");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn old_style_request_with_version_field_still_decodes_and_runs() {
+    let server = Server::builder().start().await;
+    let mut framed = server.raw().await;
+    let old_style = format!(
+        r#"{{"command":"sh","args":["-c","printf ok"],"cwd":"{}","env":[],"version":"9.9.9"}}"#,
+        server.path().display()
+    );
+    framed
+        .send(Frame {
+            frame_type: FrameType::Request,
+            payload: old_style.into_bytes(),
+        })
+        .await
+        .unwrap();
+    let run = common::probe::read_until_terminal(&mut framed).await;
+    server.stop();
+
+    assert_clean_exit(&run, "an old-style versioned Request must still run");
+    assert_eq!(common::probe::stdout_of(&run), "ok");
+}
+
+// Read back the single per-run server log under `dir`: one run writes one log file.
+fn read_newest_server_log(dir: std::path::PathBuf) -> String {
+    let entries: Vec<_> = fs::read_dir(&dir)
+        .expect("log dir")
+        .map(|entry| entry.expect("log dir entry").path())
+        .collect();
+    assert_eq!(entries.len(), 1, "one run, one log file");
+    fs::read_to_string(&entries[0]).expect("read log file")
 }
 
 #[test_case(
@@ -404,73 +434,6 @@ async fn client_maps_terminal_frame_to_exit_code(
 
     assert_exit_and_stdout(&out, code, stdout);
     assert!(out.stderr.contains(stderr), "stderr={}", out.stderr);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn error_log_level_suppresses_version_warning_in_both_sinks() {
-    let server = Server::builder().log_level("error").start().await;
-    let stderr_before = server.stderr();
-
-    let run = run_request(
-        &mut server.raw().await,
-        Request {
-            version: Some("9.9.9".into()),
-            ..request(server.path(), "printf ok")
-        },
-    )
-    .await;
-    assert_eq!(run.stdout, "ok");
-    assert_clean_exit(&run.frames, "the command must still succeed");
-
-    let stderr = server.stderr_since(&stderr_before);
-    assert!(
-        !stderr.contains("declared version `9.9.9`"),
-        "warning below error must not mirror to stderr: {stderr:?}"
-    );
-    let log_file = read_newest_server_log(server.path().join("logs"));
-    assert!(
-        !log_file.contains("declared version `9.9.9`"),
-        "warning below error must not reach the log file"
-    );
-    server.stop();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn debug_log_level_keeps_version_warning_in_both_sinks() {
-    let server = Server::builder().log_level("debug").start().await;
-    let stderr_before = server.stderr();
-
-    let run = run_request(
-        &mut server.raw().await,
-        Request {
-            version: Some("9.9.9".into()),
-            ..request(server.path(), "printf ok")
-        },
-    )
-    .await;
-    assert_eq!(run.stdout, "ok");
-
-    let stderr = server.stderr_since(&stderr_before);
-    assert!(
-        stderr.contains("declared version `9.9.9`"),
-        "warning at debug must mirror to stderr: {stderr:?}"
-    );
-    let log_file = read_newest_server_log(server.path().join("logs"));
-    assert!(
-        log_file.contains("declared version `9.9.9`"),
-        "warning at debug must reach the log file"
-    );
-    server.stop();
-}
-
-// Read back the single per-run server log under `dir`: one run writes one log file.
-fn read_newest_server_log(dir: std::path::PathBuf) -> String {
-    let entries: Vec<_> = fs::read_dir(&dir)
-        .expect("log dir")
-        .map(|entry| entry.expect("log dir entry").path())
-        .collect();
-    assert_eq!(entries.len(), 1, "one run, one log file");
-    fs::read_to_string(&entries[0]).expect("read log file")
 }
 
 #[tokio::test(flavor = "multi_thread")]

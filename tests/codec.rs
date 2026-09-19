@@ -56,10 +56,9 @@ prop_compose! {
         (command in ".*",
          args in prop::collection::vec(".*", 0..8),
          cwd in ".*",
-         env in prop::collection::vec(".*", 0..8),
-         version in any::<Option<String>>())
+         env in prop::collection::vec(".*", 0..8))
         -> Request {
-        Request { command, args, cwd, env, version }
+        Request { command, args, cwd, env }
     }
 }
 
@@ -79,13 +78,15 @@ fn arb_message() -> impl Strategy<Value = Message> {
             .prop_map(|(code, signal)| Message::Exit(Exit { code, signal })),
         ".*".prop_map(|message| Message::Error(ErrorMsg { message })),
         Just(Message::ServerStopping),
+        Just(Message::RequestVersion),
         ".*".prop_map(|version| Message::Version(VersionMsg { version })),
+        ".*".prop_map(|version| Message::ServerVersion(VersionMsg { version })),
         any::<u8>().prop_map(|signal| Message::Signal(SignalMsg { signal })),
     ]
 }
 
 fn arb_known_tag() -> impl Strategy<Value = u8> {
-    0x01u8..=0x09
+    0x01u8..=0x0b
 }
 
 #[test_case(
@@ -94,10 +95,9 @@ fn arb_known_tag() -> impl Strategy<Value = u8> {
         args: vec![],
         cwd: "/".into(),
         env: vec![],
-        version: None,
     }),
     framed(0x01, br#"{"command":"sh","args":[],"cwd":"/","env":[]}"#)
-    ; "request_omits_absent_version"
+    ; "request_encodes_without_version"
 )]
 #[test_case(
     Message::Stdin(vec![0xde, 0xad]),
@@ -131,6 +131,19 @@ fn arb_known_tag() -> impl Strategy<Value = u8> {
         format!("{{\"version\":\"{CURRENT_VERSION}\"}}").as_bytes()
     )
     ; "version_carries_crate_version"
+)]
+#[test_case(
+    Message::RequestVersion,
+    b"\x0a\x00\x00\x00\x00".to_vec()
+    ; "request_version_is_tag_0a_empty"
+)]
+#[test_case(
+    Message::ServerVersion(VersionMsg { version: CURRENT_VERSION.into() }),
+    framed(
+        0x0b,
+        format!("{{\"version\":\"{CURRENT_VERSION}\"}}").as_bytes()
+    )
+    ; "server_version_is_tag_0b"
 )]
 #[test_case(
     Message::Signal(SignalMsg { signal: 15 }),
@@ -185,10 +198,22 @@ fn decode_server_stopping_with_non_empty_payload_is_rejected() {
     }
 }
 
+#[test]
+fn decode_request_version_with_non_empty_payload_is_rejected() {
+    let wire = framed(0x0a, b"junk");
+    let mut codec = FrameCodec;
+    let mut src = BytesMut::from(wire.as_slice());
+    let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
+    match Message::from_frame(frame) {
+        Err(DecodeError::NonEmptyRequestVersion(4)) => {}
+        other => panic!("expected NonEmptyRequestVersion(4), got {other:?}"),
+    }
+}
+
 // ------------------------------------------------------------ error taxonomy
 
 #[test_case(0x00 ; "below_range")]
-#[test_case(0x0a ; "just_past_max")]
+#[test_case(0x0c ; "just_past_max")]
 #[test_case(0x7f ; "ascii_control_zone")]
 #[test_case(0xff ; "all_bits_set")]
 fn unknown_tag_bytes_reject_decoding(rejected_tag: u8) {
@@ -206,6 +231,7 @@ fn unknown_tag_bytes_reject_decoding(rejected_tag: u8) {
 #[test_case(FrameType::Exit ; "rejects_exit_junk")]
 #[test_case(FrameType::Error ; "rejects_error_junk")]
 #[test_case(FrameType::Version ; "rejects_version_junk")]
+#[test_case(FrameType::ServerVersion ; "rejects_server_version_junk")]
 #[test_case(FrameType::Signal ; "rejects_signal_junk")]
 fn malformed_struct_payloads_fail_decoding_without_panicking(tag: FrameType) {
     let mut codec = FrameCodec;

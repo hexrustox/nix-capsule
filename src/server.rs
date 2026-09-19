@@ -20,7 +20,9 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
 use crate::ctl::fs_error::FsError;
-use crate::protocol::{CURRENT_VERSION, DecodeError, Exit, FrameCodec, FrameType, Message};
+use crate::protocol::{
+    CURRENT_VERSION, DecodeError, Exit, FrameCodec, FrameType, Message, VersionMsg,
+};
 
 /// Bind `socket` and serve connections until the process is stopped. A
 /// SIGTERM or SIGINT starts the orderly shutdown: `ServerStopping` to every
@@ -137,7 +139,7 @@ pub enum LogLevel {
     Debug,
     /// Lifecycle milestones: start, bind, drain, exit.
     Info,
-    /// Version skew and failed kills; the connection continues.
+    /// Failed kills; the connection continues.
     Warning,
     /// Accept, decode, and spawn failures ending a connection.
     Error,
@@ -210,7 +212,7 @@ impl std::str::FromStr for LogLevel {
 /// the Server's stderr.
 #[derive(Debug, thiserror::Error)]
 enum Rejection {
-    #[error("expected a `Request` frame first, got `{got:?}`")]
+    #[error("expected a `Request` or `RequestVersion` frame first, got `{got:?}`")]
     ExpectedRequest { got: FrameType },
     #[error(transparent)]
     Decode(#[from] DecodeError),
@@ -283,6 +285,21 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
     let request = tokio::select! {
         frame = framed.next() => match frame {
             Some(Ok(frame)) => match Message::from_frame(frame) {
+                // The Version probe: reply one `ServerVersion` and close
+                // immediately — no Child, no cwd/env validation, never sent
+                // `ServerStopping`, not a drain participant. The reply is
+                // terminal: no `Exit` or `Error` after.
+                Ok(Message::RequestVersion) => {
+                    log.debug("version probe served");
+                    send(
+                        &mut framed,
+                        Message::ServerVersion(VersionMsg {
+                            version: CURRENT_VERSION.into(),
+                        }),
+                    )
+                    .await;
+                    return;
+                }
                 Ok(Message::Request(request)) => request,
                 Ok(other) => {
                     send_error(
@@ -314,34 +331,10 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
             return;
         }
     };
-
-    let version = Message::Version(crate::protocol::VersionMsg {
-        version: CURRENT_VERSION.into(),
-    });
-    if !send(&mut framed, version).await {
-        return;
-    }
     log.debug(&format!(
         "exec request for `{}` in `{}`",
         request.command, request.cwd
     ));
-
-    // Version is advisory, never a rejection: a differing (or missing)
-    // request version is one warning line, then the connection continues to
-    // cwd validation. Comparison is exact string equality.
-    match &request.version {
-        Some(peer) if peer == CURRENT_VERSION => {}
-        Some(peer) => {
-            log.warning(&format!(
-                "connection declared version `{peer}` against `{CURRENT_VERSION}`"
-            ));
-        }
-        None => {
-            log.warning(&format!(
-                "connection declared no version against `{CURRENT_VERSION}`"
-            ));
-        }
-    }
 
     if !Path::new(&request.cwd).is_dir() {
         send_error(

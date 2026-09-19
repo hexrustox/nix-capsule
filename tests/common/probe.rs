@@ -41,17 +41,28 @@ pub const SHELL_BODY: u32 = 30;
 /// A raw wire-protocol connection in probe shape, as [`Server::raw`] hands out.
 pub type Raw = Framed<UnixStream, FrameCodec>;
 
-/// Build a `Request` that speaks `sh -c script` from `cwd`, versioned like
-/// the real client and carrying no env override; tests needing extra `env`
-/// entries or a custom `version` mutate the struct's `pub` fields.
+/// Build a `Request` that speaks `sh -c script` from `cwd`, carrying no env
+/// override; tests needing extra `env` entries mutate the struct's `pub`
+/// fields.
 pub fn request(cwd: &Path, script: &str) -> Request {
     Request {
         command: "sh".into(),
         args: vec!["-c".into(), script.into()],
         cwd: cwd.to_string_lossy().into_owned(),
         env: Vec::new(),
-        version: Some(CURRENT_VERSION.into()),
     }
+}
+
+/// Send the `RequestVersion` probe frame (empty payload) over `framed`.
+pub async fn send_request_version(framed: &mut Raw) {
+    framed
+        .send(
+            Message::RequestVersion
+                .into_frame()
+                .expect("encode probe"),
+        )
+        .await
+        .expect("send probe");
 }
 
 /// Encode and send `request` over `framed`.
@@ -66,7 +77,7 @@ pub async fn send_request_msg(framed: &mut Raw, request: Request) {
         .expect("send request");
 }
 
-/// Send `sh -c script` as a Request, versioned like the real client sends.
+/// Send `sh -c script` as a Request.
 pub async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
     send_request_msg(framed, request(cwd, script)).await;
 }

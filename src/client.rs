@@ -172,7 +172,6 @@ async fn session(
     let mut sigint_open = true;
     let mut sigterm_open = true;
 
-    let mut version_seen = false;
     let mut stdin_open = true;
     loop {
         tokio::select! {
@@ -180,12 +179,10 @@ async fn session(
                 Some(Ok(frame)) => match Message::from_frame(frame)
                     .map_err(|source| ClientError::Receive { source })?
                 {
-                    // Version is advisory on this end: a mismatch never
-                    // rejects the session, mirroring the server's
-                    // warn-and-continue policy.
-                    Message::Version(_) => {
-                        version_seen = true;
-                    }
+                    // Version is off the exec path: exec Connections carry
+                    // no version frames in either direction. A stray one is
+                    // ignored, per the misdirected-frame rule.
+                    Message::Version(_) | Message::ServerVersion(_) => {}
                     Message::Stdout(bytes) => {
                         write_stream(Stream::Stdout, &bytes)?;
                     }
@@ -193,11 +190,9 @@ async fn session(
                         write_stream(Stream::Stderr, &bytes)?;
                     }
                     Message::Exit(exit) => {
-                        warn_absent_version(version_seen);
                         return exit_outcome(&exit, &command_name);
                     }
                     Message::Error(err) => {
-                        warn_absent_version(version_seen);
                         return Err(ClientError::ServerError { message: err.message });
                     }
                     Message::ServerStopping => {
@@ -205,7 +200,8 @@ async fn session(
                     }
                     // Server misuse of client-only frames carries nothing
                     // actionable.
-                    Message::Request(_) | Message::Stdin(_) | Message::Signal(_) => {}
+                    Message::Request(_) | Message::RequestVersion | Message::Stdin(_)
+                    | Message::Signal(_) => {}
                 },
                 Some(Err(source)) => return Err(ClientError::Receive { source }),
                 None => {
@@ -266,7 +262,6 @@ fn build_request(
         args: lossy.collect(),
         cwd: cwd.to_string_lossy().into_owned(),
         env,
-        version: Some(crate::protocol::CURRENT_VERSION.into()),
     })
 }
 
@@ -374,11 +369,6 @@ fn exit_outcome(exit: &crate::protocol::Exit, command: &str) -> Result<Outcome, 
         (None, None) => Err(ClientError::MissingExitStatus),
     }
 }
-
-/// The session ended without the server ever sending a version frame.
-/// Absent version is advisory like a mismatch: nothing actionable, so no
-/// warning is emitted.
-fn warn_absent_version(_seen: bool) {}
 
 /// Which of the client's own streams a relayed chunk goes to.
 enum Stream {

@@ -30,10 +30,14 @@ pub enum FrameType {
     Error = 0x06,
     /// Server → client: orderly shutdown notice.
     ServerStopping = 0x07,
-    /// Server → client: version handshake.
+    /// Reserved — sent by no one; a receiver ignores it wherever it arrives.
     Version = 0x08,
     /// Client → server: forwarded host signal.
     Signal = 0x09,
+    /// Client → server: opens the Version probe; exactly 0 bytes.
+    RequestVersion = 0x0A,
+    /// Server → client: the Server's version, as the probe's reply.
+    ServerVersion = 0x0B,
 }
 
 impl FrameType {
@@ -49,6 +53,8 @@ impl FrameType {
             0x07 => Some(Self::ServerStopping),
             0x08 => Some(Self::Version),
             0x09 => Some(Self::Signal),
+            0x0A => Some(Self::RequestVersion),
+            0x0B => Some(Self::ServerVersion),
             _ => None,
         }
     }
@@ -79,9 +85,6 @@ pub struct Request {
     pub cwd: String,
     /// `KEY=VALUE` entries applied by the server over its environment.
     pub env: Vec<String>,
-    /// Present when the sender opts into the handshake.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
 }
 
 /// Exactly one field is set in practice.
@@ -102,7 +105,8 @@ pub struct ErrorMsg {
     pub message: String,
 }
 
-/// Compared by exact equality, advisory only.
+/// The Version probe's reply payload shape, and the reserved `Version`
+/// frame's payload (carried only so receivers can ignore it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionMsg {
     /// Sender's protocol version.
@@ -133,10 +137,14 @@ pub enum Message {
     Error(ErrorMsg),
     /// Server → client: the server is shutting down. Empty payload.
     ServerStopping,
-    /// Server → client: version handshake.
+    /// Reserved — sent by no one; carried only so a receiver can ignore it.
     Version(VersionMsg),
     /// Client → server: a forwarded host signal.
     Signal(SignalMsg),
+    /// Client → server: opens the Version probe. Empty payload.
+    RequestVersion,
+    /// Server → client: the Server's version, as the probe's reply.
+    ServerVersion(VersionMsg),
 }
 
 impl Message {
@@ -152,6 +160,8 @@ impl Message {
             Self::ServerStopping => FrameType::ServerStopping,
             Self::Version(_) => FrameType::Version,
             Self::Signal(_) => FrameType::Signal,
+            Self::RequestVersion => FrameType::RequestVersion,
+            Self::ServerVersion(_) => FrameType::ServerVersion,
         }
     }
 
@@ -174,6 +184,8 @@ impl Message {
             Self::ServerStopping => Vec::new(),
             Self::Version(m) => serde_json::to_vec(&m)?,
             Self::Signal(m) => serde_json::to_vec(&m)?,
+            Self::RequestVersion => Vec::new(),
+            Self::ServerVersion(m) => serde_json::to_vec(&m)?,
         };
         Ok(Frame {
             frame_type,
@@ -208,6 +220,13 @@ impl Message {
             }
             FrameType::Version => Self::Version(serde_json::from_slice(&payload)?),
             FrameType::Signal => Self::Signal(serde_json::from_slice(&payload)?),
+            FrameType::RequestVersion => {
+                if !payload.is_empty() {
+                    return Err(DecodeError::NonEmptyRequestVersion(payload.len()));
+                }
+                Self::RequestVersion
+            }
+            FrameType::ServerVersion => Self::ServerVersion(serde_json::from_slice(&payload)?),
         })
     }
 }
@@ -235,6 +254,9 @@ pub enum DecodeError {
     /// `Exit` sets both `code` and `signal` (spec: exactly one in practice).
     #[error("both `code` and `signal` set in `Exit` frame")]
     InvalidExit,
+    /// `RequestVersion` arrived with a non-empty payload (spec: empty).
+    #[error("non-empty `RequestVersion` payload: {0} bytes")]
+    NonEmptyRequestVersion(usize),
     /// Reading a frame off the socket failed.
     #[error(transparent)]
     Read {
