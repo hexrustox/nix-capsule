@@ -7,7 +7,7 @@
 }:
 
 let
-  cargoToml = fromTOML (builtins.readFile ./Cargo.toml);
+  cargoToml = fromTOML (builtins.readFile ../Cargo.toml);
   version = cargoToml.package.version;
 
   hashes = import ./prebuilt-hashes.nix;

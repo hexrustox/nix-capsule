@@ -15,14 +15,14 @@
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       flake = {
-        lib = { pkgs }: import ./lib.nix { inherit pkgs; };
+        lib = { pkgs }: import ./nix/lib.nix { inherit pkgs; };
 
         overlays = {
           default =
             final: prev:
             let
               system = prev.stdenv.targetPlatform.system;
-              hashes = import ./prebuilt-hashes.nix;
+              hashes = import ./nix/prebuilt-hashes.nix;
             in
             {
               ncap =
@@ -64,7 +64,7 @@
                 rustc = rust;
               };
             };
-            ncap-prebuilt = pkgs.callPackage ./prebuilt.nix {
+            ncap-prebuilt = pkgs.callPackage ./nix/prebuilt.nix {
               inherit system;
             };
           };
