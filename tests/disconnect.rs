@@ -9,30 +9,32 @@ mod common;
 use std::fs;
 
 use futures_util::SinkExt;
-use nix_capsule::protocol::Message;
 use test_case::test_case;
 use tokio::io::AsyncWriteExt;
 
+use nix_capsule::protocol::Message;
 use common::{
     Server,
-    probe::{
-        Raw, SHELL_TICK, WAIT_PHASE, WAIT_ROOMY, WAIT_TIGHT, assert_clean_exit, poll_until,
-        read_until_terminal, request_and_vanish, second_connection_succeeds, send_request,
-        stdout_of, wait_for_marker, zombies_under,
+    child::{
+        WAIT_PHASE, WAIT_ROOMY, WAIT_TIGHT, poll_until, request_and_vanish,
+        second_connection_succeeds, vanish_and_confirm_gone, wait_for_marker, zombies_under,
     },
-    script::{group_trap_script, trapping_ticker_script},
+    probe::{assert_clean_exit, read_until_terminal, send_request, stdout_of},
+    script::{group_trap_script, surviving_trap_script, trapping_ticker_script},
 };
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_close_terms_group_and_next_connection_succeeds() {
     let server = Server::builder().start().await;
     let marker = server.path().join("term-marker");
-    request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
-
-    assert!(
-        wait_for_marker(&marker, "gone", WAIT_TIGHT).await,
-        "the group outlived {WAIT_TIGHT:?} after the client vanished"
-    );
+    vanish_and_confirm_gone(
+        &server,
+        &trapping_ticker_script(&marker),
+        "READY",
+        &marker,
+        WAIT_TIGHT,
+    )
+    .await;
 
     second_connection_succeeds(
         &server,
@@ -43,6 +45,7 @@ async fn full_close_terms_group_and_next_connection_succeeds() {
     .await;
     server.stop();
 }
+
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnect_terms_whole_group_including_grandchild() {
     let server = Server::builder().start().await;
@@ -69,12 +72,14 @@ async fn disconnect_terms_whole_group_including_grandchild() {
 async fn disconnect_termed_child_is_reaped_leaving_no_zombie() {
     let server = Server::builder().start().await;
     let marker = server.path().join("reap-marker");
-    request_and_vanish(&server, &trapping_ticker_script(&marker), "READY").await;
-
-    assert!(
-        wait_for_marker(&marker, "gone", WAIT_TIGHT).await,
-        "the group outlived {WAIT_TIGHT:?} after the client vanished"
-    );
+    vanish_and_confirm_gone(
+        &server,
+        &trapping_ticker_script(&marker),
+        "READY",
+        &marker,
+        WAIT_TIGHT,
+    )
+    .await;
 
     let server_pid = server.pid().expect("real server has a pid");
     let reaped = poll_until(WAIT_ROOMY, || zombies_under(server_pid).is_empty()).await;
@@ -87,9 +92,9 @@ async fn disconnect_termed_child_is_reaped_leaving_no_zombie() {
     );
 }
 
-// How stdin EOF reaches the child: the write half closes while the read half
-// stays open, or an empty Stdin frame arrives keeping the connection open for
-// later `Signal` frames.
+/// How stdin EOF reaches the child: the write half closes while the read
+/// half stays open, or an empty `Stdin` frame arrives keeping the connection
+/// open for later `Signal` frames.
 enum StdinEof {
     WriteHalfShutdown,
     EmptyFrame,
@@ -100,7 +105,7 @@ enum StdinEof {
 #[tokio::test(flavor = "multi_thread")]
 async fn stdin_eof_is_never_a_disconnect_and_lets_the_child_finish(eof_style: StdinEof) {
     let server = Server::builder().start().await;
-    let mut framed: Raw = server.raw().await;
+    let mut framed = server.raw().await;
     send_request(&mut framed, server.path(), "cat; echo done").await;
     framed
         .send(
@@ -148,13 +153,7 @@ async fn term_trapping_child_holds_only_own_connection_and_others_keep_working()
     // away once the server drops the pipe. The heartbeats it then stamps
     // into the marker are the no-escalation witness: a server that KILLed
     // after the TERM would stop them early.
-    let script = format!(
-        "trap 'echo trapped >> {}; exec 1>/dev/null' TERM; echo A-READY; \
-         for i in 1 2 3 4 5 6 7 8 9 10; do echo tick-a; sleep {SHELL_TICK}; done; \
-         for i in 1 2 3 4 5; do sleep {SHELL_TICK}; echo alive-$i >> {}; done",
-        marker.display(),
-        marker.display()
-    );
+    let script = surviving_trap_script(&marker);
     request_and_vanish(&server, &script, "A-READY").await;
 
     assert!(
@@ -162,8 +161,7 @@ async fn term_trapping_child_holds_only_own_connection_and_others_keep_working()
         "the child never received (or never survived) the disconnect TERM"
     );
 
-    // The first child is still alive here, its connection task holding; the
-    // server must still serve other connections.
+    // The first child is still alive here, its connection task holding.
     second_connection_succeeds(
         &server,
         "echo hello",

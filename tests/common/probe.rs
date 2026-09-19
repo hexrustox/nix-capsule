@@ -1,42 +1,19 @@
-//! A probe module for the wire: raw-language tests speak frames to a
-//! [`Server`] or watch its tempdir, through one shared helper set — no
-//! per-file copy of frame collection, timeout shaping, or polling.
+//! The wire module: raw-language tests speak frames to a [`Server`] through one shared helper set.
+//!
+//! One request run per connection, frames collected through the Terminal
+//! frame. Child lifecycle (markers, vanish, reaping) lives in
+//! [`super::child`]; shell text lives in [`super::script`]. The Version
+//! probe stays on this Connection (ADR-0004: no version-on-exec).
 
-use std::{
-    fs,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use nix_capsule::protocol::{CURRENT_VERSION, Exit, FrameCodec, Message, Request, SignalMsg};
+use nix_capsule::protocol::{Exit, FrameCodec, Message, Request, SignalMsg};
 use tokio::net::UnixStream;
-use tokio::time::sleep;
 use tokio_util::codec::Framed;
 
+use super::child::WAIT_PHASE;
 use super::server::Server;
-
-/// Tight bound: full-[`SHELL_BODY`] holds — the drain deadline must expire
-/// and the client bail — must land within ~one want.
-pub const WAIT_TIGHT: Duration = Duration::from_secs(2);
-
-/// Roomy bound: reaping a provably-dead child and the group's TERM-trap
-/// markers must arrive well inside the harness headroom.
-pub const WAIT_ROOMY: Duration = Duration::from_secs(5);
-
-/// Upper bound on one phase; a red run fails on the assertion, never on the
-/// harness itself. Stays below a [`SHELL_BODY`]-second `sleep`, so a survivor
-/// outlasts the test.
-pub const WAIT_PHASE: Duration = Duration::from_secs(20);
-
-/// Tick interval inside child scripts: feed loops that stream to a client
-/// and heartbeat stamps that witness a full TERM grace.
-pub const SHELL_TICK: f64 = 0.2;
-/// Bounded hold inside child scripts: the red-run bound, the trap aftermath,
-/// and the signal-loop tick.
-pub const SHELL_HOLD: u32 = 1;
-/// Survivor body: a child sleep that must outlive every test bound.
-pub const SHELL_BODY: u32 = 30;
 
 /// A raw wire-protocol connection in probe shape, as [`Server::raw`] hands out.
 pub type Raw = Framed<UnixStream, FrameCodec>;
@@ -53,7 +30,7 @@ pub fn request(cwd: &Path, script: &str) -> Request {
     }
 }
 
-/// Send the `RequestVersion` probe frame (empty payload) over `framed`.
+/// The Version probe carries an empty payload.
 pub async fn send_request_version(framed: &mut Raw) {
     framed
         .send(Message::RequestVersion.into_frame().expect("encode probe"))
@@ -61,21 +38,15 @@ pub async fn send_request_version(framed: &mut Raw) {
         .expect("send probe");
 }
 
-/// Encode and send `request` over `framed`.
-pub async fn send_request_msg(framed: &mut Raw, request: Request) {
+pub async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
     framed
         .send(
-            Message::Request(request)
+            Message::Request(request(cwd, script))
                 .into_frame()
                 .expect("encode request"),
         )
         .await
         .expect("send request");
-}
-
-/// Send `sh -c script` as a Request.
-pub async fn send_request(framed: &mut Raw, cwd: &Path, script: &str) {
-    send_request_msg(framed, request(cwd, script)).await;
 }
 
 /// Read frames until `done` matches one (which is included) or `limit`
@@ -125,7 +96,6 @@ pub async fn read_until_terminal(framed: &mut Raw) -> Vec<Message> {
     read_until_terminal_within(framed, WAIT_PHASE).await
 }
 
-/// All stdout bytes carried by `frames`.
 pub fn stdout_of(frames: &[Message]) -> String {
     frames
         .iter()
@@ -141,25 +111,32 @@ pub fn stdout_of(frames: &[Message]) -> String {
 pub struct RawRun {
     /// Every frame seen, including the terminal one.
     pub frames: Vec<Message>,
-    /// All stdout bytes carried by `frames`.
     pub stdout: String,
-    /// The terminal frame, if one arrived.
     pub terminal: Option<Message>,
 }
 
 /// Send `request` and collect frames through the terminal frame; see
-/// [`read_until_terminal`] for the timeout shape.
-pub async fn run_request(framed: &mut Raw, request: Request) -> RawRun {
-    send_request_msg(framed, request).await;
+/// [`read_until_terminal`] for the timeout shape. The one RawRun interface:
+/// every wire test enters through here instead of stacking send/read pairs.
+pub async fn run_raw_request(framed: &mut Raw, request: Request) -> RawRun {
+    framed
+        .send(
+            Message::Request(request)
+                .into_frame()
+                .expect("encode request"),
+        )
+        .await
+        .expect("send request");
     let frames = read_until_terminal(framed).await;
+    let stdout = stdout_of(&frames);
+    let terminal = terminal_of(&frames).cloned();
     RawRun {
-        stdout: stdout_of(&frames),
-        terminal: terminal_of(&frames).cloned(),
         frames,
+        stdout,
+        terminal,
     }
 }
 
-/// The terminal frame, if one arrived.
 pub fn terminal_of(frames: &[Message]) -> Option<&Message> {
     frames
         .iter()
@@ -178,39 +155,6 @@ pub fn assert_clean_exit(frames: &[Message], context: &str) {
     );
 }
 
-/// Poll a synchronous predicate every 25 ms until it holds or `limit`
-/// elapses; `false` means the deadline passed with the predicate still
-/// failing.
-pub async fn poll_until(limit: Duration, mut predicate: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + limit;
-    loop {
-        if predicate() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        sleep(Duration::from_millis(25)).await;
-    }
-}
-
-/// Poll `marker` until it contains `needle`, via [`poll_until`].
-pub async fn wait_for_marker(marker: &Path, needle: &str, limit: Duration) -> bool {
-    poll_until(limit, || {
-        fs::read_to_string(marker).is_ok_and(|content| content.contains(needle))
-    })
-    .await
-}
-
-/// Poll until `name` exists in the server's tempdir — the child's cwd — or
-/// panic; children write flag files as observable progress markers.
-pub async fn wait_for_flag(server: &Server, name: &str) {
-    let flag = server.path().join(name);
-    let appeared = poll_until(WAIT_PHASE, || flag.exists()).await;
-    assert!(appeared, "{name} never appeared");
-}
-
-/// Send one `Signal` frame with `number`.
 pub async fn send_signal(framed: &mut Raw, signal: u8) {
     framed
         .send(
@@ -237,61 +181,11 @@ pub async fn ready_signal_terminal(
     read_until_terminal_within(framed, limit).await
 }
 
-/// Send `script` as a request, wait for the child to announce `ready` on
-/// stdout, then drop the connection abruptly — the client vanishes before
-/// any terminal frame.
-pub async fn request_and_vanish(server: &Server, script: &str, ready: &str) {
-    let mut framed = server.raw().await;
-    send_request(&mut framed, server.path(), script).await;
-    read_until_stdout_contains(&mut framed, ready).await;
-    drop(framed);
-}
-
-/// Run `script` over a fresh connection and collect frames through the
-/// terminal one, asserting a clean exit with `expect` on stdout. The server
-/// is left running — stop it after any marker reads, whose tempdir teardown
-/// `stop` takes with it.
-pub async fn second_connection_succeeds(
-    server: &Server,
-    script: &str,
-    expect: &str,
-    context: &str,
-) {
-    let mut framed = server.raw().await;
-    let run = run_request(&mut framed, request(server.path(), script)).await;
-    assert_clean_exit(&run.frames, context);
-    assert!(run.stdout.contains(expect), "stdout={:?}", run.stdout);
-}
-
-/// Pids of zombie processes whose parent is `server_pid`, scanned straight
-/// from `/proc`: a child the server never reaped stays visible here in state
-/// `Z` forever, so an empty result means nothing is left to reap.
-pub fn zombies_under(server_pid: u32) -> Vec<u32> {
-    let mut zombies = Vec::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return zombies;
-    };
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
-        };
-        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        // `comm` may carry spaces and parens; the fixed fields resume after
-        // the last `)`. State is field 3, ppid field 4.
-        let Some((_, rest)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let mut fields = rest.split_whitespace();
-        let state = fields.next().unwrap_or_default();
-        let ppid = fields.next().unwrap_or_default();
-        if state == "Z" && ppid == server_pid.to_string() {
-            zombies.push(pid);
-        }
-    }
-    zombies
+/// Start a real server and open one raw connection to it — the two-step
+/// dance every wire-level test opens with. Stop the server in the test when
+/// the phase ordering demands it, exactly as though the builder had run.
+pub async fn start_test_server() -> (Server, Raw) {
+    let server = Server::builder().start().await;
+    let framed = server.raw().await;
+    (server, framed)
 }

@@ -10,10 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::probe::WAIT_PHASE;
-
-/// One Client per test: drives the real `ncap` binary against a Server socket,
-/// one command per connection, streaming stdio back as a [`ClientOutput`].
 pub struct Client<'a> {
     socket: &'a Path,
     cwd: Option<&'a Path>,
@@ -66,8 +62,8 @@ impl<'a> Client<'a> {
     pub fn spawn(self, args: &[&str]) -> ClientProc {
         let mut cmd = std::process::Command::new(bin_path("ncap"));
         cmd.arg("--socket").arg(self.socket);
-        if let Some(c) = self.cwd {
-            cmd.arg("--cwd").arg(c);
+        if let Some(cwd) = self.cwd {
+            cmd.arg("--cwd").arg(cwd);
         }
         for spec in &self.env_flags {
             cmd.arg("--env").arg(spec);
@@ -91,7 +87,8 @@ impl<'a> Client<'a> {
         ClientProc { child }
     }
 
-    /// Run the client binary end to end with `args` as the exec command.
+    /// Run the client binary end to end with `args` as the exec command: spawn
+    /// it, wait for it, collect its output.
     pub fn run(self, args: &[&str]) -> ClientOutput {
         self.spawn(args).wait()
     }
@@ -152,7 +149,7 @@ impl ClientProc {
     /// Wait for the client to exit and collect its output. Bounded: a client
     /// that never exits is killed and the test fails with a named panic.
     pub fn wait(self) -> ClientOutput {
-        self.wait_within(WAIT_PHASE, "client")
+        self.wait_within(super::child::WAIT_PHASE, "client")
     }
 }
 

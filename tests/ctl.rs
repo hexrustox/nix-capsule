@@ -7,76 +7,67 @@ mod common;
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
-use common::fixture;
+use nix_capsule::protocol::CURRENT_VERSION;
+use test_case::test_case;
 
-/// The drain deadline as the `--timeout` string the fixture passes through.
-// String form is what the fixture passes through to `--timeout`.
+use common::fixture::{self, Responder};
+
+// `--timeout` as a string, the form the fixture passes through.
 fn drain_timeout() -> String {
-    common::probe::WAIT_TIGHT.as_secs().to_string()
+    common::WAIT_TIGHT.as_secs().to_string()
 }
 
-// Each command names the missing var it refuses on: the var must appear in stderr.
-
-#[test]
-fn init_refuses_when_demanded_var_is_missing() {
-    let demanded = [
-        "NCAP_PROJECT_ROOT",
-        "NCAP_PROJECT",
-        "NCAP_CONTAINER",
-        "NCAP_SOCKET",
-        "NCAP_CACHE_DIR",
-        "NCAP_LOG_DIR",
-        "NCAP_IMAGE",
-        "NCAP_SERVER",
-        "NCAP_NIX",
-        "NCAP_BASH",
-        "NCAP_DEVSHELL",
-        "NCAP_RUNTIME",
-        "NCAP_TIMEOUT",
-        "NCAP_WATCH_FILES",
-        "NCAP_RUN_OPTS",
-        "NCAP_HARDEN",
-        "NCAP_LOG_LEVEL",
-    ];
-    for demanded_var in demanded {
-        // For NCAP_PROJECT_ROOT removal, NCAP_CONTAINER etc. still set so
-        // the error should still name NCAP_PROJECT_ROOT, not a derived var.
-        let fx = fixture::Fixture::new(fixture::Config::default()).without(demanded_var);
-        let out = fx.init();
-        assert!(
-            !out.status.success(),
-            "init without {demanded_var} must fail"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains(demanded_var),
-            "init without {demanded_var} must name it: stderr={stderr}"
-        );
-    }
+#[test_case("NCAP_PROJECT_ROOT")]
+#[test_case("NCAP_PROJECT")]
+#[test_case("NCAP_CONTAINER")]
+#[test_case("NCAP_SOCKET")]
+#[test_case("NCAP_CACHE_DIR")]
+#[test_case("NCAP_LOG_DIR")]
+#[test_case("NCAP_IMAGE")]
+#[test_case("NCAP_SERVER")]
+#[test_case("NCAP_NIX")]
+#[test_case("NCAP_BASH")]
+#[test_case("NCAP_DEVSHELL")]
+#[test_case("NCAP_RUNTIME")]
+#[test_case("NCAP_TIMEOUT")]
+#[test_case("NCAP_WATCH_FILES")]
+#[test_case("NCAP_RUN_OPTS")]
+#[test_case("NCAP_HARDEN")]
+#[test_case("NCAP_LOG_LEVEL")]
+fn init_refuses_when_demanded_var_is_missing(demanded_var: &str) {
+    // Other derived vars are still set, so a wrong error would name one of
+    // those instead of NCAP_PROJECT_ROOT.
+    let fx = fixture::Fixture::new(fixture::Config::default()).without(demanded_var);
+    let out = fx.init();
+    assert!(
+        !out.status.success(),
+        "init without {demanded_var} must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(demanded_var),
+        "init without {demanded_var} must name it: stderr={stderr}"
+    );
 }
 
-#[test]
-fn commands_refuse_watch_files_that_are_not_relative_files() {
-    let cases = [
-        (r#"/abs/nix"#, "/abs/nix"),
-        (r#"../escape"#, "../escape"),
-        (r#"adir"#, "adir"),
-    ];
-    for (entry_json, entry) in cases {
-        let fx = fixture::Fixture::new(fixture::Config::default());
-        fx.seed_dir("adir");
-        let fx = fx.with_watch_files(&format!(r#"["{entry_json}"]"#));
-        let out = fx.status();
-        assert!(
-            !out.status.success(),
-            "watch entry `{entry}` must fail the command"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("NCAP_WATCH_FILES") && stderr.contains(entry),
-            "error must name the var and the entry `{entry}`: stderr={stderr}"
-        );
-    }
+#[test_case("/abs/nix")]
+#[test_case("../escape")]
+#[test_case("adir")]
+fn commands_refuse_watch_files_that_are_not_relative_files(entry: &str) {
+    let entry_json = format!(r#""{entry}""#);
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    fx.seed_dir("adir");
+    let fx = fx.with_watch_files(&format!(r#"[{entry_json}]"#));
+    let out = fx.status();
+    assert!(
+        !out.status.success(),
+        "watch entry `{entry}` must fail the command"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("NCAP_WATCH_FILES") && stderr.contains(entry),
+        "error must name the var and the entry `{entry}`: stderr={stderr}"
+    );
 }
 
 #[test]
@@ -146,8 +137,6 @@ fn stop_refuses_without_container_or_derivation() {
 
 #[test]
 fn derived_project_name_sanitizes_and_empty_root_fails_naming_project() {
-    // Root whose basename is "my-proj" → sanitized "my-proj" via setup-env.
-    // Remove explicit container/project so setup-env derivation is exercised.
     let fx = fixture::Fixture::with_root_name("my-proj")
         .without("NCAP_CONTAINER")
         .without("NCAP_PROJECT");
@@ -191,11 +180,9 @@ fn derived_project_name_sanitizes_and_empty_root_fails_naming_project() {
 
 #[test]
 fn stamp_guard_same_root_passes_absent_written_different_is_error() {
-    // Container down → eval + start; Liveness guard held by down().
     let mut fx = fixture::Fixture::new(fixture::Config::default());
 
     let root_a = fx.set_root("root-a");
-    // First init: stamp absent → written, then start (container down → eval + start)
     let out = fx.init();
     assert!(
         out.status.success(),
@@ -204,9 +191,8 @@ fn stamp_guard_same_root_passes_absent_written_different_is_error() {
     );
     assert_eq!(fx.stamp_content(), root_a.to_string_lossy().as_ref());
 
-    // Same root again → pass
     fx.set_running(true);
-    // Fresh cache so no eval needed
+    // Fresh cache so no eval is needed on the re-init.
     let out2 = fx.init();
     assert!(
         out2.status.success(),
@@ -214,7 +200,6 @@ fn stamp_guard_same_root_passes_absent_written_different_is_error() {
         String::from_utf8_lossy(&out2.stderr)
     );
 
-    // Different root under same cache → hard error with hint
     fx.set_root("root-b");
     let out3 = fx.init();
     assert!(!out3.status.success());
@@ -255,7 +240,6 @@ fn init_running_but_stale_reevals_and_restarts() {
         watch: vec!["flake.nix".to_owned()],
         ..Default::default()
     });
-    // Live but stale ⇒ re-eval, non-fatal stop, then start to readiness.
     let out = fx.init();
     assert!(
         out.status.success(),
@@ -276,7 +260,6 @@ fn init_running_but_stale_reevals_and_restarts() {
 #[test]
 fn init_down_evals_and_starts() {
     let fx = fixture::Fixture::new(fixture::Config::default()).with_watch_files("[]");
-    // No cache yet: init must eval then start.
     let out = fx.init();
     assert!(
         out.status.success(),
@@ -310,9 +293,6 @@ fn not_live_without_connectable_socket_fails_with_never_live() {
     })
     .with_timeout(&drain_timeout());
 
-    // init must not take the live+fresh early return: it must attempt a
-    // start (visible as a `run` invocation), which then fails readiness
-    // because the socket never becomes connectable.
     let out = fx.init();
     assert!(
         !out.status.success(),
@@ -347,7 +327,6 @@ fn not_live_without_connectable_socket_fails_with_never_live() {
 
 #[test]
 fn start_never_reaching_running_fails_with_state_and_log_tail() {
-    // Never Running: run never flips the flag (readiness deadline).
     let fx = fixture::Fixture::new(fixture::Config {
         failure: Some(fixture::Failure::NeverRunning(
             r#"{"Running":false,"Status":"exited","Error":"bad image"}"#.to_owned(),
@@ -371,7 +350,7 @@ fn start_never_reaching_running_fails_with_state_and_log_tail() {
 
 #[test]
 fn concurrent_start_peer_running_succeeds_without_rm() {
-    // After the failed run, inspect says running true → success.
+    // The failed run is the peer's; inspect then reports the peer running.
     let fx = fixture::Fixture::new(fixture::Config {
         failure: Some(fixture::Failure::RunFailOnce),
         ..fixture::Config::fresh_live()
@@ -411,7 +390,6 @@ fn concurrent_start_peer_dead_removes_and_retries_once() {
         "must have removed dead container: {}",
         fx.runtime_log()
     );
-    // Exactly two run attempts
     assert_eq!(fx.run_count_file(), "2");
 }
 
@@ -428,7 +406,6 @@ fn start_removes_stopped_container_before_launch() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // Pre-launch rm must run before the single launch.
     assert!(
         fx.saw(fixture::Action::RmBeforeRun),
         "pre-launch rm must run before run: {}",
@@ -445,7 +422,6 @@ fn start_removes_stopped_container_before_launch() {
 #[test]
 fn second_stop_succeeds_without_error() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_live()).not_live();
-    // First: running true → stop succeeds (full env via the seam).
     let out = fx.stop();
     assert!(
         out.status.success(),
@@ -453,7 +429,6 @@ fn second_stop_succeeds_without_error() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Second stop: not running → still success
     let out2 = fx.stop();
     assert!(
         out2.status.success(),
@@ -468,7 +443,6 @@ fn clean_removes_project_files_and_spares_foreign_entries() {
     // Drop the Liveness guard so a plain Socket file can stand in.
     fx.drop_live();
     fx.seed_clean_full();
-    let sibling = fx.socket_parent_dir().join("sibling.txt");
 
     let out = fx.clean();
     assert!(
@@ -483,14 +457,12 @@ fn clean_removes_project_files_and_spares_foreign_entries() {
     assert!(!fx.cache_has("profile"), "profile must be removed");
     assert!(!fx.cache_has("project"), "stamp must be removed");
     assert!(!fx.cache_has("profile-1-link"), "gen link must be removed");
-    // The foreign cache file survives, so the dir stays.
     assert!(
         fx.cache_has("unrelated.txt"),
         "foreign cache file must survive"
     );
     assert!(fx.cache_is_dir(), "non-empty cache dir must survive");
 
-    // Server logs are gone; the foreign log file survives.
     assert!(
         !fx.logs_has("ncap-server-1000.log"),
         "server log 1 must be removed"
@@ -505,9 +477,11 @@ fn clean_removes_project_files_and_spares_foreign_entries() {
     );
     assert!(fx.logs_is_dir(), "non-empty log dir must survive");
 
-    // The socket file is gone; the sibling survives and the parent stays.
     assert!(!fx.socket_exists(), "socket file must be removed");
-    assert!(sibling.is_file(), "socket-dir sibling must survive");
+    assert!(
+        fx.socket_sibling_is_file("sibling.txt"),
+        "socket-dir sibling must survive"
+    );
     assert!(
         fx.socket_parent_is_dir(),
         "non-empty socket parent must survive"
@@ -535,7 +509,6 @@ fn clean_removes_empty_dirs_and_second_clean_succeeds() {
         "emptied socket parent should be removed"
     );
 
-    // A second clean with nothing left (dirs absent) must still succeed.
     let out2 = fx.clean();
     assert!(
         out2.status.success(),
@@ -572,13 +545,11 @@ fn status_shows_running_connectable_fresh_stale_missing() {
     assert!(stdout.contains("connectable"), "stdout={stdout}");
     assert!(stdout.contains("fresh"), "stdout={stdout}");
 
-    // Stale cache
     fx.make_stale();
     let out2 = fx.status();
     let stdout2 = String::from_utf8_lossy(&out2.stdout);
     assert!(stdout2.contains("stale"), "stdout={stdout2}");
 
-    // Missing cache (remove env)
     fx.make_missing_env();
     let out3 = fx.status();
     let stdout3 = String::from_utf8_lossy(&out3.stdout);
@@ -603,7 +574,6 @@ fn missing_runtime_fails_naming_runtime_var() {
     let bin_dir = fx.tmp_path().join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
 
-    // No NCAP_RUNTIME → error naming it per the contract.
     // Prepend bin_dir to PATH so `auto` would resolve if a default ever
     // shipped a stub there.
     let fx = fx.with_path_prepend(&bin_dir);
@@ -622,18 +592,19 @@ fn invalid_runtime_fails_naming_runtime_var() {
     assert!(stderr.contains("NCAP_RUNTIME"), "stderr={stderr}");
 }
 
-#[test]
-fn auto_runtime_resolves_podman_from_path() {
-    // `auto` with an executable `podman` in a PATH dir: start succeeds,
-    // proving the adapter resolved `podman` (resolution is the only
-    // difference from the neither-found failure path).
+// `auto` with an executable runtime stub in a PATH dir: start succeeds,
+// proving the adapter resolved the runtime (resolution is the only
+// difference from the neither-found failure path).
+#[test_case("podman" ; "resolves_podman_from_path")]
+#[test_case("docker" ; "falls_back_to_docker")]
+fn auto_runtime_resolves_runtime_from_path(runtime: &str) {
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("NCAP_RUNTIME", "auto")
-        .with_runtime_discoverable("podman");
+        .with_runtime_discoverable(runtime);
     let out = fx.start();
     assert!(
         out.status.success(),
-        "auto must resolve podman: stderr={}",
+        "auto must resolve {runtime}: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
@@ -643,27 +614,8 @@ fn auto_runtime_resolves_podman_from_path() {
     );
 }
 
-#[test]
-fn auto_runtime_falls_back_to_docker() {
-    // `auto` with only `docker` on PATH: start succeeds via docker.
-    let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
-        .with_env("NCAP_RUNTIME", "auto")
-        .with_runtime_discoverable("docker");
-    let out = fx.start();
-    assert!(
-        out.status.success(),
-        "auto must fall back to docker: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        fx.launches().runs() >= 1,
-        "resolved runtime must have launched: {}",
-        fx.runtime_log()
-    );
-}
-
-/// A runtime-free dir to pin `PATH` to: `auto` resolution then depends
-/// only on the stub world, not the ambient machine.
+// A runtime-free dir to pin `PATH` to: `auto` resolution then depends
+// only on the stub world, not the ambient machine.
 fn runtime_free_path_dir() -> String {
     let dir = std::env::temp_dir().join(format!("ncap-test-empty-path-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -673,8 +625,6 @@ fn runtime_free_path_dir() -> String {
 
 #[test]
 fn auto_runtime_without_either_fails_instead_of_reporting_not_running() {
-    // User story 6: under `auto` + no runtime, even `status` is a hard
-    // config error, never the silent "container is not running" report.
     let dir = runtime_free_path_dir();
     let fx = fixture::Fixture::new(fixture::Config::default())
         .with_env("NCAP_RUNTIME", "auto")
@@ -717,8 +667,6 @@ fn runtime_dir_is_created_with_0700() {
         .without("NCAP_CONTAINER")
         .with_env("HOME", &home.to_string_lossy())
         .with_env("TMPDIR", &xdg_fallback.to_string_lossy());
-    // No XDG_RUNTIME_DIR, no NCAP_SOCKET/CACHE/LOG → derive via setup-env.
-    // Also need to set HOME so XDG fallbacks have a base
     fs::create_dir_all(fx.tmp_path().join("home")).expect("home");
 
     // Resolve derived vars through setup-env, then feed them to init
@@ -736,7 +684,7 @@ fn runtime_dir_is_created_with_0700() {
         fs::Permissions::from_mode(0o700),
     )
     .expect("sock dir mode");
-    fx.hold_socket_from_env(fixture::Responder::Matching);
+    fx.hold_socket_from_env(Responder::Matching);
 
     let out = fx.init();
     assert!(
@@ -745,7 +693,6 @@ fn runtime_dir_is_created_with_0700() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The derived runtime dir must exist with 0700
     let derived = xdg_fallback.join("nix-capsule").join("proj");
     let mode = fs::metadata(&derived)
         .expect("derived dir")
@@ -758,7 +705,6 @@ fn runtime_dir_is_created_with_0700() {
 #[test]
 fn start_mounts_exact_default_set_and_executes_server() {
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
-    // Ensure .git does NOT exist for this base case
     assert!(!fx.project_has(".git"));
     fx.set_running(false);
 
@@ -770,90 +716,13 @@ fn start_mounts_exact_default_set_and_executes_server() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let launch = fx.launches();
-    assert!(!launch.is_empty(), "must have run line");
-    let socket_dir = fx.socket_parent_dir().to_string_lossy().into_owned();
-    let root = fx.project_root().to_path_buf();
-    let cache = fx.cache_dir().to_path_buf();
-    let logs = fx.log_dir().to_path_buf();
-    let sock = fx.socket_path().to_path_buf();
-
-    // Exact default mount set, asserted against the argv vector so shell
-    // rendering can't break them.
-    assert!(
-        launch.has_mount("/nix:/nix:ro"),
-        "missing /nix ro mount: {launch}"
-    );
-    assert!(
-        launch.has_mount(&format!("{}:{}", socket_dir, socket_dir)),
-        "missing socket dir mount: {launch}"
-    );
-    assert!(
-        launch.has_mount(&format!("{}:{}", root.display(), root.display())),
-        "missing project root mount: {launch}"
-    );
-    assert_eq!(
-        launch.flag_value("-w"),
-        Some(root.to_string_lossy().as_ref()),
-        "missing workdir: {launch}"
-    );
-    assert!(
-        launch.has_mount(&format!("{}:{}:ro", cache.display(), cache.display())),
-        "missing cache ro mount: {launch}"
-    );
-    assert!(
-        launch.has_mount(&format!("{}:{}", logs.display(), logs.display())),
-        "missing log rw mount: {launch}"
-    );
-    // .git must be absent
-    assert!(
-        !launch.has_text(".git"),
-        "unexpected .git mount without git dir: {launch}"
-    );
-    // Launch command shape: quoted source dump && quoted exec server with flags
-    assert!(
-        launch.script_contains(&format!("source '{}/env'", cache.display())),
-        "missing source dump: {launch}"
-    );
-    assert!(
-        launch.script_contains("&& exec '/nix/store/fake/bin/ncap-server'"),
-        "missing exec server: {launch}"
-    );
-    assert!(
-        launch.script_contains(&format!("--socket '{}'", sock.display())),
-        "missing --socket flag: {launch}"
-    );
-    assert!(
-        launch.script_contains(&format!("--log-dir '{}'", logs.display())),
-        "missing --log-dir flag: {launch}"
-    );
-    assert!(
-        launch.script_contains("--timeout 2"),
-        "missing --timeout flag: {launch}"
-    );
-    assert!(
-        launch.script_contains("--log-level warning"),
-        "missing --log-level flag: {launch}"
-    );
-    // Ensure detached and image/bash shape
-    assert!(
-        launch.has_arg("run") && launch.has_arg("-d"),
-        "missing run -d: {launch}"
-    );
-    assert!(
-        launch.has_arg("--") && launch.has_arg("alpine:latest"),
-        "missing image separator: {launch}"
-    );
-    assert!(
-        launch.has_arg("/nix/store/fake/bin/bash") && launch.has_arg("-c"),
-        "missing bash -c: {launch}"
-    );
+    fx.launches().expects_default_mounts();
 }
 
 #[test]
 fn launch_argv_is_the_exact_expected_sequence() {
     // Whole-shape regression: the launch argv must match element for
-    // element. Membership probes (`has_arg`) pass even when a verb is
+    // element. Membership probes pass even when a verb is
     // duplicated (`run run -d ...`); an exact sequence cannot.
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     fx.set_running(false);
@@ -864,43 +733,9 @@ fn launch_argv_is_the_exact_expected_sequence() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let root = fx.project_root().display().to_string();
-    let cache = fx.cache_dir().display().to_string();
-    let logs = fx.log_dir().display().to_string();
-    let sock_parent = fx.socket_parent_dir().display().to_string();
-    let sock = fx.socket_path().display().to_string();
-
     // Order follows build_runtime_args + run_detached; harden off and
-    // empty run opts seed nothing extra. The args log records `$@`,
-    // verb (`run`) included, so the verb is argv[0].
-    let expected = vec![
-        "run".to_owned(),
-        "-d".to_owned(),
-        "--name".to_owned(),
-        "ncap-test".to_owned(),
-        "-v".to_owned(),
-        "/nix:/nix:ro".to_owned(),
-        "-v".to_owned(),
-        format!("{sock_parent}:{sock_parent}"),
-        "-v".to_owned(),
-        format!("{root}:{root}"),
-        "-w".to_owned(),
-        root.clone(),
-        "-v".to_owned(),
-        format!("{cache}:{cache}:ro"),
-        "-v".to_owned(),
-        format!("{logs}:{logs}"),
-        "--".to_owned(),
-        "alpine:latest".to_owned(),
-        "/nix/store/fake/bin/bash".to_owned(),
-        "-c".to_owned(),
-        format!(
-            "source '{cache}/env' && exec '/nix/store/fake/bin/ncap-server' \
-             --socket '{sock}' --log-dir '{logs}' --timeout 2 --log-level warning"
-        ),
-    ];
-
-    assert_eq!(fx.launches().argv(), &expected[..]);
+    // empty run opts seed nothing extra.
+    fx.launches().expects_exact_default_sequence();
 }
 
 #[test]
@@ -915,18 +750,11 @@ fn git_mount_present_readonly_when_git_dir_exists() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let launch = fx.launches();
-    let root = fx.project_root().to_path_buf();
-    let expected = format!("{}/.git:{}/.git:ro", root.display(), root.display());
-    assert!(
-        launch.has_mount(&expected),
-        "missing .git ro mount: {launch}"
-    );
+    fx.launches().expects_git_mount();
 }
 
 #[test]
 fn git_mount_absent_without_error_outside_git_repo() {
-    // No .git
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty());
     fx.set_running(false);
     // Liveness needs a connectable Socket (fresh_empty holds the guard).
@@ -936,16 +764,11 @@ fn git_mount_absent_without_error_outside_git_repo() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let launch = fx.launches();
-    assert!(
-        !launch.has_text(".git"),
-        "unexpected .git mount outside repo: {launch}"
-    );
+    fx.launches().expects_no_git();
 }
 
 #[test]
 fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
-    // Reference an unset variable via $VAR
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("NCAP_RUN_OPTS", r#"["-v $UNSET_NCAP_XYZ:/mnt"]"#);
     fx.set_running(false);
@@ -968,7 +791,6 @@ fn extra_options_expansion_unset_var_fails_naming_it_before_run() {
 
 #[test]
 fn expanded_option_survives_as_single_argv_after_defaults() {
-    // $TEST_EXPAND should expand to "/tmp/foo bar" containing a space; no word splitting means it stays one arg
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty())
         .with_env("TEST_EXPAND", "/tmp/foo bar")
         .with_env("NCAP_RUN_OPTS", r#"["-v $TEST_EXPAND:/mnt"]"#);
@@ -982,25 +804,15 @@ fn expanded_option_survives_as_single_argv_after_defaults() {
     );
     let launch = fx.launches();
     // The expanded arg must survive as a single argv, not split on the
-    // embedded space.
-    assert!(
-        launch.has_arg("-v /tmp/foo bar:/mnt"),
-        "expanded arg must be present without word splitting: {launch}"
-    );
-    assert!(
-        !launch.has_arg("/tmp/foo") && !launch.has_arg("bar:/mnt"),
-        "split fragments must be absent: {launch}"
-    );
-    // Ensure defaults still come before the extra option
-    assert!(
-        launch.ordered_before("/nix:/nix:ro", "-v /tmp/foo bar:/mnt"),
-        "defaults must come before extraOptions: {launch}"
-    );
+    // embedded space, after the defaults.
+    launch.expects_opt("-v /tmp/foo bar:/mnt");
+    launch.expects_no_opt("/tmp/foo");
+    launch.expects_no_opt("bar:/mnt");
+    launch.expects_defaults_before("-v /tmp/foo bar:/mnt");
 }
 
 #[test]
 fn harden_adds_security_flags_and_ro_mounts_for_present_watch_files_skips_missing() {
-    // missing.nix is absent
     let fx = fixture::Fixture::new(fixture::Config::fresh_live())
         .with_harden(true)
         .with_watch_files(r#"["flake.nix", "missing.nix"]"#);
@@ -1012,40 +824,8 @@ fn harden_adds_security_flags_and_ro_mounts_for_present_watch_files_skips_missin
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let launch = fx.launches();
-    let root = fx.project_root().to_path_buf();
-    assert!(
-        launch.has_arg("--cap-drop=all"),
-        "missing --cap-drop: {launch}"
-    );
-    assert!(
-        launch.has_arg("--security-opt=no-new-privileges"),
-        "missing --security-opt: {launch}"
-    );
-    let expected = format!(
-        "{}/flake.nix:{}/flake.nix:ro",
-        root.display(),
-        root.display()
-    );
-    assert!(
-        launch.has_mount(&expected),
-        "missing ro watch mount: {launch}"
-    );
-    let missing = format!(
-        "{}/missing.nix:{}/missing.nix:ro",
-        root.display(),
-        root.display()
-    );
-    assert!(
-        !launch.has_mount(&missing),
-        "missing entry must be skipped: {launch}"
-    );
-    // More-specific mount after root
-    let root_mount = format!("{}:{}", root.display(), root.display());
-    assert!(
-        launch.ordered_before(&root_mount, &expected),
-        "watch mount after root: {launch}"
-    );
+    fx.launches()
+        .expects_harden_mounts(&["flake.nix"], &["missing.nix"]);
 }
 
 #[test]
@@ -1061,24 +841,8 @@ fn harden_off_emits_no_flags_nor_extra_mounts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let launch = fx.launches();
-    let root = fx.project_root().to_path_buf();
-    assert!(
-        !launch.has_text("--cap-drop"),
-        "harden off must not emit cap-drop: {launch}"
-    );
-    assert!(
-        !launch.has_text("no-new-privileges"),
-        "harden off must not emit security-opt: {launch}"
-    );
-    let watch_mount = format!(
-        "{}/flake.nix:{}/flake.nix:ro",
-        root.display(),
-        root.display()
-    );
-    assert!(
-        !launch.has_mount(&watch_mount),
-        "harden off must not mount watch file: {launch}"
-    );
+    launch.expects_no_harden();
+    launch.expects_no_watch_mount("flake.nix");
 }
 
 #[test]
@@ -1098,69 +862,54 @@ fn braced_expansion_and_literal_survive_as_single_argvs() {
         String::from_utf8_lossy(&out.stderr)
     );
     let launch = fx.launches();
-    // Argv-level lock-in: each option must survive as its own argv.
-    assert!(
-        launch.has_arg("--braced=braced-val"),
-        "braced expansion: {launch}"
-    );
-    assert!(
-        launch.has_arg("literal-no-expand"),
-        "literal passthrough: {launch}"
-    );
-    assert!(
-        launch.has_arg("-v braced-val:/mnt"),
-        "dollar expansion: {launch}"
-    );
+    launch.expects_opt("--braced=braced-val");
+    launch.expects_opt("literal-no-expand");
+    launch.expects_opt("-v braced-val:/mnt");
 }
 
-#[test]
-fn unknown_log_level_fails_naming_var_and_four_values() {
-    for rejected_level in ["verbose", "Warning", "warn", "debug "] {
-        let fx =
-            fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(rejected_level);
-        let out = fx.status();
-        assert!(
-            !out.status.success(),
-            "log level `{rejected_level}` must fail the command"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("NCAP_LOG_LEVEL"),
-            "error must name the var: stderr={stderr}"
-        );
-        for level in ["debug", "info", "warning", "error"] {
-            assert!(
-                stderr.contains(level),
-                "error must spell out `{level}`: stderr={stderr}"
-            );
-        }
-    }
-}
-
-#[test]
-fn accepted_log_level_survives_as_launch_argv() {
+#[test_case("verbose")]
+#[test_case("Warning")]
+#[test_case("warn")]
+#[test_case("debug ")]
+fn unknown_log_level_fails_naming_var_and_four_values(rejected_level: &str) {
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(rejected_level);
+    let out = fx.status();
+    assert!(
+        !out.status.success(),
+        "log level `{rejected_level}` must fail the command"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("NCAP_LOG_LEVEL"),
+        "error must name the var: stderr={stderr}"
+    );
     for level in ["debug", "info", "warning", "error"] {
-        let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(level);
-        fx.set_running(false);
-        // Liveness needs a connectable Socket (fresh_empty holds the guard).
-        let out = fx.start();
         assert!(
-            out.status.success(),
-            "level `{level}`: stderr={}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let launch = fx.launches();
-        assert!(
-            launch.script_contains(&format!("--log-level {level}")),
-            "level `{level}` must survive as its own argv: {launch}"
+            stderr.contains(level),
+            "error must spell out `{level}`: stderr={stderr}"
         );
     }
+}
+
+#[test_case("debug")]
+#[test_case("info")]
+#[test_case("warning")]
+#[test_case("error")]
+fn accepted_log_level_survives_as_launch_argv(level: &str) {
+    let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level(level);
+    fx.set_running(false);
+    // Liveness needs a connectable Socket (fresh_empty holds the guard).
+    let out = fx.start();
+    assert!(
+        out.status.success(),
+        "level `{level}`: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fx.launches().expects_log_level(level);
 }
 
 #[test]
 fn full_env_start_propagates_log_level_to_launch() {
-    // End-to-end start flow with a full env set: the validated level reaches
-    // the server launch command.
     let fx = fixture::Fixture::new(fixture::Config::fresh_empty()).with_log_level("error");
     fx.set_running(false);
     let out = fx.start();
@@ -1169,11 +918,7 @@ fn full_env_start_propagates_log_level_to_launch() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        fx.launches().script_contains("--log-level error"),
-        "full env must carry the level: {}",
-        fx.launches()
-    );
+    fx.launches().expects_log_level("error");
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,11 +926,9 @@ fn full_env_start_propagates_log_level_to_launch() {
 // `status` and `start` (both branches), never at `init`.
 // ---------------------------------------------------------------------------
 
-use common::fixture::Responder;
-
 const SKEW_SERVER_VERSION: &str = "skew_version";
 
-/// stderr of `out` as lossy lines.
+// stderr of `out` as lossy lines.
 fn stderr_lines(out: &std::process::Output) -> Vec<String> {
     String::from_utf8_lossy(&out.stderr)
         .lines()
@@ -1216,7 +959,7 @@ fn status_warns_one_line_when_server_version_skews() {
         "warning must name the Server's version: {warning}"
     );
     assert!(
-        warning.contains(nix_capsule::protocol::CURRENT_VERSION),
+        warning.contains(CURRENT_VERSION),
         "warning must name the host version: {warning}"
     );
     assert!(
@@ -1248,12 +991,10 @@ fn start_warns_when_live_server_version_skews() {
     let stderr = stderr_lines(&out);
     assert_eq!(stderr.len(), 2, "{stderr:?}");
     assert!(
-        stderr[0].contains(SKEW_SERVER_VERSION)
-            && stderr[0].contains(nix_capsule::protocol::CURRENT_VERSION),
+        stderr[0].contains(SKEW_SERVER_VERSION) && stderr[0].contains(CURRENT_VERSION),
         "{stderr:?}"
     );
     assert!(stderr[1].contains("ncap-ctl restart"), "{stderr:?}");
-    // Live-done: no launch happened.
     assert!(fx.launches().is_empty());
 }
 
@@ -1283,7 +1024,7 @@ fn pre_probe_server_error_reply_warns_the_same_advice() {
     let stderr = stderr_lines(&out);
     assert_eq!(stderr.len(), 2, "{stderr:?}");
     assert!(
-        stderr[0].contains(nix_capsule::protocol::CURRENT_VERSION),
+        stderr[0].contains(CURRENT_VERSION),
         "warning still names the host version: {stderr:?}"
     );
     assert!(stderr[1].contains("ncap-ctl restart"), "{stderr:?}");

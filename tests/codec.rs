@@ -36,8 +36,6 @@ fn framed(tag: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-// Feed `bytes` through a fresh decoder in fixed-size chunks; collect every message.
-// Fixed-size chunks prove chunk tolerance regardless of transport splits.
 fn feed_in_chunks(bytes: &[u8], chunk: usize) -> Result<Vec<Message>, DecodeError> {
     let mut codec = FrameCodec;
     let mut src = BytesMut::new();
@@ -186,31 +184,19 @@ fn decode_exit_with_both_fields_set_is_rejected() {
     );
 }
 
-#[test]
-fn decode_server_stopping_with_non_empty_payload_is_rejected() {
-    let wire = framed(0x07, b"junk");
+#[test_case(0x07 ; "rejects_server_stopping_junk")]
+#[test_case(0x0a ; "rejects_request_version_junk")]
+fn decode_non_empty_payload_on_empty_payload_types_is_rejected(tag: u8) {
+    let wire = framed(tag, b"junk");
     let mut codec = FrameCodec;
     let mut src = BytesMut::from(wire.as_slice());
     let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
-    match Message::from_frame(frame) {
-        Err(DecodeError::NonEmptyServerStopping(4)) => {}
-        other => panic!("expected NonEmptyServerStopping(4), got {other:?}"),
+    match (tag, Message::from_frame(frame)) {
+        (0x07, Err(DecodeError::NonEmptyServerStopping(4))) => {}
+        (0x0a, Err(DecodeError::NonEmptyRequestVersion(4))) => {}
+        other => panic!("expected a non-empty-payload rejection, got {other:?}"),
     }
 }
-
-#[test]
-fn decode_request_version_with_non_empty_payload_is_rejected() {
-    let wire = framed(0x0a, b"junk");
-    let mut codec = FrameCodec;
-    let mut src = BytesMut::from(wire.as_slice());
-    let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
-    match Message::from_frame(frame) {
-        Err(DecodeError::NonEmptyRequestVersion(4)) => {}
-        other => panic!("expected NonEmptyRequestVersion(4), got {other:?}"),
-    }
-}
-
-// ------------------------------------------------------------ error taxonomy
 
 #[test_case(0x00 ; "below_range")]
 #[test_case(0x0c ; "just_past_max")]
@@ -225,8 +211,8 @@ fn unknown_tag_bytes_reject_decoding(rejected_tag: u8) {
     }
 }
 
-// `ServerStopping` has no struct payload: only the empty payload decodes;
-// a non-empty payload is pinned as a rejection below.
+// `ServerStopping` and `RequestVersion` carry no struct payload, so they are
+// not parameters here; their non-empty-payload rejections are pinned above.
 #[test_case(FrameType::Request ; "rejects_request_junk")]
 #[test_case(FrameType::Exit ; "rejects_exit_junk")]
 #[test_case(FrameType::Error ; "rejects_error_junk")]

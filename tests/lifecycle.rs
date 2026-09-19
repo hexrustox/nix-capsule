@@ -1,8 +1,4 @@
-//! Integration tests for server startup/shutdown hygiene (ticket 05): the
-//! startup probe against a live or stale socket, the per-run log file, and
-//! the orderly SIGTERM/SIGINT shutdown that stops clients at 143, TERMs
-//! every child's process group, drains within `--timeout`, and removes the
-//! socket file.
+//! Integration tests for server startup/shutdown hygiene (ticket 05).
 
 mod common;
 
@@ -12,19 +8,17 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use nix_capsule::protocol::Message;
 use test_case::test_case;
 use tokio::{io::AsyncWriteExt, net::UnixListener};
 
+use nix_capsule::protocol::Message;
+
 use common::{
     Server,
-    assert::{assert_announced, assert_orderly_shutdown},
-    probe::{
-        SHELL_BODY, WAIT_PHASE, WAIT_ROOMY, WAIT_TIGHT, read_frames_until,
-        read_until_stdout_contains, read_until_terminal, send_request, wait_for_flag,
-        wait_for_marker,
-    },
-    script::shutdown_group_trap_script,
+    assert::{assert_announced, assert_orderly_stop},
+    child::{WAIT_PHASE, WAIT_ROOMY, WAIT_TIGHT, wait_for_flag, wait_for_marker},
+    probe::{read_frames_until, read_until_stdout_contains, read_until_terminal, send_request},
+    script::{SHELL_BODY, shutdown_group_trap_script},
 };
 
 #[test_case(vec![Message::ServerStopping] ; "server_stopping_frame")]
@@ -184,15 +178,13 @@ async fn shutdown_signal_bails_client_at_143_and_removes_socket(signal: i32) {
 
     let client_status = client.wait_within(WAIT_TIGHT, "the client to bail").status;
     let server_status = server.wait_for_exit().expect("real server");
-    let socket_gone = !server.socket().exists();
-    server.stop();
+    assert_orderly_stop(server, &server_status);
 
     assert_eq!(
         client_status.code(),
         Some(143),
         "the client must bail at 143"
     );
-    assert_orderly_shutdown(&server_status, socket_gone);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -212,10 +204,8 @@ async fn connection_finishing_inside_grace_window_exits_cleanly_with_announcemen
     // connection ran to completion before the drain closed it.
     let frames = read_until_terminal(&mut framed).await;
     let closed_cleanly = framed.next().await.is_none();
-    let socket_gone = !server.socket().exists();
-    server.stop();
+    assert_orderly_stop(server, &status);
 
-    assert_orderly_shutdown(&status, socket_gone);
     assert_announced(&frames, "the shutdown must be announced");
     common::probe::assert_clean_exit(&frames, "the child's own exit must complete normally");
     assert!(
@@ -240,10 +230,8 @@ async fn shutdown_signal_terms_whole_group_including_grandchildren() {
     let child_gone = wait_for_marker(&marker, "child-gone", WAIT_ROOMY).await;
     let grandchild_gone = wait_for_marker(&marker, "grandchild-gone", WAIT_ROOMY).await;
     let recorded = fs::read_to_string(&marker).unwrap_or_default();
-    let socket_gone = !server.socket().exists();
-    server.stop();
+    assert_orderly_stop(server, &status);
 
-    assert_orderly_shutdown(&status, socket_gone);
     assert!(child_gone, "the child was not TERMed: marker={recorded:?}");
     assert!(
         grandchild_gone,
@@ -276,10 +264,8 @@ async fn connection_past_deadline_is_dropped_when_drain_expires() {
     })
     .await;
     let dropped = framed.next().await.is_none();
-    let socket_gone = !server.socket().exists();
-    server.stop();
+    assert_orderly_stop(server, &status);
 
-    assert_orderly_shutdown(&status, socket_gone);
     assert!(elapsed >= WAIT_TIGHT);
     assert!(
         elapsed < WAIT_TIGHT + Duration::from_secs(1),

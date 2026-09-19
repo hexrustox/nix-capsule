@@ -8,19 +8,21 @@ use std::{fs, os::unix::fs::PermissionsExt};
 
 use futures_util::SinkExt;
 use nix_capsule::protocol::{
-    CURRENT_VERSION, Exit, Frame, FrameType, Message, Request, VersionMsg,
+    CURRENT_VERSION, ErrorMsg, Exit, Frame, FrameType, Message, Request, VersionMsg,
 };
 use proptest::prelude::*;
 use test_case::test_case;
 
 use common::{
-    Client, Server,
+    Client, Server, WAIT_TIGHT,
     assert::assert_exit_and_stdout,
     missing_socket,
     probe::{
-        SHELL_HOLD, assert_clean_exit, read_until_stdout_contains, read_until_terminal, request,
-        run_request, send_request, send_request_version, send_signal,
+        assert_clean_exit, read_frames_until, read_until_stdout_contains, read_until_terminal,
+        request, run_raw_request, send_request, send_request_version, send_signal, stdout_of,
+        terminal_of,
     },
+    script::SHELL_HOLD,
 };
 
 #[test_case(
@@ -261,7 +263,7 @@ async fn merged_env_arrives_deduplicated_in_request() {
 #[tokio::test(flavor = "multi_thread")]
 async fn request_env_overrides_inherited_env() {
     let server = Server::builder().start().await;
-    let run = run_request(
+    let run = run_raw_request(
         &mut server.raw().await,
         Request {
             env: vec!["NCAP_TEST_VAR=hello".into()],
@@ -283,11 +285,11 @@ async fn non_request_first_frame_is_error_and_close() {
         .send(Message::Stdout(b"hi".to_vec()).into_frame().unwrap())
         .await
         .unwrap();
-    let frames = common::probe::read_until_terminal(&mut framed).await;
+    let frames = read_until_terminal(&mut framed).await;
     server.stop();
 
     assert!(
-        matches!(common::probe::terminal_of(&frames), Some(Message::Error(_))),
+        matches!(terminal_of(&frames), Some(Message::Error(_))),
         "expected Error: frames={frames:?}"
     );
 }
@@ -298,8 +300,7 @@ async fn version_probe_serves_server_version_then_closes_without_child() {
     let mut framed = server.raw().await;
     send_request_version(&mut framed).await;
 
-    let frames =
-        common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| false).await;
+    let frames = read_frames_until(&mut framed, WAIT_TIGHT, |_| false).await;
 
     assert_eq!(
         frames,
@@ -310,9 +311,8 @@ async fn version_probe_serves_server_version_then_closes_without_child() {
     );
 
     // The reply is terminal: whatever follows the close carries no Exit/Error.
-    let after =
-        common::probe::read_frames_until(&mut framed, common::probe::WAIT_TIGHT, |_| false).await;
-    let logs = read_newest_server_log(server.path().join("logs"));
+    let after = read_frames_until(&mut framed, WAIT_TIGHT, |_| false).await;
+    let logs = read_server_log(server.path().join("logs"));
     server.stop();
 
     assert!(
@@ -342,11 +342,11 @@ async fn version_probe_with_non_empty_payload_is_error_and_close() {
         })
         .await
         .unwrap();
-    let frames = common::probe::read_until_terminal(&mut framed).await;
+    let frames = read_until_terminal(&mut framed).await;
     server.stop();
 
     assert!(
-        matches!(common::probe::terminal_of(&frames), Some(Message::Error(_))),
+        matches!(terminal_of(&frames), Some(Message::Error(_))),
         "expected Error: frames={frames:?}"
     );
 }
@@ -366,11 +366,11 @@ async fn reserved_version_frame_mid_bridge_is_ignored() {
         )
         .await
         .unwrap();
-    let run = common::probe::read_until_terminal(&mut framed).await;
+    let run = read_until_terminal(&mut framed).await;
     server.stop();
 
     assert_clean_exit(&run, "a stray Version frame must not kill the bridge");
-    assert_eq!(common::probe::stdout_of(&run), "ok");
+    assert_eq!(stdout_of(&run), "ok");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -388,11 +388,11 @@ async fn old_style_request_with_version_field_still_decodes_and_runs() {
         })
         .await
         .unwrap();
-    let run = common::probe::read_until_terminal(&mut framed).await;
+    let run = read_until_terminal(&mut framed).await;
     server.stop();
 
     assert_clean_exit(&run, "an old-style versioned Request must still run");
-    assert_eq!(common::probe::stdout_of(&run), "ok");
+    assert_eq!(stdout_of(&run), "ok");
 }
 
 // A failed kill is the test vehicle only: the subject is the emit-time
@@ -401,9 +401,11 @@ async fn old_style_request_with_version_field_still_decodes_and_runs() {
 // an already-exited group would.
 const OUT_OF_RANGE_SIGNAL: u8 = 200;
 
+#[test_case("error", false ; "error_level_suppresses_kill_warning_in_both_sinks")]
+#[test_case("debug", true ; "debug_level_keeps_kill_warning_in_both_sinks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn error_log_level_suppresses_kill_warning_in_both_sinks() {
-    let server = Server::builder().log_level("error").start().await;
+async fn kill_warning_appears_in_both_sinks_only_at_debug_level(level: &str, emits: bool) {
+    let server = Server::builder().log_level(level).start().await;
     let stderr_before = server.stderr();
     let mut framed = server.raw().await;
     // The child holds the full hold after `READY`, so the signal frame —
@@ -419,57 +421,27 @@ async fn error_log_level_suppresses_kill_warning_in_both_sinks() {
     send_signal(&mut framed, OUT_OF_RANGE_SIGNAL).await;
     let frames = read_until_terminal(&mut framed).await;
     let stderr = server.stderr_since(&stderr_before);
-    let log_file = read_newest_server_log(server.path().join("logs"));
+    let log_file = read_server_log(server.path().join("logs"));
     server.stop();
 
     assert_clean_exit(&frames, "the connection must continue past the bad signal");
-    assert!(
-        !stderr.contains("kill(-"),
-        "warning below error must not mirror to stderr: {stderr:?}"
+    assert_eq!(
+        stderr.contains("kill(-"),
+        emits,
+        "the {level} level must gate the stderr mirror: {stderr:?}"
     );
-    assert!(
-        !log_file.contains("kill(-"),
-        "warning below error must not reach the log file: {log_file:?}"
+    assert_eq!(
+        log_file.contains("kill(-"),
+        emits,
+        "the {level} level must gate the log file: {log_file:?}"
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn debug_log_level_keeps_kill_warning_in_both_sinks() {
-    let server = Server::builder().log_level("debug").start().await;
-    let stderr_before = server.stderr();
-    let mut framed = server.raw().await;
-    send_request(
-        &mut framed,
-        server.path(),
-        &format!("echo READY; sleep {SHELL_HOLD}"),
-    )
-    .await;
-    read_until_stdout_contains(&mut framed, "READY").await;
-    send_signal(&mut framed, OUT_OF_RANGE_SIGNAL).await;
-    let frames = read_until_terminal(&mut framed).await;
-    let stderr = server.stderr_since(&stderr_before);
-    let log_file = read_newest_server_log(server.path().join("logs"));
-    server.stop();
-
-    assert_clean_exit(&frames, "the connection must continue past the bad signal");
-    assert!(
-        stderr.contains("kill(-") && stderr.contains(&OUT_OF_RANGE_SIGNAL.to_string()),
-        "warning at debug must mirror to stderr: {stderr:?}"
-    );
-    assert!(
-        log_file.contains("kill(-") && log_file.contains(&OUT_OF_RANGE_SIGNAL.to_string()),
-        "warning at debug must reach the log file: {log_file:?}"
-    );
-}
-
-// Read back the single per-run server log under `dir`: one run writes one log file.
-fn read_newest_server_log(dir: std::path::PathBuf) -> String {
-    let entries: Vec<_> = fs::read_dir(&dir)
-        .expect("log dir")
-        .map(|entry| entry.expect("log dir entry").path())
-        .collect();
-    assert_eq!(entries.len(), 1, "one run, one log file");
-    fs::read_to_string(&entries[0]).expect("read log file")
+    if emits {
+        let signal_number = OUT_OF_RANGE_SIGNAL.to_string();
+        assert!(
+            stderr.contains(&signal_number) && log_file.contains(&signal_number),
+            "the warning must name the signal: stderr={stderr:?} log={log_file:?}"
+        );
+    }
 }
 
 #[test_case(
@@ -481,7 +453,7 @@ fn read_newest_server_log(dir: std::path::PathBuf) -> String {
     ; "exit_null_null_warns_and_exits_1"
 )]
 #[test_case(
-    vec![Message::Error(nix_capsule::protocol::ErrorMsg {
+    vec![Message::Error(ErrorMsg {
         message: "boom".into(),
     })],
     None, 1, "boom"
@@ -540,14 +512,6 @@ async fn empty_key_env_flag_fails_locally_without_connect_hint() {
     );
 }
 
-// A NUL-free Unicode string: full range of multibyte, newline, and control
-// characters, sized so large payloads cross the server's pipe-read chunk
-// boundaries. NUL is filtered out because execve argv cannot carry it.
-fn arbitrary_payload() -> impl Strategy<Value = String> {
-    prop::collection::vec(any::<char>(), 0..2048)
-        .prop_map(|chars| chars.into_iter().filter(|c| *c != '\0').collect())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn stdio_round_trips_verbatim_with_exit_0() {
     let server = Server::builder().start().await;
@@ -586,4 +550,21 @@ async fn stdin_writes_verbatim_to_child_file() {
         prop_assert_eq!(fs::read(file.path()).unwrap(), bytes);
     });
     server.stop();
+}
+
+fn read_server_log(dir: std::path::PathBuf) -> String {
+    let entries: Vec<_> = fs::read_dir(&dir)
+        .expect("log dir")
+        .map(|entry| entry.expect("log dir entry").path())
+        .collect();
+    assert_eq!(entries.len(), 1, "one run, one log file");
+    fs::read_to_string(&entries[0]).expect("read log file")
+}
+
+// A NUL-free Unicode string: full range of multibyte, newline, and control
+// characters, sized so large payloads cross the server's pipe-read chunk
+// boundaries. NUL is filtered out because execve argv cannot carry it.
+fn arbitrary_payload() -> impl Strategy<Value = String> {
+    prop::collection::vec(any::<char>(), 0..2048)
+        .prop_map(|chars| chars.into_iter().filter(|c| *c != '\0').collect())
 }

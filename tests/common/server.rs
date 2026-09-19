@@ -10,7 +10,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use nix_capsule::protocol::{FrameCodec, Message, Request};
-use tempfile::TempDir;
+use tempfile::{TempDir, tempdir};
 use tokio::{net::UnixStream, time::timeout};
 use tokio_util::codec::Framed;
 
@@ -31,7 +31,6 @@ pub struct Server {
 }
 
 impl Server {
-    /// A builder for a server with a fresh tempdir and socket.
     pub fn builder() -> ServerBuilder {
         ServerBuilder {
             log_dir: None,
@@ -47,12 +46,11 @@ impl Server {
         &self.path
     }
 
-    /// The socket this server is reachable on.
     pub fn socket(&self) -> &Path {
         &self.socket
     }
 
-    /// A Client pre-bound to this server's socket.
+    /// Pre-bound to this server's socket.
     pub fn client(&self) -> super::client::Client<'_> {
         super::client::Client::at(&self.socket)
     }
@@ -125,7 +123,7 @@ impl Server {
         };
         Some(super::client::wait_bounded(
             child,
-            super::probe::WAIT_PHASE,
+            super::child::WAIT_PHASE,
             "server",
         ))
     }
@@ -188,7 +186,7 @@ impl ServerBuilder {
     /// Bind the socket, spawn the chosen mode, and — for a real server — wait
     /// until the socket accepts connections.
     pub async fn start(self) -> Server {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         let socket = self.socket_path.unwrap_or_else(|| path.join("ncap.sock"));
         let captured = Arc::new(Mutex::new(None));
@@ -241,7 +239,7 @@ impl ServerBuilder {
                     // timeout is load-bearing in case it never arrives,
                     // since the client keeps its write half open for the
                     // signal relay.
-                    let _ = timeout(super::probe::WAIT_PHASE, framed.next()).await;
+                    let _ = timeout(super::child::WAIT_PHASE, framed.next()).await;
                     let _ = framed.close().await;
                 });
                 ServerProc::Fake(task)
@@ -260,13 +258,12 @@ impl ServerBuilder {
 /// A tempdir whose socket path nothing listens on, for tests of the client
 /// reacting to an absent server. The tempdir must outlive the socket use.
 pub fn missing_socket() -> (TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempdir().expect("tempdir");
     let socket = dir.path().join("missing.sock");
     (dir, socket)
 }
 
-// Poll the socket until the server accepts connections (or we give up).
-// Retries every 20 ms: the child needs time to bind after spawn.
+// The child needs time to bind after spawn.
 async fn wait_for_socket(socket: &Path) {
     for _ in 0..200 {
         if UnixStream::connect(socket).await.is_ok() {

@@ -10,23 +10,21 @@ use test_case::test_case;
 use common::{
     Server,
     assert::assert_no_error_frames,
-    probe::{
-        SHELL_BODY, SHELL_HOLD, WAIT_PHASE, assert_clean_exit, read_frames_until,
-        ready_signal_terminal, send_request, stdout_of, terminal_of, wait_for_flag,
-    },
+    child::{WAIT_PHASE, wait_for_flag},
+    probe::{assert_clean_exit, ready_signal_terminal, start_test_server, stdout_of},
+    script::{SHELL_BODY, SHELL_HOLD},
 };
 
 #[tokio::test(flavor = "multi_thread")]
 async fn child_leads_own_process_group() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    send_request(
+    let (server, mut framed) = start_test_server().await;
+    common::probe::send_request(
         &mut framed,
         server.path(),
         "read -r _ _ _ _ pgrp _ < /proc/self/stat; echo pid=$$ pgrp=$pgrp",
     )
     .await;
-    let frames = read_frames_until(&mut framed, WAIT_PHASE, |message| {
+    let frames = common::probe::read_frames_until(&mut framed, WAIT_PHASE, |message| {
         matches!(message, Message::Exit(_))
     })
     .await;
@@ -51,8 +49,7 @@ async fn child_leads_own_process_group() {
 #[test_case(libc::SIGTERM, "TERM" ; "on_sigterm")]
 #[tokio::test(flavor = "multi_thread")]
 async fn signal_runs_trap_and_child_exits_on_own(signal: i32, signal_name: &str) {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
+    let (server, mut framed) = start_test_server().await;
     // The trailing `sleep` bounds the red run: without signal forwarding the
     // script still ends, just without having run the trap.
     let script = format!(
@@ -73,17 +70,9 @@ async fn signal_runs_trap_and_child_exits_on_own(signal: i32, signal_name: &str)
     );
 }
 
-// The Exit status of a shell killed by a signal, or reporting `128 + signal`
-// as its code — shells differ in how they report their own signal death.
-fn died_from_signal(status: &Exit, signal: i32) -> bool {
-    let signal = signal as u8;
-    status.signal == Some(signal) || status.code == Some(128 + signal)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn signal_term_reaches_whole_group_including_grandchildren() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
+    let (server, mut framed) = start_test_server().await;
     // The background `sleep` inherits the shell's pipes, so the server only
     // sees EOF — and can only report `Exit` — once the whole group is gone.
     // A bounded phase turns a survivor into a short, readable failure.
@@ -103,7 +92,7 @@ async fn signal_term_reaches_whole_group_including_grandchildren() {
     server.stop();
 
     assert_no_error_frames(&frames);
-    match terminal_of(&frames) {
+    match common::probe::terminal_of(&frames) {
         Some(Message::Exit(exit)) => assert!(
             died_from_signal(exit, libc::SIGTERM),
             "the shell must die from the group TERM: frames={frames:?}"
@@ -114,8 +103,7 @@ async fn signal_term_reaches_whole_group_including_grandchildren() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
+    let (server, mut framed) = start_test_server().await;
     // The child stays alive while the out-of-range number arrives, then ends
     // on its own — an invalid signal must not disturb it.
     let frames = ready_signal_terminal(
@@ -140,26 +128,20 @@ async fn out_of_range_signal_is_forwarded_verbatim_and_warns_without_error_frame
     );
 }
 
-#[test_case(libc::SIGINT, true, 0 ; "sigint_trapping_child_runs_cleanup_and_exits_0")]
-#[test_case(libc::SIGINT, false, 130 ; "sigint_non_trapping_child_exits_130")]
-#[test_case(libc::SIGTERM, true, 0 ; "sigterm_trapping_child_runs_cleanup_and_exits_0")]
-#[test_case(libc::SIGTERM, false, 143 ; "sigterm_non_trapping_child_exits_143")]
+#[test_case(libc::SIGINT, "INT", true, 0 ; "sigint_trapping_child_runs_cleanup_and_exits_0")]
+#[test_case(libc::SIGINT, "INT", false, 130 ; "sigint_non_trapping_child_exits_130")]
+#[test_case(libc::SIGTERM, "TERM", true, 0 ; "sigterm_trapping_child_runs_cleanup_and_exits_0")]
+#[test_case(libc::SIGTERM, "TERM", false, 143 ; "sigterm_non_trapping_child_exits_143")]
 #[tokio::test(flavor = "multi_thread")]
 async fn relayed_signal_determines_client_exit_code(
     signal: i32,
+    signal_name: &str,
     traps_signal: bool,
     expected_code: i32,
 ) {
     let server = Server::builder().start().await;
     let script = if traps_signal {
-        format!(
-            "trap 'echo CLEANUP; exit 0' {signal_name}; touch ready.flag; sleep {SHELL_BODY}",
-            signal_name = if signal == libc::SIGINT {
-                "INT"
-            } else {
-                "TERM"
-            }
-        )
+        format!("trap 'echo CLEANUP; exit 0' {signal_name}; touch ready.flag; sleep {SHELL_BODY}")
     } else {
         format!("touch ready.flag; sleep {SHELL_BODY}")
     };
@@ -230,4 +212,11 @@ async fn post_signal_output_streams_before_terminal_frame() {
     assert_eq!(out.status.code(), Some(0), "stderr={}", out.stderr);
     assert!(out.stdout.contains("AFTER-1"), "stdout={}", out.stdout);
     assert!(out.stdout.contains("AFTER-2"), "stdout={}", out.stdout);
+}
+
+/// The `Exit` status of a shell killed by a signal, or reporting `128 + signal`
+/// as its code — shells differ in how they report their own signal death.
+fn died_from_signal(status: &Exit, signal: i32) -> bool {
+    let signal = signal as u8;
+    status.signal == Some(signal) || status.code == Some(128 + signal)
 }

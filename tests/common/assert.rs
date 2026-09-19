@@ -2,9 +2,11 @@
 //! orderly shutdown, announcement, and error-frame absence. Tests cross this
 //! Seam instead of re-stating the same predicates per file.
 
+use std::process::ExitStatus;
+
 use nix_capsule::protocol::Message;
 
-use super::client::ClientOutput;
+use super::{client::ClientOutput, server::Server};
 
 /// Assert `out` exits with `code` and, when given, matches the exact stdout.
 pub fn assert_exit_and_stdout(out: &ClientOutput, code: i32, stdout: Option<&str>) {
@@ -16,13 +18,24 @@ pub fn assert_exit_and_stdout(out: &ClientOutput, code: i32, stdout: Option<&str
 
 /// An orderly shutdown: the server exits 0 — never by signal — and the
 /// socket file is gone. Reads the socket state before `Server::stop`.
-pub fn assert_orderly_shutdown(status: &std::process::ExitStatus, socket_gone: bool) {
+pub fn assert_orderly_shutdown(status: &ExitStatus, socket_gone: bool) {
     assert_eq!(
         status.code(),
         Some(0),
         "an orderly shutdown exits 0, not by signal"
     );
     assert!(socket_gone, "the socket file must be gone after exit");
+}
+
+/// Record the socket state, stop the server (taking its tempdir with it),
+/// and assert the orderly shutdown through
+/// [`assert_orderly_shutdown`](super::assert::assert_orderly_shutdown).
+/// The socket-state read must precede `stop`, whose teardown removes the
+/// socket — so this helper is the whole dance, not a variant.
+pub fn assert_orderly_stop(server: Server, status: &ExitStatus) {
+    let socket_gone = !server.socket().exists();
+    server.stop();
+    assert_orderly_shutdown(status, socket_gone);
 }
 
 /// The shutdown must be announced with a `ServerStopping` frame before the
