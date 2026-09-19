@@ -2,7 +2,6 @@
 let
   lib = pkgs.lib;
 
-  # Render a received value for error messages: type + value.
   showReceived =
     v:
     if v == null then
@@ -14,7 +13,6 @@ let
     else
       "${builtins.typeOf v} `${toString v}`";
 
-  # ---- error builders ---------------------------------------------------------
   mkErr =
     opt: expected: got:
     throw "option `${opt}`: expected ${expected}, got ${got}";
@@ -27,7 +25,6 @@ let
     opt: field: expected: got:
     throw "option `${opt}`: expected wrapper `${field}` to be ${expected}, got ${got}";
 
-  # ---- scalar checks (return the value on success) ---------------------------
   checkPrim =
     expected: pred: opt: v:
     if pred v then v else mkErr opt expected (showReceived v);
@@ -36,7 +33,6 @@ let
   checkBool = checkPrim "bool" builtins.isBool;
   checkInt = checkPrim "integer" builtins.isInt;
 
-  # ---- list-of-strings check (returns the list on success) -------------------
   checkStringList =
     opt: v:
     if !builtins.isList v then
@@ -61,9 +57,6 @@ let
           mkFieldErr opt field "a list of strings" "entry ${showReceived e}"
       ) v;
 
-  # ---- wrappers check: returns normalized { name, command, env, cwd } --------
-  # String shorthand expands to `command = name; env = []; cwd = null`.
-  # Unknown wrapper fields throw (ADR-0003 strictness).
   checkWrappers =
     opt: v:
     if !builtins.isList v then
@@ -117,7 +110,6 @@ let
           mkErr opt "a string or attrset" (showReceived elem)
       ) v;
 
-  # ---- per-option checkers (spec/flake-api.md § Type checks, ADR-0003) -------
   checkers = {
     project = checkString;
     image = checkString;
@@ -139,9 +131,6 @@ let
     runtime = checkString;
   };
 
-  # defaults: `image` has no default — an omitted image is Nix's built-in
-  # "missing argument" error. mkShell's `? null` heads delegate all other
-  # defaulting here so `args` never needs an attribute to exist.
   defaults = {
     project = "";
     devShell = ".#container";
@@ -168,45 +157,19 @@ in
 {
   mkShell =
     {
-      project ? null,
-      # Required reference to the Container image
       image,
-      devShell ? null,
-      watchFiles ? null,
-      envForward ? null,
-      wrappers ? null,
-      extraOptions ? null,
-      harden ? null,
-      timeout ? null,
-      socketPath ? null,
-      containerName ? null,
-      cacheDir ? null,
-      logDir ? null,
-      logLevel ? null,
-      preShellHook ? null,
-      postShellHook ? null,
-      autoStart ? null,
-      runtime ? null,
+      ...
     }@args:
     let
-      # ---- eval-time type checks ----------------------------------------------
-      # Every option is checked before mkShellNoCC runs; a mismatch throws
-      # naming the option, the expected shape, and the received type/value.
-      # Unknown top-level options and unknown wrapper fields throw (ADR-0003
-      # strictness). Null is accepted only where the table default is null.
-      # No coercions; no Nix `path` values for any option.
       unknownOpts = builtins.filter (opt: !(builtins.hasAttr opt checkers)) (builtins.attrNames args);
       checked = builtins.mapAttrs (opt: check: check opt (args.${opt} or defaults.${opt})) checkers;
 
-      # Force all checks before building the shell. deepSeq catches lazy
-      # list entries (plain seq only forces the list spine).
       checkAll =
         if unknownOpts != [ ] then
           throw "option `${builtins.head unknownOpts}`: unknown option"
         else
           builtins.deepSeq checked true;
 
-      # ---- wrappers --------------------------------------------------------------
       mkWrapperScript =
         w:
         let
@@ -218,27 +181,22 @@ in
 
       wrapperBins = map mkWrapperScript checked.wrappers;
 
-      # ---- JSON-array vars ----------------------------------------------------
       watchFilesJson = builtins.toJSON checked.watchFiles;
       runOptsJson = builtins.toJSON checked.extraOptions;
       envForwardJson = builtins.toJSON checked.envForward;
 
-      # ---- shellHook construction ---------------------------------------------
-      # Order: preHook → export NCAP_PROJECT_ROOT → setup-env → guarded watch_file per entry → init when autoStart → postHook
       watchFileLines =
         lib.optionalString (checked.watchFiles != [ ])
           "command -v watch_file >/dev/null && watch_file ${
             lib.concatMapStringsSep " " lib.escapeShellArg checked.watchFiles
           }";
 
-      # The setup-env call must not abort shell entry on failure; wrap with warning.
       setupEnvHook = ''
         if ! source <(ncap-ctl setup-env); then
           echo "ncap-ctl: setup-env failed (run \`ncap-ctl setup-env\` to retry)" >&2
         fi
       '';
 
-      # The init call must not abort shell entry on failure; wrap with warning.
       initHook = lib.optionalString checked.autoStart ''
         if ! ncap-ctl init; then
           echo "ncap-ctl: init failed (run \`ncap-ctl init\` to retry; wrapped commands will hint on connect)" >&2
@@ -258,7 +216,7 @@ in
     in
     builtins.seq checkAll (
       pkgs.mkShellNoCC {
-        name = "nix-capsule-shell";
+        name = checked.project;
 
         NCAP_PROJECT = checked.project;
         NCAP_CONTAINER = checked.containerName;
