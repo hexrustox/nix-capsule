@@ -8,9 +8,17 @@
 use std::{
     collections::HashMap,
     fs,
-    os::unix::{self, fs::PermissionsExt},
+    io::{Read, Write},
+    net::Shutdown,
+    os::unix::{self, fs::PermissionsExt, net::UnixListener},
     path::{Path, PathBuf},
     process::{Command, Output},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
 };
 
 use tempfile::TempDir;
@@ -116,12 +124,105 @@ fn write_stub(path: &Path, content: &str) {
 }
 
 /// Bind a listener on `sock` so the socket half of the liveness predicate
-/// (§ Liveness: Running AND connectable) holds. The caller must hold the
-/// return value until the ctl invocation completes — dropping it closes the
-/// socket and the container counts as not live again.
-fn live_socket(sock: &Path) -> std::os::unix::net::UnixListener {
+/// (§ Liveness: Running AND connectable) holds, and (non-`Silent`) spawn
+/// the wire-speaking responder thread behind it. The caller must hold the
+/// return value until the ctl invocation completes — dropping it closes
+/// the socket and the container counts as not live again.
+fn live_socket(sock: &Path, responder: Responder) -> (UnixListener, Option<Arc<AtomicBool>>) {
     fs::create_dir_all(sock.parent().unwrap()).expect("sock dir");
-    std::os::unix::net::UnixListener::bind(sock).expect("bind socket")
+    let listener = UnixListener::bind(sock).expect("bind socket");
+    if matches!(responder, Responder::Silent) {
+        return (listener, None);
+    }
+    let stopping = Arc::new(AtomicBool::new(false));
+    let cloned = listener
+        .try_clone()
+        .expect("clone listener for responder thread");
+    let stopping_for_thread = Arc::clone(&stopping);
+    thread::spawn(move || responder_loop(cloned, responder, &stopping_for_thread));
+    (listener, Some(stopping))
+}
+
+/// One connection at a time: read the 5-byte frame header (+ payload) and
+/// answer the Version probe per the configured responder. Any other first
+/// tag (a bare liveness connect) just closes. Read timeouts keep the loop
+/// alive after a connect-nothing session (liveness polls); `stopping`
+/// ends the loop between accepts.
+fn responder_loop(listener: UnixListener, responder: Responder, stopping: &AtomicBool) {
+    while !stopping.load(Ordering::SeqCst) {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        if stopping.load(Ordering::SeqCst) {
+            // The shutdown dummy connection woke the accept: leave at once.
+            return;
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        if !answer_probe(&mut stream, responder.clone()) {
+            // Read timed out or closed mid-frame: done with this connection.
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+/// Answer one Version probe connection; `true` when a well-formed request
+/// frame arrived. The incoming `RequestVersion` frame carries no payload.
+fn answer_probe(stream: &mut std::os::unix::net::UnixStream, responder: Responder) -> bool {
+    let mut head = [0u8; 5];
+    if read_all(stream, &mut head).is_err() {
+        return false;
+    }
+    let tag = head[0];
+    let len = u32::from_be_bytes(head[1..5].try_into().expect("4 bytes"));
+    let mut payload = vec![0u8; len as usize];
+    if read_all(stream, &mut payload).is_err() {
+        return false;
+    }
+    if tag != nix_capsule::protocol::FrameType::RequestVersion as u8 {
+        return true;
+    }
+    let (tag, payload): (u8, Vec<u8>) = match responder {
+        Responder::Matching => (
+            nix_capsule::protocol::FrameType::ServerVersion as u8,
+            serde_json::to_vec(&nix_capsule::protocol::VersionMsg {
+                version: nix_capsule::protocol::CURRENT_VERSION.to_owned(),
+            })
+            .expect("encode version"),
+        ),
+        Responder::Skew(version) => (
+            nix_capsule::protocol::FrameType::ServerVersion as u8,
+            serde_json::to_vec(&nix_capsule::protocol::VersionMsg { version })
+                .expect("encode version"),
+        ),
+        Responder::Stale => (
+            nix_capsule::protocol::FrameType::Error as u8,
+            serde_json::to_vec(&serde_json::json!({
+                "message": "expected a `Request` or `RequestVersion` frame first, got an unknown tag"
+            }))
+            .expect("encode error"),
+        ),
+        Responder::Silent => {
+            unreachable!("live_socket never spawns the thread for `Silent`")
+        }
+    };
+    let mut frame = vec![tag];
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    stream.write_all(&frame).is_ok()
+}
+
+/// Read until `buf` is full or the (2 s) read timeout fires.
+fn read_all(stream: &mut std::os::unix::net::UnixStream, buf: &mut [u8]) -> Result<(), ()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(()),
+        }
+    }
+    if filled == buf.len() { Ok(()) } else { Err(()) }
 }
 
 /// Freshness of the cached Env dump (CONTEXT.md Freshness: fresh /
@@ -172,6 +273,23 @@ pub enum Failure {
     NeverRunning(String),
 }
 
+/// What the wire-speaking responder behind the live socket answers to the
+/// Version probe (spec/protocol.md § Version probe). `Matching` and `Skew`
+/// reply `ServerVersion` with the given version; `Stale` stands in for a
+/// pre-probe Server (replies `Error` and closes); `Silent` is the plain
+/// listener — a Server accepts, never answers.
+#[derive(Clone)]
+pub enum Responder {
+    /// `ServerVersion` with the host binaries' own version — no skew.
+    Matching,
+    /// `ServerVersion` with a version the caller pins.
+    Skew(String),
+    /// `Error` and close — a Server that predates the probe.
+    Stale,
+    /// Accepts, never answers: probe times out.
+    Silent,
+}
+
 /// Declarative description of the world a test needs. One constructor
 /// (`Fixture::new`) plus three queries is the whole public surface.
 pub struct Config {
@@ -179,6 +297,7 @@ pub struct Config {
     pub freshness: Freshness,
     pub watch: Vec<String>,
     pub failure: Option<Failure>,
+    pub responder: Responder,
 }
 
 impl Default for Config {
@@ -188,6 +307,7 @@ impl Default for Config {
             freshness: Freshness::Missing,
             watch: Vec::new(),
             failure: None,
+            responder: Responder::Matching,
         }
     }
 }
@@ -199,7 +319,7 @@ impl Config {
             liveness: Liveness::live(),
             freshness: Freshness::Fresh,
             watch: vec!["flake.nix".to_owned()],
-            failure: None,
+            ..Self::default()
         }
     }
 
@@ -209,9 +329,14 @@ impl Config {
         Self {
             liveness: Liveness::down(),
             freshness: Freshness::Fresh,
-            watch: Vec::new(),
-            failure: None,
+            ..Self::default()
         }
+    }
+
+    /// Set the responder behind the live socket.
+    pub fn with_responder(mut self, responder: Responder) -> Self {
+        self.responder = responder;
+        self
     }
 }
 
@@ -340,7 +465,8 @@ pub struct Fixture {
     runtime_args_log: PathBuf,
     nix_log: PathBuf,
     _tmp: TempDir,
-    _live: Option<std::os::unix::net::UnixListener>,
+    _live: Option<UnixListener>,
+    _stop: Option<Arc<AtomicBool>>,
 }
 
 /// A live-capable fake Runtime adapter: `run` flips Running true so the
@@ -450,10 +576,11 @@ fn assemble(tmp: TempDir, config: Config) -> Fixture {
     let mut env = base_env(&root, &cache, &logs, &sock, &runtime_bin, &nix_bin);
     env.insert("NCAP_WATCH_FILES".into(), watch_json);
 
-    let _live = if config.liveness.connectable {
-        Some(live_socket(&sock))
+    let (_live, _stop) = if config.liveness.connectable {
+        let (listener, stop) = live_socket(&sock, config.responder.clone());
+        (Some(listener), stop)
     } else {
-        None
+        (None, None)
     };
 
     // Seed the Cache through the real digest interface where fresh
@@ -511,6 +638,7 @@ fn assemble(tmp: TempDir, config: Config) -> Fixture {
         env,
         _tmp: tmp,
         _live,
+        _stop,
     }
 }
 
@@ -631,10 +759,13 @@ impl Fixture {
     }
 
     /// Bind the Liveness listener guard at the `NCAP_SOCKET` from the env
-    /// map (after `apply_setup_env` in the XDG fallback flow).
-    pub fn hold_socket_from_env(&mut self) {
+    /// map (after `apply_setup_env` in the XDG fallback flow), with the
+    /// given responder behind it.
+    pub fn hold_socket_from_env(&mut self, responder: Responder) {
         let sock = self.socket_from_env();
-        self._live = Some(live_socket(&sock));
+        let (listener, stop) = live_socket(&sock, responder);
+        self._live = Some(listener);
+        self._stop = stop;
     }
 
     /// Does `name` exist inside the Project root?
@@ -796,6 +927,7 @@ impl Fixture {
 
     /// Drop the Liveness listener guard (the Container counts as not live).
     pub fn not_live(mut self) -> Self {
+        self.shutdown_responder();
         self._live = None;
         self
     }
@@ -924,8 +1056,21 @@ impl Fixture {
 
     /// Drop the Liveness guard and remove the Socket file stand-in.
     pub fn drop_live(&mut self) {
+        self.shutdown_responder();
         self._live = None;
         let _ = fs::remove_file(&self.sock);
+    }
+
+    /// Stop the responder thread and release its cloned listener so the
+    /// original guard's drop fully closes the Socket (not-live again).
+    fn shutdown_responder(&mut self) {
+        if let Some(stopping) = self._stop.take() {
+            stopping.store(true, Ordering::SeqCst);
+            // A dummy connect unblocks the accept so the thread can exit
+            // and release its cloned fd.
+            let _ = std::os::unix::net::UnixStream::connect(&self.sock);
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// The tempdir backing this fixture.

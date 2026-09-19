@@ -10,6 +10,7 @@ pub(crate) mod paths;
 pub(crate) mod runtime;
 pub(crate) mod shell;
 pub(crate) mod stamp;
+pub(crate) mod version;
 
 use std::fs;
 use std::io;
@@ -21,11 +22,29 @@ use crate::ctl::config::{Cmd, Config, ConfigError};
 use crate::ctl::fs_error::FsError;
 use crate::ctl::runtime::RuntimeError;
 use crate::ctl::stamp::StampError;
+use crate::ctl::version::skew_warning;
+
+/// What Ctl hands the toplevel to render: at most one warning line
+/// (Version skew) plus the error message to print on stderr, if any.
+#[derive(Debug, Default)]
+pub struct Outcome {
+    /// A non-fatal warning line — currently the Version skew warning
+    /// (spec/ctl.md § Version probe) — rendered by the toplevel with the
+    /// binary prefix before any error line.
+    pub warning: Option<String>,
+    /// The error message to print and exit non-zero on, if any.
+    pub error: Option<String>,
+}
 
 /// Entry point from the binary: dispatch `cmd` after resolving the config
-/// from the process environment. Returns the message to print on stderr, if
-/// any (unprefixed, may be multi-line).
-pub async fn run(cmd: Cmd) -> Option<String> {
+/// from the process environment. Returns an [`Outcome`] the toplevel
+/// renders — at most one warning line (Version skew) plus the error message
+/// to print on stderr, if any.
+pub async fn run(cmd: Cmd) -> Outcome {
+    let rejected = |err| Outcome {
+        warning: None,
+        error: fail(err),
+    };
     let lookup = |var: &str| std::env::var(var).ok();
     // `setup-env` resolves the derived vars itself, so it must run before
     // the full demand set — a full resolve would reject the empty values it
@@ -34,30 +53,33 @@ pub async fn run(cmd: Cmd) -> Option<String> {
         return match config::setup_env(&lookup) {
             Ok(script) => {
                 print!("{script}");
-                None
+                Outcome::default()
             }
-            Err(err) => fail(err.into()),
+            Err(err) => rejected(err.into()),
         };
     }
     let cfg = match config::resolve(&lookup) {
         Ok(cfg) => cfg,
-        Err(err) => return fail(err.into()),
+        Err(err) => return rejected(err.into()),
     };
     let result = match cmd {
-        Cmd::Init => init(cfg).await,
+        Cmd::Init => init(cfg).await.map(|_| None),
         Cmd::Start => start(cfg).await,
-        Cmd::Stop => stop(cfg).await,
-        Cmd::Restart => restart(cfg).await,
+        Cmd::Stop => stop(cfg).await.map(|_| None),
+        Cmd::Restart => restart(cfg).await.map(|_| None),
         Cmd::Status => status(cfg).await,
-        Cmd::Enter => enter(cfg).await,
-        Cmd::Log => log(cfg).await,
-        Cmd::Clean => clean(cfg).await,
-        Cmd::ShowOptions => show_options(cfg).await,
+        Cmd::Enter => enter(cfg).await.map(|_| None),
+        Cmd::Log => log(cfg).await.map(|_| None),
+        Cmd::Clean => clean(cfg).await.map(|_| None),
+        Cmd::ShowOptions => show_options(cfg).await.map(|_| None),
         Cmd::SetupEnv => unreachable!("handled before resolve"),
     };
     match result {
-        Ok(()) => None,
-        Err(err) => fail(err),
+        Ok(warning) => Outcome {
+            warning,
+            error: None,
+        },
+        Err(err) => rejected(err),
     }
 }
 
@@ -155,7 +177,7 @@ async fn init(cfg: Config) -> Result<(), CtlError> {
     }
 }
 
-async fn start(cfg: Config) -> Result<(), CtlError> {
+async fn start(cfg: Config) -> Result<Option<String>, CtlError> {
     let root = &cfg.root;
     let cache_dir = &cfg.cache_dir;
     let project = &cfg.project;
@@ -164,9 +186,12 @@ async fn start(cfg: Config) -> Result<(), CtlError> {
     let rt = cfg.runtime();
     let socket = &cfg.socket;
     if rt.is_live(socket).await {
-        return Ok(());
+        // Live-done branch: the Version probe still runs.
+        return Ok(skew_warning(socket).await);
     }
-    start_inner(&cfg).await
+    start_inner(&cfg).await?;
+    // Fresh readiness reached: probe the Server the launch just started.
+    Ok(skew_warning(socket).await)
 }
 
 async fn stop(cfg: Config) -> Result<(), CtlError> {
@@ -196,11 +221,17 @@ async fn restart(cfg: Config) -> Result<(), CtlError> {
     init(cfg).await
 }
 
-async fn status(cfg: Config) -> Result<(), CtlError> {
+async fn status(cfg: Config) -> Result<Option<String>, CtlError> {
     let rt = cfg.runtime();
     let running = rt.is_running().await;
 
     let socket_connectable = tokio::net::UnixStream::connect(&cfg.socket).await.is_ok();
+    // After liveness/connectability: one Version probe; skew warns here.
+    let skew = if socket_connectable {
+        skew_warning(&cfg.socket).await
+    } else {
+        None
+    };
 
     let cache_status = match digest::check(&cfg.cache_dir, &cfg.root, &cfg.watch_files) {
         digest::Freshness::Fresh => "fresh",
@@ -219,7 +250,7 @@ async fn status(cfg: Config) -> Result<(), CtlError> {
         println!("socket: unreachable ({})", cfg.socket.display());
     }
     println!("cache: {cache_status}");
-    Ok(())
+    Ok(skew)
 }
 
 async fn enter(cfg: Config) -> Result<(), CtlError> {

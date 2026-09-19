@@ -253,7 +253,7 @@ fn init_running_but_stale_reevals_and_restarts() {
         liveness: fixture::Liveness::live(),
         freshness: fixture::Freshness::Stale,
         watch: vec!["flake.nix".to_owned()],
-        failure: None,
+        ..Default::default()
     });
     // Live but stale ⇒ re-eval, non-fatal stop, then start to readiness.
     let out = fx.init();
@@ -306,7 +306,7 @@ fn not_live_without_connectable_socket_fails_with_never_live() {
         },
         freshness: fixture::Freshness::Fresh,
         watch: Vec::new(),
-        failure: None,
+        ..Default::default()
     })
     .with_timeout(&drain_timeout());
 
@@ -736,7 +736,7 @@ fn runtime_dir_is_created_with_0700() {
         fs::Permissions::from_mode(0o700),
     )
     .expect("sock dir mode");
-    fx.hold_socket_from_env();
+    fx.hold_socket_from_env(fixture::Responder::Matching);
 
     let out = fx.init();
     assert!(
@@ -1173,5 +1173,183 @@ fn full_env_start_propagates_log_level_to_launch() {
         fx.launches().script_contains("--log-level error"),
         "full env must carry the level: {}",
         fx.launches()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Version probe (spec/ctl.md § Version probe): Ctl warns on Version skew at
+// `status` and `start` (both branches), never at `init`.
+// ---------------------------------------------------------------------------
+
+use common::fixture::Responder;
+
+/// A pinned Server version that must differ from the host binaries'
+/// version (build-time string).
+fn skew_server_version() -> &'static str {
+    if nix_capsule::protocol::CURRENT_VERSION == "9.9.9-test" {
+        "9.9.8-test"
+    } else {
+        "9.9.9-test"
+    }
+}
+
+/// stderr of `out` as lossy lines.
+fn stderr_lines(out: &std::process::Output) -> Vec<String> {
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn status_warns_one_line_when_server_version_skews() {
+    let fx = fixture::Fixture::new(
+        fixture::Config::fresh_live()
+            .with_responder(Responder::Skew(skew_server_version().to_owned())),
+    );
+    let out = fx.status();
+    assert!(out.status.success(), "status must not fail: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in ["container: running", "socket: connectable", "cache: fresh"] {
+        assert!(
+            stdout.matches(line).count() == 1,
+            "stdout must keep its three lines: {stdout}"
+        );
+    }
+    let stderr = stderr_lines(&out);
+    assert_eq!(stderr.len(), 2, "one warning + one advice line: {stderr:?}");
+    let warning = &stderr[0];
+    assert!(
+        warning.contains(skew_server_version()),
+        "warning must name the Server's version: {warning}"
+    );
+    assert!(
+        warning.contains(nix_capsule::protocol::CURRENT_VERSION),
+        "warning must name the host version: {warning}"
+    );
+    assert!(
+        stderr[1].contains("ncap-ctl restart"),
+        "advice names the remedy: {:?}",
+        stderr[1]
+    );
+}
+
+#[test]
+fn status_stays_silent_when_versions_match() {
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live());
+    let out = fx.status();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "no warning when versions match: {out:?}"
+    );
+}
+
+#[test]
+fn start_warns_when_live_server_version_skews() {
+    let fx = fixture::Fixture::new(
+        fixture::Config::fresh_live()
+            .with_responder(Responder::Skew(skew_server_version().to_owned())),
+    );
+    let out = fx.start();
+    assert!(out.status.success(), "warning never fails: {out:?}");
+    let stderr = stderr_lines(&out);
+    assert_eq!(stderr.len(), 2, "{stderr:?}");
+    assert!(
+        stderr[0].contains(skew_server_version())
+            && stderr[0].contains(nix_capsule::protocol::CURRENT_VERSION),
+        "{stderr:?}"
+    );
+    assert!(stderr[1].contains("ncap-ctl restart"), "{stderr:?}");
+    // Live-done: no launch happened.
+    assert!(fx.launches().is_empty());
+}
+
+#[test]
+fn start_warns_after_fresh_readiness_when_version_skews() {
+    let fx = fixture::Fixture::new(
+        fixture::Config::fresh_empty()
+            .with_responder(Responder::Skew(skew_server_version().to_owned())),
+    );
+    let out = fx.start();
+    assert!(
+        out.status.success(),
+        "skewed container is still success: {out:?}"
+    );
+    let stderr = stderr_lines(&out);
+    assert_eq!(stderr.len(), 2, "{stderr:?}");
+    assert!(stderr[0].contains(skew_server_version()), "{stderr:?}");
+    assert!(stderr[1].contains("ncap-ctl restart"), "{stderr:?}");
+    assert!(fx.launches().runs() >= 1);
+}
+
+#[test]
+fn pre_probe_server_error_reply_warns_the_same_advice() {
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live().with_responder(Responder::Stale));
+    let out = fx.status();
+    assert!(out.status.success(), "status: {out:?}");
+    let stderr = stderr_lines(&out);
+    assert_eq!(stderr.len(), 2, "{stderr:?}");
+    assert!(
+        stderr[0].contains(nix_capsule::protocol::CURRENT_VERSION),
+        "warning still names the host version: {stderr:?}"
+    );
+    assert!(stderr[1].contains("ncap-ctl restart"), "{stderr:?}");
+}
+
+#[test]
+fn unreachable_socket_skips_the_probe_silently() {
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live()).not_live();
+    let out = fx.status();
+    assert!(out.status.success(), "status: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "no warning without a reachable socket: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("unreachable"),
+        "status keeps reporting: {out:?}"
+    );
+}
+
+#[test]
+fn non_answering_socket_skips_the_probe_within_bounded_wait() {
+    let fx = fixture::Fixture::new(fixture::Config::fresh_live().with_responder(Responder::Silent));
+    let started = std::time::Instant::now();
+    let out = fx.status();
+    assert!(
+        out.status.success(),
+        "listen-but-silent must not fail: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "no warning when no answer: {out:?}"
+    );
+    // The bounded probe wait (~2 s) must cap, not hang.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "probe never hangs: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn init_never_probes_for_version() {
+    let fx = fixture::Fixture::new(
+        fixture::Config {
+            liveness: fixture::Liveness::down(),
+            freshness: fixture::Freshness::Fresh,
+            ..Default::default()
+        }
+        .with_responder(Responder::Skew(skew_server_version().to_owned())),
+    );
+    let out = fx.init();
+    assert!(
+        out.status.success(),
+        "init succeeds through the shellHook path: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "init never warns, even skewed: {out:?}"
     );
 }
