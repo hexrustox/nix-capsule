@@ -4,7 +4,6 @@
 //! live server, replacing a stale file) and logs per-run; SIGTERM/SIGINT
 //! stop every connection orderly within the drain grace.
 
-use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -21,10 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
 use crate::ctl::fs_error::FsError;
-use crate::ctl::paths::server_log_path;
-use crate::protocol::{
-    CURRENT_VERSION, DecodeError, ErrorMsg, Exit, FrameCodec, FrameType, Message, VersionMsg,
-};
+use crate::protocol::{CURRENT_VERSION, DecodeError, Exit, FrameCodec, FrameType, Message};
 
 /// Bind `socket` and serve connections until the process is stopped. A
 /// SIGTERM or SIGINT starts the orderly shutdown: `ServerStopping` to every
@@ -108,52 +104,24 @@ pub enum ServerError {
     /// The socket file is owned by a live server; refusing to disturb it.
     #[error("socket `{socket}` is owned by a live server")]
     SocketInUse {
-        /// The socket path owned by the live server.
+        /// Path of the socket the live server owns.
         socket: String,
     },
     /// Binding the socket file failed.
     #[error("cannot bind socket `{socket}`: {source}")]
     Bind {
-        /// The socket path that failed to bind.
+        /// Socket path whose bind failed.
         socket: String,
-        /// The underlying bind failure.
+        /// The `bind` failure.
         #[source]
         source: std::io::Error,
     },
     /// Installing a shutdown signal handler failed.
     #[error("cannot install the `{signal}` handler: {source}")]
     SignalHandler {
-        /// The signal whose handler failed to install.
+        /// Signal whose handler failed to install.
         signal: &'static str,
-        /// The underlying handler-installation failure.
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Failure modes that end a Connection with a terminal `Error` frame; the
-/// message rides to the Client as the frame's `message` payload. Separate
-/// from the startup `ServerError`: this enum renders on the wire, not on
-/// the Server's stderr.
-#[derive(Debug, thiserror::Error)]
-enum Rejection {
-    #[error("expected a `Request` frame first, got `{got:?}`")]
-    ExpectedRequest { got: FrameType },
-    #[error(transparent)]
-    Decode(#[from] DecodeError),
-    #[error("`cwd` is not a directory: `{cwd}`")]
-    NotADirectory { cwd: String },
-    #[error("invalid env entry `{entry}`")]
-    BadEnvEntry { entry: String },
-    #[error("cannot spawn `{command}`: {source}")]
-    Spawn {
-        command: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("cannot wait for `{command}`: {source}")]
-    Wait {
-        command: String,
+        /// The handler-installation failure.
         #[source]
         source: std::io::Error,
     },
@@ -177,7 +145,7 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// The tag string the log writer emits for this level.
-    pub(crate) fn as_str(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             LogLevel::Debug => "debug",
             LogLevel::Info => "info",
@@ -188,7 +156,7 @@ impl LogLevel {
 
     /// Fixed rank for the minimum-severity comparison: `debug` 0 through
     /// `error` 3.
-    pub(crate) fn rank(&self) -> u8 {
+    fn rank(&self) -> u8 {
         match self {
             LogLevel::Debug => 0,
             LogLevel::Info => 1,
@@ -221,7 +189,7 @@ pub enum LogLevelParseError {
     /// The rejected `--log-level` value.
     #[error("must be `debug`, `info`, `warning`, or `error`, got `{value}`")]
     BadLevel {
-        /// The off-vocabulary value that was rejected.
+        /// The rejected `--log-level` value.
         value: String,
     },
 }
@@ -234,6 +202,34 @@ impl std::str::FromStr for LogLevel {
             value: value.to_owned(),
         })
     }
+}
+
+/// Failure modes that end a Connection with a terminal `Error` frame; the
+/// message rides to the Client as the frame's `message` payload. Separate
+/// from the startup `ServerError`: this enum renders on the wire, not on
+/// the Server's stderr.
+#[derive(Debug, thiserror::Error)]
+enum Rejection {
+    #[error("expected a `Request` frame first, got `{got:?}`")]
+    ExpectedRequest { got: FrameType },
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("`cwd` is not a directory: `{cwd}`")]
+    NotADirectory { cwd: String },
+    #[error("invalid env entry `{entry}`")]
+    BadEnvEntry { entry: String },
+    #[error("cannot spawn `{command}`: {source}")]
+    Spawn {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot wait for `{command}`: {source}")]
+    Wait {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Probe an existing socket file before binding: a connectable socket is
@@ -319,7 +315,7 @@ async fn handle_conn(stream: UnixStream, stopping: watch::Receiver<bool>, log: A
         }
     };
 
-    let version = Message::Version(VersionMsg {
+    let version = Message::Version(crate::protocol::VersionMsg {
         version: CURRENT_VERSION.into(),
     });
     if !send(&mut framed, version).await {
@@ -616,7 +612,7 @@ async fn pump_output(
 async fn send_error(framed: &mut Framed<UnixStream, FrameCodec>, rejection: &Rejection) {
     send(
         framed,
-        Message::Error(ErrorMsg {
+        Message::Error(crate::protocol::ErrorMsg {
             message: rejection.to_string(),
         }),
     )
@@ -653,8 +649,8 @@ impl Log {
             dir: dir.display().to_string(),
             source,
         })?;
-        let path = server_log_path(dir, epoch_millis());
-        let file = OpenOptions::new()
+        let path = crate::ctl::paths::server_log_path(dir, epoch_millis());
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
@@ -751,7 +747,7 @@ fn format_utc(secs: u64) -> String {
     )
 }
 
-/// Milliseconds since the Unix epoch, saturating at 0 like [`epoch_secs`].
+/// Milliseconds since the Unix epoch, saturating at 0 like [`rfc3339_utc`].
 fn epoch_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -761,8 +757,9 @@ fn epoch_millis() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
     use std::os::unix::process::CommandExt;
+
+    use proptest::prelude::*;
 
     use super::*;
 

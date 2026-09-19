@@ -4,13 +4,12 @@
 
 /// Single-quote-escape a value so it is safe inside single-quoted bash text:
 /// each `'` becomes `'\''`, closing and reopening the quotes around it.
-pub(crate) fn shell_escape(value: &str) -> String {
+pub(super) fn shell_escape(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::shell_escape;
     use test_case::test_case;
 
     #[test_case("plain" => "plain" ; "no_special_chars_pass_through")]
@@ -21,6 +20,6 @@ mod tests {
     #[test_case("'" => "'\\''" ; "lone_quote_closes_reopens")]
     #[test_case("'a'" => "'\\''a'\\''" ; "surrounding_quotes_each_escape")]
     fn escapes_single_quotes_for_bash(value: &str) -> String {
-        shell_escape(value)
+        super::shell_escape(value)
     }
 }

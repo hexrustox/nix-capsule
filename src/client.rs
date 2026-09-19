@@ -14,9 +14,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
-use crate::protocol::{
-    CURRENT_VERSION, DecodeError, EncodeError, Exit, FrameCodec, Message, Request, SignalMsg,
-};
+use crate::protocol::{DecodeError, EncodeError, FrameCodec, Message, Request, SignalMsg};
 
 /// Run `command` against the server listening on `socket`.
 ///
@@ -268,7 +266,7 @@ fn build_request(
         args: lossy.collect(),
         cwd: cwd.to_string_lossy().into_owned(),
         env,
-        version: Some(CURRENT_VERSION.into()),
+        version: Some(crate::protocol::CURRENT_VERSION.into()),
     })
 }
 
@@ -289,7 +287,7 @@ fn build_env(
         }
         None => Vec::new(),
     };
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut entries = Vec::new();
     for name in &names {
         if let Some(value) = lookup(name) {
             apply_entry(&mut entries, name, value.to_string_lossy().into_owned());
@@ -361,7 +359,7 @@ fn pump_stdin(tx: mpsc::Sender<Option<Vec<u8>>>) -> tokio::task::JoinHandle<()> 
 /// Classify the child's terminal status into an outcome. 127 and 126 come
 /// with a notice the entry point renders; the raw codes alone say nothing
 /// actionable.
-fn exit_outcome(exit: &Exit, command: &str) -> Result<Outcome, ClientError> {
+fn exit_outcome(exit: &crate::protocol::Exit, command: &str) -> Result<Outcome, ClientError> {
     match (exit.code, exit.signal) {
         (Some(127), _) => Ok(Outcome::with_notice(
             127,

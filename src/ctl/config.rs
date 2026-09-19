@@ -39,48 +39,46 @@ pub enum Cmd {
 /// Resolved configuration for one command. Fields a command does not use are
 /// populated anyway; the flows read what they demanded upfront.
 #[derive(Debug)]
-pub(crate) struct Config {
+pub(super) struct Config {
     /// Project root the container mounts and runs in.
-    pub root: PathBuf,
+    pub(super) root: PathBuf,
     /// Sanitized project name scoping container, socket, cache, and logs.
-    pub project: String,
+    pub(super) project: String,
     /// Container name managed by the runtime adapter.
-    pub container: String,
+    pub(super) container: String,
     /// Unix socket path served by `ncap-server`.
-    pub socket: PathBuf,
+    pub(super) socket: PathBuf,
     /// Cache dir holding the env dump, hash, profile, and stamp.
-    pub cache_dir: PathBuf,
+    pub(super) cache_dir: PathBuf,
     /// Log dir holding per-run `ncap-server-*.log` files.
-    pub log_dir: PathBuf,
+    pub(super) log_dir: PathBuf,
     /// OCI runtime binary (`podman`, `docker`; `auto` is resolved at
     /// config time and never stored here).
-    pub runtime: String,
+    pub(super) runtime: String,
     /// Seconds to wait for liveness before reporting not-live.
-    pub timeout: u64,
+    pub(super) timeout: u64,
     /// Project-root-relative watched files gating freshness.
-    pub watch_files: Vec<String>,
+    pub(super) watch_files: Vec<String>,
     /// Extra runtime options appended after the defaults.
-    pub run_opts: Vec<String>,
+    pub(super) run_opts: Vec<String>,
     /// Whether to drop capabilities and bind-mount watches read-only.
-    pub harden: bool,
+    pub(super) harden: bool,
     /// Minimum severity the server logs at.
-    pub log_level: LogLevel,
+    pub(super) log_level: LogLevel,
     /// Container image to launch.
-    pub image: String,
+    pub(super) image: String,
     /// Server binary path executed inside the container.
-    pub server: PathBuf,
+    pub(super) server: PathBuf,
     /// Nix binary used for `print-dev-env`.
-    pub nix: PathBuf,
+    pub(super) nix: PathBuf,
     /// Bash binary used for launch and exec commands.
-    pub bash: PathBuf,
+    pub(super) bash: PathBuf,
     /// Devshell attribute evaluated by `print-dev-env`.
-    pub devshell: String,
+    pub(super) devshell: String,
 }
 
 impl Config {
-    /// A [`Runtime`] scoped to this config's container: the executable name,
-    /// container name, and bash path cloned from the config each call.
-    pub(crate) fn runtime(&self) -> Runtime {
+    pub(super) fn runtime(&self) -> Runtime {
         Runtime::new(
             self.runtime.clone(),
             self.container.clone(),
@@ -89,8 +87,8 @@ impl Config {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
 /// Failures resolving the `NCAP_*` env contract into a [`Config`].
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
     #[error("required `{var}` is not set")]
     Missing { var: &'static str },
@@ -127,11 +125,8 @@ pub(crate) enum ConfigError {
 /// `SetupEnv` share one demand set (normally fully populated by `lib.nix`
 /// plus a sourced `setup-env`): derived vars are demanded non-empty, never
 /// derived here.
-pub(crate) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
-    // Runtime/timeout are demanded on every command (missing => error naming
-    // the var). JSON-array vars consumed by ctl and harden are validated and
-    // demanded on every command (missing or malformed => error naming the
-    // var); `NCAP_ENV_FORWARD` is validated by the Client only.
+pub(super) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
+    // `NCAP_ENV_FORWARD` is validated by the Client only.
     let runtime = parse_runtime(lookup, &detect_in_path)?;
     let timeout = parse_timeout(lookup)?;
     // Eagerly validate the JSON-array vars and harden on every command so
@@ -154,10 +149,10 @@ pub(crate) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config,
     let cache_dir = PathBuf::from(demand(lookup, "NCAP_CACHE_DIR")?);
     let log_dir = PathBuf::from(demand(lookup, "NCAP_LOG_DIR")?);
     let devshell = demand(lookup, "NCAP_DEVSHELL")?;
-    let nix = demand(lookup, "NCAP_NIX")?;
+    let nix = PathBuf::from(demand(lookup, "NCAP_NIX")?);
     let image = demand(lookup, "NCAP_IMAGE")?;
-    let server = demand(lookup, "NCAP_SERVER")?;
-    let bash = demand(lookup, "NCAP_BASH")?;
+    let server = PathBuf::from(demand(lookup, "NCAP_SERVER")?);
+    let bash = PathBuf::from(demand(lookup, "NCAP_BASH")?);
     Ok(Config {
         root,
         project,
@@ -172,9 +167,9 @@ pub(crate) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config,
         harden,
         log_level,
         image,
-        server: PathBuf::from(server),
-        nix: PathBuf::from(nix),
-        bash: PathBuf::from(bash),
+        server,
+        nix,
+        bash,
         devshell,
     })
 }
@@ -185,7 +180,7 @@ pub(crate) fn resolve(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config,
 /// root basename, container as `ncap-<project>`, socket/cache/log from the
 /// XDG layout). Fixed order: `PROJECT, CONTAINER, SOCKET, CACHE_DIR,
 /// LOG_DIR`. Needs only `NCAP_PROJECT_ROOT`.
-pub(crate) fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
+pub(super) fn setup_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
     let root_str = demand(lookup, "NCAP_PROJECT_ROOT")?;
     let root = PathBuf::from(&root_str);
     let project = resolve_project(lookup, Some(&root))?;
@@ -249,7 +244,7 @@ fn validate_watch_files(root: &Path, entries: &[String]) -> Result<(), ConfigErr
         if !path.is_relative()
             || path
                 .components()
-                .any(|c| c == std::path::Component::ParentDir)
+                .any(|component| component == std::path::Component::ParentDir)
         {
             return Err(ConfigError::NotRelativeWatchFile {
                 entry: entry.clone(),
@@ -389,8 +384,9 @@ fn sanitize(basename: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use test_case::test_case;
+
+    use super::*;
 
     /// An owned lookup; when a var appears twice the last pair wins, so
     /// `full(extra)` can override the base.
@@ -524,7 +520,7 @@ mod tests {
         std::fs::write(root.path().join("file"), b"x").expect("watched file");
         std::os::unix::fs::symlink("file", root.path().join("link")).expect("symlink");
         std::os::unix::fs::symlink("nowhere", root.path().join("broken")).expect("dangling");
-        let owned: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+        let owned: Vec<String> = entries.iter().map(|entry| entry.to_string()).collect();
         validate_watch_files(root.path(), &owned)
     }
 
@@ -584,7 +580,6 @@ mod tests {
             out.contains("export NCAP_CACHE_DIR='/tmp/a'\\''b dir'\n"),
             "out={out}"
         );
-        // Fixed order: project, container, socket, cache, log.
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 5, "out={out}");
         assert!(lines[0].starts_with("export NCAP_PROJECT="), "out={out}");

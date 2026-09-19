@@ -18,8 +18,7 @@ pub(crate) enum PrintDevEnvError {
     Failed { devshell: String },
 }
 
-/// Invoke `nix print-dev-env --profile <profile> <devshell>` and return the
-/// captured stdout (the env dump).
+/// Captured stdout is the env dump.
 pub(crate) async fn print_dev_env(
     nix_bin: &Path,
     profile: &Path,

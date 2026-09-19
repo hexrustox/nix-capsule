@@ -1,4 +1,4 @@
-//! Stamp guard: binds a project name to exactly one project root.
+//! Binds a project name to exactly one project root.
 
 use std::fs;
 use std::io;
@@ -8,7 +8,6 @@ use super::fs_error::FsError;
 use super::paths::project_stamp_file;
 
 #[derive(Debug, thiserror::Error)]
-/// Failures of the project-name stamp guard.
 pub(crate) enum StampError {
     #[error("project name `{project}` is already keyed to root `{existing}`")]
     AlreadyClaimed { project: String, existing: String },
@@ -16,9 +15,9 @@ pub(crate) enum StampError {
     Fs(#[from] FsError),
 }
 
-/// Read `<cache>/project`; absent means "first claim" and is written, a
-/// different root is a hard error, the same root passes silently.
-pub(crate) fn guard(
+/// Absent means "first claim" and is written; a different root is a hard
+/// error, the same root passes silently.
+pub(super) fn guard(
     cache_dir: &Path,
     project: &str,
     current_root: &Path,

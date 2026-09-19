@@ -7,13 +7,13 @@ use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
-/// Largest payload a single frame may carry (16 MiB).
+/// 16 MiB.
 pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 
-/// Current protocol version, embedded from `CARGO_PKG_VERSION` at build time.
+/// Embedded from `CARGO_PKG_VERSION` at build time.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Wire frame type tag. Each byte value is part of the protocol.
+/// Each byte value is part of the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
     /// Client → server: run this command.
@@ -37,7 +37,7 @@ pub enum FrameType {
 }
 
 impl FrameType {
-    /// Decode a tag byte into its frame type; `None` for unknown tags.
+    /// `None` for unknown tags.
     pub fn from_u8(b: u8) -> Option<Self> {
         match b {
             0x01 => Some(Self::Request),
@@ -53,7 +53,7 @@ impl FrameType {
         }
     }
 
-    /// Encode the frame type as its wire tag byte.
+    /// The wire tag byte.
     pub fn to_byte(self) -> u8 {
         self as u8
     }
@@ -62,36 +62,35 @@ impl FrameType {
 /// A wire frame: tag, big-endian length, raw payload.
 #[derive(Debug)]
 pub struct Frame {
-    /// Frame type tag.
+    /// Decoded tag byte.
     pub frame_type: FrameType,
-    /// Raw payload bytes (JSON for struct frames, raw bytes for stream frames).
+    /// JSON for struct frames, raw bytes for stream frames.
     pub payload: Vec<u8>,
 }
 
 /// Client → server: the command to run inside the container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
-    /// Executable to run.
+    /// Executable, not a shell line.
     pub command: String,
-    /// Arguments passed to the executable.
+    /// Argv after the executable.
     pub args: Vec<String>,
-    /// Working directory for the command.
+    /// Working directory for the child.
     pub cwd: String,
     /// `KEY=VALUE` entries applied by the server over its environment.
     pub env: Vec<String>,
-    /// Sender's protocol version, when it opts into the handshake.
+    /// Present when the sender opts into the handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
 
-/// Server → client: terminal status of the executed command.
 /// Exactly one field is set in practice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Exit {
-    /// Process exit code on normal termination.
+    /// On normal termination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<u8>,
-    /// POSIX signal number on death by signal.
+    /// On death by signal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<u8>,
 }
@@ -99,18 +98,18 @@ pub struct Exit {
 /// Server → client: the connection failed without an exit status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorMsg {
-    /// What went wrong.
+    /// Human-readable failure description.
     pub message: String,
 }
 
-/// Server → client: the sender's protocol version.
+/// Compared by exact equality, advisory only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionMsg {
-    /// Version string; compared by exact equality, advisory only.
+    /// Sender's protocol version.
     pub version: String,
 }
 
-/// Client → server: a host-shell signal forwarded toward the child.
+/// A host-shell signal forwarded toward the child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalMsg {
     /// POSIX signal number (e.g. 2, 9, 15).
@@ -141,7 +140,7 @@ pub enum Message {
 }
 
 impl Message {
-    /// The wire tag identifying this message's frame.
+    /// The wire tag byte for this message.
     pub fn frame_type(&self) -> FrameType {
         match self {
             Self::Request(_) => FrameType::Request,
@@ -156,10 +155,9 @@ impl Message {
         }
     }
 
-    /// Serialize the message into a wire frame for transport.
+    /// Fails if an `Exit` carries both `code` and `signal`.
     pub fn into_frame(self) -> Result<Frame, EncodeError> {
-        // `Exit` carries exactly one outcome: both fields set is never valid
-        // on the wire (`None`, `None` is the unknowable-status exception).
+        // `None`/`None` stays valid: an unknowable status.
         if let Self::Exit(Exit {
             code: Some(_),
             signal: Some(_),
@@ -183,7 +181,7 @@ impl Message {
         })
     }
 
-    /// Deserialize a wire frame into its typed message.
+    /// Rejects a non-empty `ServerStopping` payload.
     pub fn from_frame(frame: Frame) -> Result<Self, DecodeError> {
         let Frame {
             frame_type,
@@ -272,8 +270,7 @@ pub enum EncodeError {
     },
 }
 
-/// Five-byte framed codec: one tag byte, a big-endian length, then the
-/// payload. Shared by both ends of the socket.
+/// Shared by both ends of the socket.
 pub struct FrameCodec;
 
 impl FrameCodec {

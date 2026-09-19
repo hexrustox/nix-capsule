@@ -1,14 +1,12 @@
-//! Runtime adapter: podman or docker. Both
-//! runtimes share the same argument surface; probes use Go-template `inspect`.
+//! Runtime adapter: podman or docker, sharing one argument surface;
+//! probes use Go-template `inspect`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
 
-use super::paths::env_file;
 use super::shell::shell_escape;
-use crate::server::LogLevel;
 
 /// Failures of the runtime adapter: spawn errors ride as `#[source]`, a
 /// failed run/stop/rm carries the captured output as a data field, exec
@@ -41,21 +39,20 @@ pub(crate) enum RuntimeError {
 /// Arguments of the ncap-server binary: exactly its CLI surface
 /// (`--socket`, `--log-dir`, `--timeout`, `--log-level`).
 #[derive(Clone, Debug)]
-pub(crate) struct ServerArgs {
+pub(super) struct ServerArgs {
     /// Unix socket path the server binds.
-    pub socket: PathBuf,
+    pub(super) socket: PathBuf,
     /// Directory for per-run server logs.
-    pub log_dir: PathBuf,
+    pub(super) log_dir: PathBuf,
     /// Drain grace for live connections at shutdown, seconds.
-    pub timeout: u64,
+    pub(super) timeout: u64,
     /// Minimum severity the server logs at.
-    pub log_level: LogLevel,
+    pub(super) log_level: crate::server::LogLevel,
 }
 
-/// The OCI runtime executable, scoped to a single container: the executable
-/// name, the container name it manages, and the bash path used in commands.
+/// The OCI runtime executable scoped to a single container.
 #[derive(Clone, Debug)]
-pub(crate) struct Runtime {
+pub(super) struct Runtime {
     bin: String,
     name: String,
     bash: PathBuf,
@@ -63,7 +60,7 @@ pub(crate) struct Runtime {
 
 impl Runtime {
     /// Scope the runtime executable to the named container.
-    pub(crate) fn new(bin: String, name: String, bash: PathBuf) -> Self {
+    pub(super) fn new(bin: String, name: String, bash: PathBuf) -> Self {
         Self { bin, name, bash }
     }
 
@@ -72,7 +69,7 @@ impl Runtime {
     /// init process (the server) is reportedly running. This alone is not
     /// liveness (see `is_live`): any spawn or parse failure is treated as
     /// not-running.
-    pub(crate) async fn is_running(&self) -> bool {
+    pub(super) async fn is_running(&self) -> bool {
         let output = Command::new(&self.bin)
             .args(["inspect", "-f", "{{.State.Running}}", &self.name])
             .output()
@@ -87,7 +84,7 @@ impl Runtime {
     /// One predicate serves both the `init` liveness probe and the `start`
     /// readiness poll. `Running` alone is not live (the container is still
     /// sourcing the Env dump ahead of the Server's bind).
-    pub(crate) async fn is_live(&self, socket: &Path) -> bool {
+    pub(super) async fn is_live(&self, socket: &Path) -> bool {
         if !self.is_running().await {
             return false;
         }
@@ -96,7 +93,7 @@ impl Runtime {
 
     /// Raw `State` JSON via `inspect -f {{json .State}} <name>`, for the
     /// "never became live" failure report.
-    pub(crate) async fn inspect_state(&self) -> String {
+    pub(super) async fn inspect_state(&self) -> String {
         let output = Command::new(&self.bin)
             .args(["inspect", "-f", "{{json .State}}", &self.name])
             .output()
@@ -152,7 +149,7 @@ impl Runtime {
     /// (defaults first, `extraOptions` appended after, `harden` prepended).
     /// Returns the container id on success, or the runtime's captured output
     /// on failure, as a [`RuntimeError::Failed`].
-    pub(crate) async fn run_detached(
+    pub(super) async fn run_detached(
         &self,
         image: &str,
         env_file: &Path,
@@ -180,7 +177,7 @@ impl Runtime {
     }
 
     /// `stop <name>`.
-    pub(crate) async fn stop(&self) -> Result<String, RuntimeError> {
+    pub(super) async fn stop(&self) -> Result<String, RuntimeError> {
         self.run_checked("stop", |cmd| {
             cmd.arg(&self.name);
         })
@@ -190,7 +187,7 @@ impl Runtime {
     /// Whether a container with `name` exists at all (running or stopped):
     /// `inspect <name>` succeeding. Used by the start flow to remove an
     /// exists-but-stopped container before launch.
-    pub(crate) async fn exists(&self) -> bool {
+    pub(super) async fn exists(&self) -> bool {
         match Command::new(&self.bin)
             .args(["inspect", &self.name])
             .output()
@@ -202,7 +199,7 @@ impl Runtime {
     }
 
     /// `rm <name>` — used to clear a dead container after a "name in use" race.
-    pub(crate) async fn remove(&self) -> Result<String, RuntimeError> {
+    pub(super) async fn remove(&self) -> Result<String, RuntimeError> {
         self.run_checked("rm", |cmd| {
             cmd.arg(&self.name);
         })
@@ -214,8 +211,8 @@ impl Runtime {
     /// Inherits stdio so the user's terminal drives
     /// the container shell directly. Returns `Ok` on exit 0, else an error
     /// naming the exit status.
-    pub(crate) async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), RuntimeError> {
-        let env_file = env_file(cache_dir);
+    pub(super) async fn exec_interactive(&self, cache_dir: &Path) -> Result<(), RuntimeError> {
+        let env_file = super::paths::env_file(cache_dir);
         let cmd_str = format!(
             "source '{}' && exec '{}'",
             shell_escape(&env_file.to_string_lossy()),
@@ -247,7 +244,6 @@ impl Runtime {
 
 /// The captured output of a failed runtime invocation, for the error
 /// payload: stderr, falling back to stdout when stderr is empty, trimmed.
-/// `run` used this fallback; `stop`/`rm` join it via `run_checked`.
 fn captured_output(output: &std::process::Output) -> String {
     let mut msg = String::from_utf8_lossy(&output.stderr).to_string();
     if msg.trim().is_empty() {
@@ -256,8 +252,7 @@ fn captured_output(output: &std::process::Output) -> String {
     msg.trim().to_owned()
 }
 
-/// Whether stderr indicates a concurrent-start "name in use" conflict.
-pub(crate) fn is_name_in_use(stderr: &str) -> bool {
+pub(super) fn is_name_in_use(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("already in use") || lower.contains("name in use")
 }

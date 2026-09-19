@@ -1,7 +1,6 @@
 use clap::Parser;
 
-use nix_capsule::ctl::cli::Cli;
-use nix_capsule::ctl::run;
+use nix_capsule::ctl::{cli::Cli, run};
 
 fn main() {
     let cli = Cli::parse();

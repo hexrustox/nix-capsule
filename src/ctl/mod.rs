@@ -4,7 +4,7 @@
 pub mod cli;
 pub mod config;
 pub mod digest;
-pub mod fs_error;
+pub(crate) mod fs_error;
 pub(crate) mod nix;
 pub(crate) mod paths;
 pub(crate) mod runtime;
@@ -14,20 +14,17 @@ pub(crate) mod stamp;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
-
-use tokio::net::UnixStream;
 
 use crate::ctl::config::{Cmd, Config, ConfigError};
 use crate::ctl::fs_error::FsError;
-use crate::ctl::nix::PrintDevEnvError;
-use crate::ctl::paths::{env_file, hash_file, profile_file, project_stamp_file};
 use crate::ctl::runtime::RuntimeError;
 use crate::ctl::stamp::StampError;
 
-/// Entry point from the binary: resolve `cmd` from the process environment and
-/// dispatch. Returns the message to print on stderr, if any (unprefixed, may
-/// be multi-line), and the exit code the process should report.
+/// Entry point from the binary: dispatch `cmd` after resolving the config
+/// from the process environment. Returns the message to print on stderr, if
+/// any (unprefixed, may be multi-line).
 pub async fn run(cmd: Cmd) -> Option<String> {
     let lookup = |var: &str| std::env::var(var).ok();
     // `setup-env` resolves the derived vars itself, so it must run before
@@ -74,7 +71,7 @@ pub(crate) enum CtlError {
     #[error(transparent)]
     Stamp(#[from] StampError),
     #[error(transparent)]
-    PrintDevEnv(#[from] PrintDevEnvError),
+    PrintDevEnv(#[from] crate::ctl::nix::PrintDevEnvError),
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(transparent)]
@@ -105,8 +102,7 @@ pub(crate) enum CtlError {
 }
 
 /// Render `err` without the program prefix — the binary applies it — plus,
-/// when the variant carries it, prescriptive advice as a sibling line, and
-/// yield the exit code for the run.
+/// when the variant carries it, prescriptive advice as a sibling line.
 fn fail(err: CtlError) -> Option<String> {
     let message = err.to_string();
     let message = if let Some(advice) = match &err {
@@ -134,7 +130,6 @@ fn fail(err: CtlError) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 async fn init(cfg: Config) -> Result<(), CtlError> {
-    // Stamp guard first.
     let root = &cfg.root;
     let cache_dir = &cfg.cache_dir;
     let project = &cfg.project;
@@ -148,7 +143,6 @@ async fn init(cfg: Config) -> Result<(), CtlError> {
     match (live, freshness) {
         (true, digest::Freshness::Fresh) => Ok(()),
         (true, _) => {
-            // Running but stale/missing → re-eval + restart.
             ensure_cache(&cfg).await?;
             // Non-fatal stop.
             let _ = rt.stop().await;
@@ -195,8 +189,8 @@ async fn stop(cfg: Config) -> Result<(), CtlError> {
 }
 
 async fn restart(cfg: Config) -> Result<(), CtlError> {
-    // Non-fatal stop, then init. Resolution is uniform, so the Restart cfg
-    // already carries Init's fields — dispatch directly.
+    // Resolution is uniform, so the Restart cfg already carries Init's
+    // fields — dispatch directly.
     let rt = cfg.runtime();
     let _ = rt.stop().await;
     init(cfg).await
@@ -206,7 +200,7 @@ async fn status(cfg: Config) -> Result<(), CtlError> {
     let rt = cfg.runtime();
     let running = rt.is_running().await;
 
-    let socket_connectable = UnixStream::connect(&cfg.socket).await.is_ok();
+    let socket_connectable = tokio::net::UnixStream::connect(&cfg.socket).await.is_ok();
 
     let cache_status = match digest::check(&cfg.cache_dir, &cfg.root, &cfg.watch_files) {
         digest::Freshness::Fresh => "fresh",
@@ -249,9 +243,9 @@ async fn log(cfg: Config) -> Result<(), CtlError> {
     let mut cmd = tokio::process::Command::new(&prog);
     cmd.args(&args);
     cmd.arg(&newest);
-    cmd.stdin(std::process::Stdio::inherit());
-    cmd.stdout(std::process::Stdio::inherit());
-    cmd.stderr(std::process::Stdio::inherit());
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
     let status = cmd.status().await.map_err(|source| CtlError::PagerSpawn {
         prog: prog.clone(),
         source,
@@ -287,7 +281,7 @@ async fn clean(cfg: Config) -> Result<(), CtlError> {
         // removal failure is non-fatal (non-empty, permission, ...).
         match fs::remove_file(&cfg.socket) {
             Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => {
                 return Err(FsError::Remove {
                     path: cfg.socket.display().to_string(),
@@ -321,10 +315,9 @@ async fn ensure_cache(cfg: &Config) -> Result<(), CtlError> {
     if freshness == digest::Freshness::Fresh {
         return Ok(());
     }
-    // Stale or missing → eval.
     let nix_bin = &cfg.nix;
     let devshell = &cfg.devshell;
-    let profile = profile_file(cache_dir);
+    let profile = paths::profile_file(cache_dir);
 
     fs::create_dir_all(cache_dir).map_err(|source| FsError::CreateDir {
         dir: cache_dir.display().to_string(),
@@ -333,7 +326,7 @@ async fn ensure_cache(cfg: &Config) -> Result<(), CtlError> {
 
     let output = nix::print_dev_env(nix_bin, &profile, devshell).await?;
 
-    let env_path = env_file(cache_dir);
+    let env_path = paths::env_file(cache_dir);
     fs::write(&env_path, &output).map_err(|source| FsError::Write {
         path: env_path.display().to_string(),
         source,
@@ -345,7 +338,7 @@ async fn ensure_cache(cfg: &Config) -> Result<(), CtlError> {
     let digest_hex =
         digest::compute(root, &cfg.watch_files).map_err(|source| CtlError::Digest { source })?;
     digest::store(cache_dir, &digest_hex).map_err(|source| FsError::Write {
-        path: hash_file(cache_dir).display().to_string(),
+        path: paths::hash_file(cache_dir).display().to_string(),
         source,
     })?;
     Ok(())
@@ -359,13 +352,12 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     let image = &cfg.image;
 
     // The env dump must exist — otherwise the container cannot source it.
-    if !env_file(cache_dir).is_file() {
+    if !paths::env_file(cache_dir).is_file() {
         return Err(CtlError::NoCachedEnv {
             dir: cache_dir.display().to_string(),
         });
     }
 
-    // Ensure the socket's parent dir exists with 0700.
     if let Some(parent) = socket.parent() {
         paths::ensure_dir_0700(parent).map_err(|source| FsError::CreateDir {
             dir: parent.display().to_string(),
@@ -399,7 +391,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
     let run_result = rt
         .run_detached(
             image,
-            &env_file(cache_dir),
+            &paths::env_file(cache_dir),
             server,
             &server_args,
             &mount_args,
@@ -417,11 +409,10 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
             if rt.is_running().await {
                 return Ok(());
             }
-            // Dead container with the same name — remove and retry once.
             let _ = rt.remove().await;
             rt.run_detached(
                 image,
-                &env_file(cache_dir),
+                &paths::env_file(cache_dir),
                 server,
                 &server_args,
                 &mount_args,
@@ -431,7 +422,6 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
         Err(err) => return Err(err.into()),
     };
 
-    // Poll the liveness predicate until live within the deadline.
     let deadline = Instant::now() + Duration::from_secs(cfg.timeout);
     loop {
         if rt.is_live(socket).await {
@@ -470,10 +460,10 @@ fn pager_command() -> (String, Vec<String>) {
 /// remove the dir itself when empty.
 fn clean_cache_dir(cache_dir: &Path) -> Result<(), CtlError> {
     for file in [
-        env_file(cache_dir),
-        hash_file(cache_dir),
-        profile_file(cache_dir),
-        project_stamp_file(cache_dir),
+        paths::env_file(cache_dir),
+        paths::hash_file(cache_dir),
+        paths::profile_file(cache_dir),
+        paths::project_stamp_file(cache_dir),
     ] {
         remove_file_if_exists(&file)?;
     }
@@ -488,7 +478,7 @@ fn clean_cache_dir(cache_dir: &Path) -> Result<(), CtlError> {
 fn clean_log_dir(log_dir: &Path) -> Result<(), CtlError> {
     let entries = match fs::read_dir(log_dir) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
             return Err(FsError::ReadDir {
                 dir: log_dir.display().to_string(),
@@ -519,7 +509,7 @@ fn clean_log_dir(log_dir: &Path) -> Result<(), CtlError> {
 fn remove_profile_generation_links(cache_dir: &Path) -> Result<(), CtlError> {
     let entries = match fs::read_dir(cache_dir) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
             return Err(FsError::ReadDir {
                 dir: cache_dir.display().to_string(),
@@ -564,11 +554,10 @@ fn remove_profile_generation_links(cache_dir: &Path) -> Result<(), CtlError> {
     Ok(())
 }
 
-/// Remove `path`, treating absence as success.
 fn remove_file_if_exists(path: &Path) -> Result<(), CtlError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(FsError::Remove {
             path: path.display().to_string(),
             source: err,
@@ -614,7 +603,7 @@ fn build_runtime_args(cfg: &Config) -> Result<Vec<String>, CtlError> {
     // Only a real directory mounts: worktree gitfiles (plain files) and
     // symlinks (even to dirs) do not. `symlink_metadata` so a symlink is
     // judged itself, never followed.
-    if std::fs::symlink_metadata(&git_path)
+    if fs::symlink_metadata(&git_path)
         .is_ok_and(|meta| meta.file_type().is_dir() && !meta.file_type().is_symlink())
     {
         args.push("-v".to_owned());

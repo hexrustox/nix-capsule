@@ -12,7 +12,7 @@ use super::paths::{env_file, hash_file};
 
 /// Whether the cached env dump still matches the watched files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Freshness {
+pub enum Freshness {
     /// Hash file present and equal to the computed digest.
     Fresh,
     /// Env dump present but the hash differs or is unreadable.
@@ -48,26 +48,8 @@ pub fn compute(root: &Path, entries: &[String]) -> io::Result<String> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
-/// Forwards every written byte into the hasher so `io::copy` can stream
-/// file contents through it.
-struct HashWriter<'a>(&'a mut <BuildHasherDefault<XxHash64> as BuildHasher>::Hasher);
-
-impl Write for HashWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Compare the computed digest against the cached `<cache>/hash`: the env
-/// dump missing is `Missing`, a matching hash is `Fresh`, everything else is
-/// `Stale`. The cached hash is trimmed before comparing so a trailing newline
-/// (spec: stored with no trailing newline) reads as fresh, matching `status`.
-pub(crate) fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
+/// `Stale` when the stored hash no longer matches `compute`, `Missing` when no hash is stored.
+pub fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshness {
     if !env_file(cache_dir).is_file() {
         return Freshness::Missing;
     }
@@ -85,8 +67,23 @@ pub(crate) fn check(cache_dir: &Path, root: &Path, entries: &[String]) -> Freshn
 }
 
 /// Write `digest` to `<cache>/hash`, lowercase hex with no trailing newline.
-pub(crate) fn store(cache_dir: &Path, digest: &str) -> io::Result<()> {
+pub fn store(cache_dir: &Path, digest: &str) -> io::Result<()> {
     fs::write(hash_file(cache_dir), digest)
+}
+
+/// Forwards every written byte into the hasher so `io::copy` can stream
+/// file contents through it.
+struct HashWriter<'a>(&'a mut <BuildHasherDefault<XxHash64> as BuildHasher>::Hasher);
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
