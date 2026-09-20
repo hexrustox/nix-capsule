@@ -226,7 +226,7 @@ in
     in
     builtins.seq checkAll (
       pkgs.mkShellNoCC {
-        name = checked.project;
+        name = if checked.project == "" then "nix-capsule" else checked.project;
 
         NCAP_PROJECT = checked.project;
         NCAP_CONTAINER = checked.containerName;
