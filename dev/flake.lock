@@ -43,16 +43,16 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1789637033,
-        "narHash": "sha256-iczqJOn4yATRHqMcsj+clqfKaRvD+h8K7hoaUzMHTVQ=",
+        "lastModified": 1789861233,
+        "narHash": "sha256-oeGuI/wEqp8lwALwOdvAZ8bstjESll2qhFQo4ZByQRo=",
         "owner": "hexrustox",
         "repo": "nix-capsule",
-        "rev": "8e2af18da0ec5aba393e3d4f7e4f048c998071ce",
+        "rev": "7158c3e06ab1526a131ef58ee50f0891f12d5f83",
         "type": "github"
       },
       "original": {
         "owner": "hexrustox",
-        "ref": "v0.10.3",
+        "ref": "v0.11.0",
         "repo": "nix-capsule",
         "type": "github"
       }
