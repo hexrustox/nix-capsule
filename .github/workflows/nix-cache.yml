@@ -1,0 +1,25 @@
+name: Nix store cache
+on:
+  push:
+    branches: [main]
+    paths: ['flake.lock']
+  workflow_call:
+
+jobs:
+  save:
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - name: Build nix closure
+        run: nix build .#packages.${{ matrix.system }}.default --no-link
+      - name: Save nix store
+        uses: actions/cache/save@v5
+        with:
+          path: /nix/store
+          key: nix-store-${{ matrix.system }}-${{ hashFiles('flake.lock') }}

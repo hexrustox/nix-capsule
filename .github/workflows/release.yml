@@ -2,13 +2,17 @@ name: Release
 on:
   push:
     tags: [ 'v*' ]
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  cache:
+    uses: ./.github/workflows/nix-cache.yml
   build:
+    needs: cache
     permissions:
       contents: write
     strategy:
@@ -25,7 +29,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: /nix/store
-          key: nix-store-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          key: nix-store-${{ matrix.system }}-${{ hashFiles('flake.lock') }}
       - name: Build for ${{ matrix.system }}
         run: scripts/build-release-tarball ${{ matrix.system }}
       - name: Release
@@ -33,9 +37,3 @@ jobs:
         with:
           # generate_release_notes: true
           files: releases/*.tar.gz
-      - name: Save nix store
-        if: success() && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: /nix/store
-          key: nix-store-${{ runner.os }}-${{ hashFiles('flake.lock') }}
