@@ -55,7 +55,10 @@ consumer's flake names both shells; only the linkage between them matters.
 
 ## mkShell
 
-`mkShell` wraps `pkgs.mkShellNoCC` (shell name `nix-capsule-shell`) and produces:
+`mkShell` wraps `pkgs.mkShellNoCC` (shell name `nix-capsule` when `project`
+is empty, else the raw `project` value — no sanitization applies to the
+name; sanitization is the project-identity job of spec/paths.md § Project
+name) and produces:
 
 - `ncap` and `ncap-ctl` on PATH (plus the wrapper bins below, and any
   consumer-supplied `packages`),

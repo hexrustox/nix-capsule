@@ -49,7 +49,9 @@ output are unchanged. The warning never fails the command.
 A Server that predates the probe rejects `RequestVersion` as an unknown tag
 (`Error` and close) — the same warning prints; the stale Server is advice
 identical. A probe whose socket is unreachable is skipped silently:
-liveness/readiness already report that. `init` never probes — a warning
+liveness/readiness already report that. The `ServerVersion` reply gets a
+bounded wait; a Server that accepts but never answers inside it is skipped
+silently, like an unreachable socket. `init` never probes — a warning
 inside the shellHook's live-and-fresh "done" contradicts it; the documented
 remedy is `restart` (spec/protocol.md § Guarantees — freshness tracks
 watched files, not the package version, so nothing auto-heals skew).

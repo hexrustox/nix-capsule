@@ -82,10 +82,14 @@ pub(crate) fn server_log_path(log_dir: &Path, epoch_millis: u128) -> PathBuf {
 }
 
 /// Parse the epoch stamp out of a server log filename: `None` for anything
-/// that is not `ncap-server-<digits>.log`.
+/// that is not `ncap-server-<digits>.log` — digits only, so a leading `+`
+/// (which `u64::from_str` would accept) does not pass.
 pub(super) fn parse_server_log_epoch(name: &str) -> Option<u64> {
     let rest = name.strip_prefix(SERVER_LOG_PREFIX)?;
     let epoch = rest.strip_suffix(SERVER_LOG_SUFFIX)?;
+    if epoch.is_empty() || !epoch.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     epoch.parse().ok()
 }
 
@@ -113,4 +117,22 @@ pub(super) fn ensure_dir_0700(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use test_case::test_case;
+
+    use super::*;
+
+    #[test_case("ncap-server-1729512345678.log" => matches Some(1729512345678) ; "plain_epoch_parses")]
+    #[test_case("ncap-server-007.log" => matches Some(7) ; "leading_zero_digits_stay_digits")]
+    #[test_case("ncap-server-+5.log" => matches None ; "leading_plus_is_not_digits")]
+    #[test_case("ncap-server-.log" => matches None ; "empty_body_is_not_digits")]
+    #[test_case("ncap-server-12x.log" => matches None ; "trailing_letter_is_not_digits")]
+    #[test_case("other.log" => matches None ; "wrong_prefix_is_not_a_server_log")]
+    #[test_case("ncap-server-1.log.bak" => matches None ; "wrong_suffix_is_not_a_server_log")]
+    fn parses_exactly_digit_epochs(name: &str) -> Option<u64> {
+        parse_server_log_epoch(name)
+    }
 }

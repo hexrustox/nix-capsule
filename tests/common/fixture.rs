@@ -1,10 +1,10 @@
 //! Deep test harness behind one small interface: owns the TempDir, the
 //! Cache files (Env dump, hash, Stamp guard stamp), the fake Runtime adapter
 //! + fake nix binaries, the Socket listener guard for Liveness, and the
-//! run_ctl env. Tests cross this seam via Fixture::new(Config) plus the
-//! three queries evals, launches, saw and the LaunchView `expects_*`
-//! behavior assertions — never past it via log strings, raw paths,
-//! or direct field access.
+//!   run_ctl env. Tests cross this seam via Fixture::new(Config) plus the
+//!   three queries evals, launches, saw and the LaunchView `expects_*`
+//!   behavior assertions — never past it via log strings, raw paths,
+//!   or direct field access.
 
 use std::{
     collections::HashMap,

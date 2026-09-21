@@ -44,7 +44,8 @@ ncap [--socket PATH | $NCAP_SOCKET] [--env KEY[=VALUE]]… [--cwd PATH] [--] COM
 ## stdin
 
 A blocking reader thread pumps host stdin into `Stdin` frames in ~8 KiB
-chunks; an interrupted read retries. EOF on host stdin is one empty `Stdin`
+chunks; an interrupted read retries. Any other host stdin read error is
+treated as EOF. EOF on host stdin is one empty `Stdin`
 frame — the socket's write half stays open so the signal relay keeps working;
 the frame is best-effort, since a Child that finished first never needs it (a
 failed send is not fatal). The Client never allocates a TTY and never puts

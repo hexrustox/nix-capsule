@@ -202,9 +202,13 @@ in
           }";
 
       setupEnvHook = ''
-        if ! source <(ncap-ctl setup-env); then
+        ncap_setup_env="$(mktemp)"
+        if ! ncap-ctl setup-env > "$ncap_setup_env"; then
           echo "ncap-ctl: setup-env failed (run \`ncap-ctl setup-env\` to retry)" >&2
+        else
+          source "$ncap_setup_env"
         fi
+        rm -f "$ncap_setup_env"
       '';
 
       initHook = lib.optionalString checked.autoStart ''

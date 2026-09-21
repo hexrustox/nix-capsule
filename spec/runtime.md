@@ -84,7 +84,8 @@ bare. Detached; `exec` makes the Server the container's init process.
 A socket path with no parent directory is a launch error naming the socket.
 A container with the target name that exists but is not running is removed
 before launch. Losing a concurrent-start race (failure output mentioning
-"name in use", case-insensitive): re-inspect — running ⇒ success; dead ⇒
+`name in use` or `already in use` — the latter is docker's wording —
+case-insensitive): re-inspect — running ⇒ success; dead ⇒
 `rm` the container and start once more.
 
 ## Harden
