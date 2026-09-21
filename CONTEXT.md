@@ -123,5 +123,5 @@ The fixed precedence for what a Child sees, lowest to highest: env dump, forward
 _Avoid_: env merge, override stack, devshell dump (for this layer)
 
 **Forwarded variable**:
-A variable name resolved by the Client from the host environment on every request, so new host values apply immediately; changing which names are forwarded edits the flake and trips freshness.
+A variable name resolved by the Client from the host environment on every request, so new host values apply immediately; changing which names are forwarded edits the flake, which trips freshness while the flake is watched.
 _Avoid_: pass-through env, injected var

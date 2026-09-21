@@ -208,6 +208,12 @@ Consequences, all deliberate:
 - Files not in `watchFiles` (e.g. locally imported `.nix` files) don't affect
   freshness — add them to `watchFiles` (under `harden`, this also grants
   them write protection inside the container).
+- An empty `watchFiles` disables freshness tracking: the env dump is
+  evaluated once — the first `init`, when the Cache is missing — and then
+  never again. The empty watch list digests to a constant (spec/paths.md §
+  Freshness and the digest), so flake edits don't trip it; switching between
+  empty and non-empty still flips the digest once. `ncap-ctl clean` forces a
+  re-eval.
 
 ### direnv users (optional)
 
