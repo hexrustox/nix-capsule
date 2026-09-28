@@ -105,31 +105,20 @@ flake side makes no guarantee about the derived value.
 
 ### Type checks
 
-Every option is checked when `mkShell` is evaluated, before
-`mkShellNoCC` runs. A mismatch throws at eval time; the error names
-the option, the expected shape, and the received type/value. No
-coercions: a
-value of the wrong type is an error, never silently converted.
-Type checking is check-plus-render only: lists render to JSON, `timeout`
-renders to string, `harden` renders to `"true"`/`"false"`; value
-transformation and validation (runtime names, timeout range, devshell shape, log-level
-values) is `ctl`'s job per spec/ctl.md § NCAP_* contract.
+Every option is type-checked when `mkShell` is evaluated, so a
+misconfigured flake fails at evaluation — never later at container
+launch. A type mismatch errors with nixpkgs' module-system wording
+(`A definition for option … is not of type …`); an unknown
+top-level option throws ``option `x`: unknown option``
+(docs/adr/0005). There are no coercions beyond the `wrappers`
+string shorthand (§ Wrappers): a value of the wrong type is an
+error, never silently converted.
 
-Checked shapes: `image`, `devShell`,
-`runtime` strings; `watchFiles`, `envForward`, `extraOptions` lists of
-strings; `wrappers` a list of strings or attrsets (§ Wrappers);
-`harden`, `autoStart` bools; `timeout` integer number;
-`project`, `containerName`, `socketPath`, `cacheDir`, `logDir` strings;
-`preShellHook`, `postShellHook` strings; `logLevel` a string; `override` an
-attrset, merged verbatim (§ Options table above) — its values are
-pass-through, no shape check on entries. `packages` is
-the one deliberate exception: its entries are pass-through values (typically
-derivations), appended verbatim to the shell's `packages` — no shape check or
-render applies. Wrapper attrsets require `name` (string);
-`command` defaults to `name`; `env` is a list of strings; `cwd` is
-null or string. Unknown top-level options and unknown wrapper fields
-throw at eval time naming the option or field. `image` has no default —
-omitting it is the evaluator's missing-argument error.
+Checking is type-only. The `packages` and `override` container
+shapes are enforced but their entries are untyped; validating
+values (runtime name, timeout range, devshell shape, log-level
+value) is Ctl's job per spec/ctl.md § NCAP_* contract, which also
+defines each `NCAP_*` value's rendered form.
 
 ## shellHook
 
@@ -168,7 +157,7 @@ comes from the environment (`NCAP_SOCKET`), never from a wrapper key:
 | `name` | string | required | bin name placed on PATH |
 | `command` | string | `name` | command executed inside the container |
 | `env` | list of `"KEY=VALUE"` | `[ ]` | one `--env` per entry |
-| `cwd` | string | `null` | `--cwd` |
+| `cwd` | string or null | `null` | `--cwd` |
 
 Each wrapper bin runs `exec ncap` with one shell-escaped `--env` per `env`
 entry, an optional shell-escaped `--cwd`, and the shell-escaped command,

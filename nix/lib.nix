@@ -2,183 +2,133 @@
 let
   lib = pkgs.lib;
 
-  showReceived =
-    v:
-    if v == null then
-      "null"
-    else if builtins.isBool v then
-      "boolean ${if v then "true" else "false"}"
-    else if builtins.isString v then
-      "string `\"${v}\"`"
-    else if builtins.isPath v then
-      "nix path `${toString v}`"
-    else if builtins.isAttrs v then
-      "attrset with keys `${builtins.concatStringsSep " " (builtins.attrNames v)}`"
-    else
-      "${builtins.typeOf v} `${toString v}`";
+  wrapperSubmodule =
+    { config, ... }:
+    {
+      options = {
+        name = lib.mkOption { type = lib.types.str; };
+        command = lib.mkOption {
+          type = lib.types.str;
+          default = config.name;
+        };
+        env = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+        };
+        cwd = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+        };
+      };
+    };
 
-  mkErr =
-    opt: expected: got:
-    throw "option `${opt}`: expected ${expected}, got ${got}";
+  wrapperType = lib.types.coercedTo lib.types.str (name: { inherit name; }) (
+    lib.types.submodule wrapperSubmodule
+  );
 
-  mkEntryErr =
-    opt: expected: got:
-    throw "option `${opt}`: expected ${expected}, got entry ${got}";
-
-  mkFieldErr =
-    opt: field: expected: got:
-    throw "option `${opt}`: expected wrapper `${field}` to be ${expected}, got ${got}";
-
-  checkPrim =
-    expected: pred: opt: v:
-    if pred v then v else mkErr opt expected (showReceived v);
-
-  checkString = checkPrim "string" builtins.isString;
-  checkBool = checkPrim "bool" builtins.isBool;
-  checkInt = checkPrim "integer" builtins.isInt;
-
-  checkStringList =
-    opt: v:
-    if !builtins.isList v then
-      mkErr opt "list of strings" (showReceived v)
-    else
-      map (e: if builtins.isString e then e else mkEntryErr opt "list of strings" (showReceived e)) v;
-
-  checkFieldString =
-    opt: field: v:
-    if builtins.isString v then v else mkFieldErr opt field "a string" (showReceived v);
-
-  checkFieldStringList =
-    opt: field: v:
-    if !builtins.isList v then
-      mkFieldErr opt field "a list of strings" (showReceived v)
-    else
-      map (
-        e:
-        if builtins.isString e then
-          e
-        else
-          mkFieldErr opt field "a list of strings" "entry ${showReceived e}"
-      ) v;
-
-  checkWrappers =
-    opt: v:
-    if !builtins.isList v then
-      mkErr opt "list of strings or attrsets" (showReceived v)
-    else
-      map (
-        elem:
-        if builtins.isString elem then
-          {
-            name = elem;
-            command = elem;
-            env = [ ];
-            cwd = null;
-          }
-        else if builtins.isAttrs elem then
-          let
-            extra = builtins.filter (
-              k:
-              !(builtins.elem k [
-                "name"
-                "command"
-                "env"
-                "cwd"
-              ])
-            ) (builtins.attrNames elem);
-            name =
-              if extra != [ ] then
-                throw "option `${opt}`: unknown wrapper field `${builtins.head extra}`"
-              else if elem ? name then
-                checkFieldString opt "name" elem.name
-              else
-                throw "option `${opt}`: expected wrapper attrset to have a string `name`, got attrset without one";
-            command = if elem ? command then checkFieldString opt "command" elem.command else name;
-            env = checkFieldStringList opt "env" (elem.env or [ ]);
-            cwdRaw = elem.cwd or null;
-            cwd =
-              if cwdRaw == null || builtins.isString cwdRaw then
-                cwdRaw
-              else
-                mkFieldErr opt "cwd" "null or a string" (showReceived cwdRaw);
-          in
-          builtins.deepSeq [ name command env cwd ] {
-            inherit
-              name
-              command
-              env
-              cwd
-              ;
-          }
-        else
-          mkErr opt "a string or attrset" (showReceived elem)
-      ) v;
-
-  checkOverride = opt: v: if builtins.isAttrs v then v else mkErr opt "attrset" (showReceived v);
-
-  checkers = {
-    project = checkString;
-    image = checkString;
-    devShell = checkString;
-    watchFiles = checkStringList;
-    envForward = checkStringList;
-    wrappers = checkWrappers;
-    extraOptions = checkStringList;
-    harden = checkBool;
-    timeout = checkInt;
-    socketPath = checkString;
-    containerName = checkString;
-    cacheDir = checkString;
-    logDir = checkString;
-    logLevel = checkString;
-    preShellHook = checkString;
-    postShellHook = checkString;
-    autoStart = checkBool;
-    runtime = checkString;
-    packages = _: v: v;
-    override = checkOverride;
-  };
-
-  defaults = {
-    project = "";
-    devShell = ".#container";
-    watchFiles = [
-      "flake.nix"
-      "flake.lock"
-    ];
-    envForward = [ ];
-    wrappers = [ ];
-    extraOptions = [ ];
-    harden = false;
-    timeout = 10;
-    socketPath = "";
-    containerName = "";
-    cacheDir = "";
-    logDir = "";
-    logLevel = "warning";
-    preShellHook = "";
-    postShellHook = "";
-    autoStart = true;
-    runtime = "auto";
-    packages = [ ];
-    override = { };
+  capsuleOptions = {
+    project = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    image = lib.mkOption { type = lib.types.str; };
+    devShell = lib.mkOption {
+      type = lib.types.str;
+      default = ".#container";
+    };
+    watchFiles = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        "flake.nix"
+        "flake.lock"
+      ];
+    };
+    envForward = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+    };
+    wrappers = lib.mkOption {
+      type = lib.types.listOf wrapperType;
+      default = [ ];
+    };
+    extraOptions = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+    };
+    harden = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+    };
+    timeout = lib.mkOption {
+      type = lib.types.int;
+      default = 10;
+    };
+    socketPath = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    containerName = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    cacheDir = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    logDir = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "warning";
+    };
+    preShellHook = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    postShellHook = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+    };
+    autoStart = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
+    runtime = lib.mkOption {
+      type = lib.types.str;
+      default = "auto";
+    };
+    packages = lib.mkOption {
+      type = lib.types.listOf lib.types.raw;
+      default = [ ];
+    };
+    override = lib.mkOption {
+      type = lib.types.attrsOf lib.types.raw;
+      default = { };
+    };
   };
 in
 {
   mkShell =
-    {
-      image,
-      ...
-    }@args:
+    { image, ... }@args:
     let
-      unknownOpts = builtins.filter (opt: !(builtins.hasAttr opt checkers)) (builtins.attrNames args);
-      checked = builtins.mapAttrs (opt: check: check opt (args.${opt} or defaults.${opt})) checkers;
+      unknownOpts = builtins.filter (opt: !(builtins.hasAttr opt capsuleOptions)) (
+        builtins.attrNames args
+      );
 
-      checkAll =
+      checked =
         if unknownOpts != [ ] then
           throw "option `${builtins.head unknownOpts}`: unknown option"
         else
-          builtins.deepSeq checked true;
+          (lib.evalModules {
+            modules = [
+              {
+                options = capsuleOptions;
+              }
+              args
+            ];
+          }).config;
 
       mkWrapperScript =
         w:
@@ -228,7 +178,7 @@ in
         ]
       );
     in
-    builtins.seq checkAll (
+    builtins.deepSeq checked (
       pkgs.mkShellNoCC {
         name = if checked.project == "" then "nix-capsule" else checked.project;
 
