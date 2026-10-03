@@ -18,7 +18,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use crate::ctl::config::{Cmd, Config, ConfigError};
+use crate::ctl::config::{Cmd, Config, ConfigError, LogFlags};
 use crate::ctl::fs_error::FsError;
 use crate::ctl::runtime::RuntimeError;
 use crate::ctl::stamp::StampError;
@@ -52,7 +52,7 @@ pub async fn run(cmd: Cmd) -> Option<String> {
         Cmd::Restart => restart(cfg).await,
         Cmd::Status => status(cfg).await,
         Cmd::Enter => enter(cfg).await,
-        Cmd::Log => log(cfg).await,
+        Cmd::Log { flags } => log(cfg, flags).await,
         Cmd::Clean => clean(cfg).await,
         Cmd::ShowOptions => show_options(cfg).await,
         Cmd::SetupEnv => unreachable!("handled before resolve"),
@@ -87,6 +87,8 @@ pub(crate) enum CtlError {
     SocketNoParent { socket: String },
     #[error("no `ncap-server-*.log` file in `{dir}`")]
     NoLog { dir: String },
+    #[error(transparent)]
+    Print(#[from] PrintLogError),
     #[error("cannot run pager `{prog}`: {source}")]
     PagerSpawn {
         prog: String,
@@ -245,11 +247,62 @@ async fn enter(cfg: Config) -> Result<(), CtlError> {
     Ok(())
 }
 
-async fn log(cfg: Config) -> Result<(), CtlError> {
+/// How printing the Server log file to stdout ended: [`PrintEnd::Whole`]
+/// means the writer took every byte; [`PrintEnd::BrokenPipe`] means the
+/// consumer was already gone (a pipe into `head`) and the print counts
+/// as a quiet success, per spec/ctl.md § log.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PrintEnd {
+    Whole,
+    BrokenPipe,
+}
+
+/// Failures of printing the newest Server log file whole to stdout
+/// (spec/ctl.md § log `--no-pager`): a read failure names the path,
+/// a write failure — any outcome but the quiet broken pipe — names the
+/// stdout write operation, with the raw `io::Error` as `#[source]`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PrintLogError {
+    #[error("cannot read `{path}`: {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot write the server log to stdout: {source}")]
+    Write {
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Print the whole Server log file to `out` byte-for-byte. A broken pipe
+/// is not an error: the consumer exited early and the print ends quietly.
+pub(crate) fn print_log_whole(
+    log_file: &Path,
+    out: &mut dyn io::Write,
+) -> Result<PrintEnd, PrintLogError> {
+    let bytes = fs::read(log_file).map_err(|source| PrintLogError::Read {
+        path: log_file.display().to_string(),
+        source,
+    })?;
+    match out.write_all(&bytes) {
+        Ok(()) => Ok(PrintEnd::Whole),
+        Err(ref err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(PrintEnd::BrokenPipe),
+        Err(source) => Err(PrintLogError::Write { source }),
+    }
+}
+
+async fn log(cfg: Config, flags: LogFlags) -> Result<(), CtlError> {
     let log_dir = &cfg.log_dir;
     let newest = paths::newest_server_log_path(log_dir).ok_or_else(|| CtlError::NoLog {
         dir: log_dir.display().to_string(),
     })?;
+    if flags.no_pager {
+        // `$PAGER` is never consulted; the whole file goes to stdout.
+        print_log_whole(&newest, &mut io::stdout().lock())?;
+        return Ok(());
+    }
     let (prog, args) = pager_command();
     let mut cmd = tokio::process::Command::new(&prog);
     cmd.args(&args);
@@ -740,6 +793,7 @@ fn is_env_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use test_case::test_case;
 
     /// A lookup over literal pairs, standing in for the process environment.
@@ -792,6 +846,73 @@ mod tests {
         let err = expand_with(template, &lookup_of(&[])).expect_err("unset must error");
         assert!(
             matches!(err, CtlError::UnsetVar { ref name } if name == "UNSET"),
+            "err={err}"
+        );
+    }
+
+    /// A writer reporting a write failure of the given `kind` — the
+    /// stand-in for stdout when the consumer misbehaves.
+    struct FailingWriter {
+        kind: io::ErrorKind,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let _ = buf;
+            Err(io::Error::new(self.kind, "sink says no"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test_case(b"newest run line\n" as &[u8] => PrintEnd::Whole ; "whole_file_prints_bytes_for_bytes")]
+    #[test_case(b"" as &[u8] => PrintEnd::Whole ; "empty_file_still_prints_whole")]
+    fn prints_the_log_file_whole(body: &[u8]) -> PrintEnd {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("ncap-server-999.log");
+        fs::write(&log_file, body).expect("log file");
+        let mut sink: Vec<u8> = Vec::new();
+        let end = print_log_whole(&log_file, &mut sink).expect("print succeeds");
+        assert_eq!(sink, body, "stdout must carry the file byte-for-byte");
+        end
+    }
+
+    #[test]
+    fn a_gone_reader_prints_quietly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("ncap-server-999.log");
+        fs::write(&log_file, "nobody is reading\n").expect("log file");
+        let mut sink = FailingWriter {
+            kind: io::ErrorKind::BrokenPipe,
+        };
+        let end = print_log_whole(&log_file, &mut sink).expect("broken pipe is a quiet success");
+        assert_eq!(end, PrintEnd::BrokenPipe);
+    }
+
+    #[test_case(io::ErrorKind::InvalidData ; "invalid_data_names_the_write")]
+    #[test_case(io::ErrorKind::PermissionDenied ; "permission_denied_names_the_write")]
+    fn a_write_failure_other_than_broken_pipe_names_the_operation(kind: io::ErrorKind) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("ncap-server-999.log");
+        fs::write(&log_file, "worthless\n").expect("log file");
+        let mut sink = FailingWriter { kind };
+        let err = print_log_whole(&log_file, &mut sink).expect_err("write must fail");
+        assert!(
+            err.to_string()
+                .starts_with("cannot write the server log to stdout"),
+            "err={err}"
+        );
+    }
+
+    #[test]
+    fn a_read_failure_names_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sink: Vec<u8> = Vec::new();
+        let err = print_log_whole(&dir.path().join("ncap-server-999.log"), &mut sink)
+            .expect_err("missing file must fail");
+        assert!(
+            matches!(&err, PrintLogError::Read { path, .. } if path.ends_with("ncap-server-999.log")),
             "err={err}"
         );
     }

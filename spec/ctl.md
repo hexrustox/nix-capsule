@@ -18,7 +18,7 @@ references them and never restates them.
 | `restart` | Non-fatal `stop`, then `init` (which re-ensures the Cache before starting). The `stop` is runtime-only, so the first *cache* touch is still the stamp guard inside `init`. |
 | `enter` | `<runtime> exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Three lines on stdout: container running (with name) or not running; socket connectable (with path) or unreachable (with path); cache fresh/stale/missing (spec/paths.md § Freshness and the digest). |
-| `log` | Open the newest Server log (spec/paths.md § Server log files) in `$PAGER` (split on whitespace into program + args; fallback `less -R` when unset or blank), stdio inherited. No log file ⇒ error naming the log dir. A pager that fails to spawn or exits non-zero ⇒ failure. |
+| `log` | Print or follow the newest Server log file (spec/paths.md § Server log files); see § log. |
 | `clean` | Stop the Container (best-effort), remove the (stopped) container, remove this project's cache files and log files (spec/paths.md § Cache contents) and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS` (expansion per spec/runtime.md § Mounts), one arg per line. |
 | `setup-env` | Resolve the five project-scoped vars and print them as `export` lines for the Host shell to source. Needs only `NCAP_PROJECT_ROOT` (§ NCAP_* contract). Never starts containers, never touches the Cache. |
@@ -55,6 +55,40 @@ silently, like an unreachable socket. `init` never probes — a warning
 inside the shellHook's live-and-fresh "done" contradicts it; the documented
 remedy is `restart` (spec/protocol.md § Guarantees — freshness tracks
 watched files, not the package version, so nothing auto-heals skew).
+
+## log
+
+`log` prints or follows the newest Server log file (spec/paths.md
+§ Server log files). No log file ⇒ the error naming the log dir — in
+every flag state below, and follow never waits for a first file. The
+flags are CLI flags, not `NCAP_*` variables — the env contract is
+unchanged. Passing more than one flag together is a usage error; the
+error names the flags.
+
+- No flag: the file opens in `$PAGER` (split on whitespace into program +
+  args; fallback `less -R` when unset or blank), stdio inherited. A pager
+  that fails to spawn or exits non-zero ⇒ failure.
+- `--no-pager`: the whole file to stdout byte-for-byte, then done.
+  `$PAGER` is never consulted. The consuming reader exiting early (a pipe
+  into `head`) is a broken pipe ⇒ quiet exit 0; any other stdout write
+  failure ⇒ failure naming the operation.
+- `--follow`: streaming attendance, entirely host-side — no Connection is
+  ever opened, so a Server restart is detected by the re-scan alone, not
+  by the socket or the runtime adapter (which is why follow keeps running
+  while the container is down, as long as log files remain).
+  - Starts at the file's first byte, then new bytes as they land. A
+    re-scan of the log dir (highest-epoch wins, spec/paths.md § Server
+    log files) runs roughly every 100 ms.
+  - Every attached file announces itself on stdout as
+    `==> following ncap-server-<epoch>.log <==` (shape pinned; wording is
+    style) — the first attach included.
+  - Drain-then-switch: the attached file streams fully to EOF before
+    anything newer attaches; then every Server log file whose epoch
+    exceeds the last attachment attaches and announces, epochs ascending
+    — two restarts of the Server between polls still land both files.
+  - The current file vanishing mid-follow (e.g. `clean`) or a scan
+    finding nothing is not an error: the polls keep running, and only
+    Ctrl-C (SIGINT) ends follow — exit 0; interruption is not failure.
 
 ## init flow
 

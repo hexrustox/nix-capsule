@@ -646,6 +646,71 @@ impl Fixture {
         fs::write(self.logs.join("ncap-server-999.log"), newest).expect("newest log");
     }
 
+    /// Seed one server log file by exact name (epoch tests pick names).
+    pub(crate) fn seed_server_log(&self, name: &str, body: &str) {
+        fs::create_dir_all(&self.logs).expect("logs");
+        fs::write(self.logs.join(name), body).expect("log");
+    }
+
+    /// Write an executable stub script under the fixture's own tmpdir and
+    /// return its path — the building block for fake pagers and other
+    /// interceptors a test needs to place on a `PAGER` or `PATH` value.
+    pub(crate) fn stub_script(&self, name: &str, body: &str) -> PathBuf {
+        let dir = self.tmp_path().join("stubs");
+        fs::create_dir_all(&dir).expect("stubs dir");
+        let script = dir.join(name);
+        write_stub(&script, body);
+        script
+    }
+
+    /// `NCAP_LOG_DIR` currently in the env map (the no-log-file error
+    /// names it; tests assert against the env value, never a raw path).
+    pub(crate) fn log_dir_from_env(&self) -> String {
+        self.env
+            .get("NCAP_LOG_DIR")
+            .expect("NCAP_LOG_DIR in env")
+            .clone()
+    }
+
+    /// Run `ncap-ctl log` with the given extra args; `PAGER` is removed
+    /// from the child env first so the ambient environment never leaks
+    /// into a pager test.
+    pub(crate) fn log(&self, args: &[&str]) -> Output {
+        let mut argv = vec!["log"];
+        argv.extend_from_slice(args);
+        run_ctl_removed(&self.env, &argv, &["PAGER"])
+    }
+
+    /// Run `ncap-ctl log` with stdout piped through `filter` (an `sh`
+    /// pipeline fragment such as `head -n 1`) and return the pipeline's
+    /// combined output: the pipeline exit state is what the test asserts.
+    pub(crate) fn log_piped(&self, filter: &str) -> Output {
+        let ctl = bin_path("ncap-ctl").display().to_string();
+        let script = format!("{ctl:?} log --no-pager | {filter}");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&script);
+        for var in NCAP_VARS {
+            cmd.env_remove(var);
+        }
+        let mut owned_env = self.env.clone();
+        shim_runtime_env(&mut owned_env);
+        for (key, value) in &owned_env {
+            cmd.env(key, value);
+        }
+        for var in [
+            "TMPDIR",
+            "XDG_RUNTIME_DIR",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "PAGER",
+        ] {
+            if !self.env.contains_key(var) {
+                cmd.env_remove(var);
+            }
+        }
+        cmd.output().expect("spawn sh pipeline")
+    }
+
     /// Seed a `.git` dir inside the Project root (git-mount tests).
     pub(crate) fn seed_git(&self) {
         fs::create_dir_all(self.root.join(".git")).expect("git dir");
@@ -886,9 +951,19 @@ impl Fixture {
 }
 
 fn run_ctl(env: &HashMap<String, String>, args: &[&str]) -> Output {
+    run_ctl_removed(env, args, &[])
+}
+
+/// Run `ncap-ctl` with `args` (already prefixed by the caller) after
+/// removing each var in `extra_remove` from the child env, so tests can
+/// pin the ambient state a fixture method cares about (e.g. `PAGER`).
+fn run_ctl_removed(env: &HashMap<String, String>, args: &[&str], extra_remove: &[&str]) -> Output {
     let mut cmd = Command::new(bin_path("ncap-ctl"));
     cmd.args(args);
     for var in NCAP_VARS {
+        cmd.env_remove(var);
+    }
+    for var in extra_remove {
         cmd.env_remove(var);
     }
     // Absolute-path fake runtimes can no longer pass through uniform resolve

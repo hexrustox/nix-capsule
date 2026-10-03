@@ -26,14 +26,27 @@ pub enum Cmd {
     Enter,
     /// Print container status
     Status,
-    /// Show the latest server log
-    Log,
+    /// Print the newest server log file
+    Log {
+        /// The `log` flags (no flag keeps the pager behavior)
+        #[command(flatten)]
+        flags: LogFlags,
+    },
     /// Wipe all project state: cache, state dir, runtime dir
     Clean,
     /// Print the expanded runtime adapter options
     ShowOptions,
     /// Resolve the project-scoped envs and print them as bash `export` lines
     SetupEnv,
+}
+
+/// The CLI flags of the `log` subcommand (spec/ctl.md § log): flag states
+/// are exactly no flag (pager), `--no-pager` (stdout).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::Args)]
+pub struct LogFlags {
+    /// Print the newest server log file to stdout instead of opening a pager
+    #[arg(long)]
+    pub no_pager: bool,
 }
 
 /// Resolved configuration for one command. Fields a command does not use are

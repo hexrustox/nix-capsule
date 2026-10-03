@@ -1086,3 +1086,223 @@ fn init_never_probes_for_version() {
         "init never warns, even skewed: {out:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `log` (spec/ctl.md § log): --no-pager prints the newest Server log file
+// whole to stdout and never consults `$PAGER`; bare `log` keeps opening
+// `$PAGER` (whitespace split into program + args, `less -R` fallback).
+// ---------------------------------------------------------------------------
+
+const NEWEST_LOG_BODY: &str = "newest run line\n";
+const OLD_LOG_BODY: &str = "stale run line\n";
+
+/// A pager stub that records its argv in `marker` and exits 1 — standing
+/// in for a broken interactive `$PAGER`: consulted, it leaves argv behind
+/// and fails the command; never consulted, the marker stays absent.
+fn seed_failing_pager(fx: &mut fixture::Fixture, name: &str) -> String {
+    let marker = fx.tmp_path().join(format!("{name}-marker"));
+    let body = format!(
+        r#"#!/usr/bin/env bash
+printf '%s\n' "$@" >> {}
+exit 1
+"#,
+        marker.display()
+    );
+    fx.stub_script(name, &body).to_string_lossy().into_owned()
+}
+
+/// A pager stub that prints its argv (one per line) and exits 0 — the
+/// observer proving a bare `log` hands the log file to `$PAGER` with the
+/// configured program and args.
+fn seed_echo_pager(fx: &mut fixture::Fixture, name: &str) -> String {
+    let body = r#"#!/usr/bin/env bash
+printf '%s\n' "$@"
+exit 0
+"#;
+    fx.stub_script(name, body).to_string_lossy().into_owned()
+}
+
+#[test]
+fn no_pager_prints_newest_file_whole_and_never_consults_pager() {
+    let mut fx = fixture::Fixture::new(fixture::Config::default());
+    fx.seed_server_logs(OLD_LOG_BODY, NEWEST_LOG_BODY);
+    let pager = seed_failing_pager(&mut fx, "trap-pager");
+    let fx = fx.with_env("PAGER", &pager);
+    let out = fx.log(&["--no-pager"]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), NEWEST_LOG_BODY);
+    assert!(
+        !fx.tmp_path().join("trap-pager-marker").exists(),
+        "the trap pager must never be consulted"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "--no-pager stays quiet: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn no_pager_prints_the_highest_epoch_file() {
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    fx.seed_server_log("ncap-server-5.log", OLD_LOG_BODY);
+    fx.seed_server_log("ncap-server-70.log", OLD_LOG_BODY);
+    // Lexicographically before `70`, numerically after: the numeric
+    // comparison, not the string one, must choose this file.
+    fx.seed_server_log("ncap-server-500.log", NEWEST_LOG_BODY);
+    let out = fx.log(&["--no-pager"]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), NEWEST_LOG_BODY);
+}
+
+#[test]
+fn bare_log_opens_the_pager_program_with_args_and_the_log_file() {
+    let mut fx = fixture::Fixture::new(fixture::Config::default());
+    fx.seed_server_logs(OLD_LOG_BODY, NEWEST_LOG_BODY);
+    let pager = seed_echo_pager(&mut fx, "echo-pager");
+    // One arg after the program: the split must keep it separate.
+    let fx = fx.with_env("PAGER", &format!("{pager} --from-pager"));
+    let out = fx.log(&[]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ncap-server-999.log"),
+        "the pager must receive the log file: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("--from-pager"),
+        "the pager's own args must survive the split: stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("ncap-server-100.log"),
+        "only the newest log file is opened: stdout={stdout}"
+    );
+}
+
+#[test_case("false ; exit" ; "a_pager_exiting_nonzero_fails")]
+#[test_case("/no/such/pager/binary" ; "a_pager_failing_to_spawn_fails")]
+fn bare_log_fails_on_a_broken_pager(pager: &str) {
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    fx.seed_server_logs(OLD_LOG_BODY, NEWEST_LOG_BODY);
+    let fx = fx.with_env("PAGER", pager);
+    let out = fx.log(&[]);
+    assert!(
+        !out.status.success(),
+        "pager `{pager}` must fail the command"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The failing pager is named by the program of the split `$PAGER`.
+    let prog = pager.split_whitespace().next().unwrap_or(pager);
+    assert!(
+        stderr.contains(prog.rsplit('/').next().unwrap_or(prog)),
+        "stderr must name the pager: stderr={stderr}"
+    );
+}
+
+#[test_case(None ; "unset_pager_falls_back_to_less_r")]
+#[test_case(Some("") ; "blank_pager_falls_back_to_less_r")]
+fn bare_log_falls_back_to_less_r_without_a_pager(pager: Option<&str>) {
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    fx.seed_server_logs(OLD_LOG_BODY, NEWEST_LOG_BODY);
+    // A fake `less` on PATH: it prints its argv then cats the file it
+    // was handed — proving the fallback program and the `-R` arg.
+    let less_body = r#"#!/usr/bin/env bash
+printf 'args: %b\n' "$*"
+exec cat "${@: -1}"
+"#;
+    let less_dir = fx
+        .stub_script("less", less_body)
+        .parent()
+        .expect("stubs dir")
+        .to_owned();
+    let fx = fx.with_path_prepend(&less_dir);
+    let out = if let Some(pager) = pager {
+        // A blank `PAGER` counts as unset, per the fallback rule.
+        let fx = fx.with_env("PAGER", pager);
+        fx.log(&[])
+    } else {
+        fx.log(&[])
+    };
+    assert_falls_back(out);
+}
+
+fn assert_falls_back(out: std::process::Output) {
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("args: -R"),
+        "fallback must run `less -R`: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains(NEWEST_LOG_BODY),
+        "the pager must show the log file: stdout={stdout}"
+    );
+}
+
+#[test]
+fn no_pager_piped_into_an_early_exiting_reader_stays_quiet() {
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    let big_body: String = NEWEST_LOG_BODY.repeat(200_000);
+    fx.seed_server_logs(OLD_LOG_BODY, &big_body);
+    let out = fx.log_piped("head -n 1");
+    assert!(
+        out.status.success(),
+        "a pipe into `head` must exit 0 quietly: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "the broken pipe must not manufacture stderr output: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test_case(&[/* bare */] as &[&str] ; "bare_log_names_the_log_dir")]
+#[test_case(&["--no-pager"] as &[&str] ; "no_pager_names_the_log_dir")]
+fn log_without_a_server_log_fails_naming_the_log_dir(args: &[&str]) {
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    let out = fx.log(args);
+    assert!(
+        !out.status.success(),
+        "an empty log dir must fail the command"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&fx.log_dir_from_env()),
+        "the error must name the log dir: stderr={stderr}"
+    );
+}
+
+#[test]
+fn completions_advertise_no_pager() {
+    let out = std::process::Command::new(common::client::bin_path("ncap-completions"))
+        .args(["ncap-ctl", "bash"])
+        .output()
+        .expect("spawn ncap-completions");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--no-pager"),
+        "completions must advertise `--no-pager`: stdout={stdout}"
+    );
+}
