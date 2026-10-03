@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use nix_capsule::protocol::CURRENT_VERSION;
 use test_case::test_case;
@@ -1096,10 +1096,11 @@ fn init_never_probes_for_version() {
 const NEWEST_LOG_BODY: &str = "newest run line\n";
 const OLD_LOG_BODY: &str = "stale run line\n";
 
-/// A pager stub that records its argv in `marker` and exits 1 — standing
+/// A pager stub that records its argv in a marker file and exits 1 — standing
 /// in for a broken interactive `$PAGER`: consulted, it leaves argv behind
 /// and fails the command; never consulted, the marker stays absent.
-fn seed_failing_pager(fx: &mut fixture::Fixture, name: &str) -> String {
+/// Returns the `PAGER` value and the marker path to assert against.
+fn seed_failing_pager(fx: &mut fixture::Fixture, name: &str) -> (String, PathBuf) {
     let marker = fx.tmp_path().join(format!("{name}-marker"));
     let body = format!(
         r#"#!/usr/bin/env bash
@@ -1108,7 +1109,8 @@ exit 1
 "#,
         marker.display()
     );
-    fx.stub_script(name, &body).to_string_lossy().into_owned()
+    let pager = fx.stub_script(name, &body).to_string_lossy().into_owned();
+    (pager, marker)
 }
 
 /// A pager stub that prints its argv (one per line) and exits 0 — the
@@ -1126,7 +1128,7 @@ exit 0
 fn no_pager_prints_newest_file_whole_and_never_consults_pager() {
     let mut fx = fixture::Fixture::new(fixture::Config::default());
     fx.seed_server_logs(OLD_LOG_BODY, NEWEST_LOG_BODY);
-    let pager = seed_failing_pager(&mut fx, "trap-pager");
+    let (pager, marker) = seed_failing_pager(&mut fx, "trap-pager");
     let fx = fx.with_env("PAGER", &pager);
     let out = fx.log(&["--no-pager"]);
     assert!(
@@ -1135,10 +1137,7 @@ fn no_pager_prints_newest_file_whole_and_never_consults_pager() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), NEWEST_LOG_BODY);
-    assert!(
-        !fx.tmp_path().join("trap-pager-marker").exists(),
-        "the trap pager must never be consulted"
-    );
+    assert!(!marker.exists(), "the trap pager must never be consulted");
     assert!(
         String::from_utf8_lossy(&out.stderr).trim().is_empty(),
         "--no-pager stays quiet: stderr={}",

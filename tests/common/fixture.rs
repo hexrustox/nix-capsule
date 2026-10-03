@@ -681,34 +681,18 @@ impl Fixture {
         run_ctl_removed(&self.env, &argv, &["PAGER"])
     }
 
-    /// Run `ncap-ctl log` with stdout piped through `filter` (an `sh`
-    /// pipeline fragment such as `head -n 1`) and return the pipeline's
-    /// combined output: the pipeline exit state is what the test asserts.
+    /// Run `ncap-ctl log --no-pager` with stdout piped through `filter`
+    /// (a bash pipeline fragment such as `head -n 1`) and return the
+    /// combined output. The exit status is the `log` invocation's own
+    /// (`PIPESTATUS`), not just the pipeline tail — so a manufactured
+    /// error cannot hide behind the filter's exit 0.
     pub(crate) fn log_piped(&self, filter: &str) -> Output {
-        let ctl = bin_path("ncap-ctl").display().to_string();
-        let script = format!("{ctl:?} log --no-pager | {filter}");
-        let mut cmd = Command::new("sh");
+        let ctl = bin_path("ncap-ctl").to_string_lossy().into_owned();
+        let script = format!("{ctl:?} log --no-pager | {filter}; exit ${{PIPESTATUS[0]}}");
+        let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(&script);
-        for var in NCAP_VARS {
-            cmd.env_remove(var);
-        }
-        let mut owned_env = self.env.clone();
-        shim_runtime_env(&mut owned_env);
-        for (key, value) in &owned_env {
-            cmd.env(key, value);
-        }
-        for var in [
-            "TMPDIR",
-            "XDG_RUNTIME_DIR",
-            "XDG_CACHE_HOME",
-            "XDG_STATE_HOME",
-            "PAGER",
-        ] {
-            if !self.env.contains_key(var) {
-                cmd.env_remove(var);
-            }
-        }
-        cmd.output().expect("spawn sh pipeline")
+        apply_ctl_env(&mut cmd, &self.env, &["PAGER"]);
+        cmd.output().expect("spawn bash pipeline")
     }
 
     /// Seed a `.git` dir inside the Project root (git-mount tests).
@@ -954,38 +938,47 @@ fn run_ctl(env: &HashMap<String, String>, args: &[&str]) -> Output {
     run_ctl_removed(env, args, &[])
 }
 
-/// Run `ncap-ctl` with `args` (already prefixed by the caller) after
-/// removing each var in `extra_remove` from the child env, so tests can
-/// pin the ambient state a fixture method cares about (e.g. `PAGER`).
-fn run_ctl_removed(env: &HashMap<String, String>, args: &[&str], extra_remove: &[&str]) -> Output {
-    let mut cmd = Command::new(bin_path("ncap-ctl"));
-    cmd.args(args);
+/// Ambient vars a child must not inherit unless the env map names them
+/// (`TMPDIR`/XDG fallbacks and the pager the ambient environment may carry).
+const AMBIENT_VARS: &[&str] = &[
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "PAGER",
+];
+
+/// Generic child-env builder behind every ctl invocation: strips the
+/// `NCAP_*` contract vars and each var in `extra_remove` from the ambient
+/// environment, applies the absolute-path fake-runtime translation, then
+/// overlays the env map — only the values a test declared end up in the
+/// child.
+fn apply_ctl_env(cmd: &mut Command, env: &HashMap<String, String>, extra_remove: &[&str]) {
     for var in NCAP_VARS {
         cmd.env_remove(var);
     }
     for var in extra_remove {
         cmd.env_remove(var);
     }
-    // Absolute-path fake runtimes can no longer pass through uniform resolve
-    // (`podman`/`docker` only): translate one into a `podman` shim on PATH so
-    // the child validates while invoking the same stub.
     let mut owned_env = env.clone();
     shim_runtime_env(&mut owned_env);
     for (key, value) in &owned_env {
         cmd.env(key, value);
     }
-    // Ensure TMPDIR/XDG vars from test env win; if not set, remove ambient
-    // so derivation tests see the unset state.
-    for var in [
-        "TMPDIR",
-        "XDG_RUNTIME_DIR",
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-    ] {
-        if !env.contains_key(var) {
+    for var in AMBIENT_VARS {
+        if !env.contains_key(*var) {
             cmd.env_remove(var);
         }
     }
+}
+
+/// Run `ncap-ctl` with `args` (already prefixed by the caller) after
+/// removing each var in `extra_remove` from the child env, so tests can
+/// pin the ambient state a fixture method cares about (e.g. `PAGER`).
+fn run_ctl_removed(env: &HashMap<String, String>, args: &[&str], extra_remove: &[&str]) -> Output {
+    let mut cmd = Command::new(bin_path("ncap-ctl"));
+    cmd.args(args);
+    apply_ctl_env(&mut cmd, env, extra_remove);
     cmd.output().expect("spawn ncap-ctl")
 }
 

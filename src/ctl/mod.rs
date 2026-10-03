@@ -252,7 +252,7 @@ async fn enter(cfg: Config) -> Result<(), CtlError> {
 /// consumer was already gone (a pipe into `head`) and the print counts
 /// as a quiet success, per spec/ctl.md § log.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PrintEnd {
+enum PrintEnd {
     Whole,
     BrokenPipe,
 }
@@ -278,10 +278,7 @@ pub(crate) enum PrintLogError {
 
 /// Print the whole Server log file to `out` byte-for-byte. A broken pipe
 /// is not an error: the consumer exited early and the print ends quietly.
-pub(crate) fn print_log_whole(
-    log_file: &Path,
-    out: &mut dyn io::Write,
-) -> Result<PrintEnd, PrintLogError> {
+fn print_log_whole(log_file: &Path, out: &mut dyn io::Write) -> Result<PrintEnd, PrintLogError> {
     let bytes = fs::read(log_file).map_err(|source| PrintLogError::Read {
         path: log_file.display().to_string(),
         source,
@@ -299,7 +296,6 @@ async fn log(cfg: Config, flags: LogFlags) -> Result<(), CtlError> {
         dir: log_dir.display().to_string(),
     })?;
     if flags.no_pager {
-        // `$PAGER` is never consulted; the whole file goes to stdout.
         print_log_whole(&newest, &mut io::stdout().lock())?;
         return Ok(());
     }
@@ -857,8 +853,7 @@ mod tests {
     }
 
     impl Write for FailingWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let _ = buf;
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::new(self.kind, "sink says no"))
         }
         fn flush(&mut self) -> io::Result<()> {
