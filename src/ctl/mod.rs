@@ -247,10 +247,10 @@ async fn enter(cfg: Config) -> Result<(), CtlError> {
     Ok(())
 }
 
-/// How printing the Server log file to stdout ended: [`PrintEnd::Whole`]
-/// means the writer took every byte; [`PrintEnd::BrokenPipe`] means the
-/// consumer was already gone (a pipe into `head`) and the print counts
-/// as a quiet success, per spec/ctl.md § log.
+/// How printing to stdout ended: [`PrintEnd::Whole`] means the writer took
+/// every byte; [`PrintEnd::BrokenPipe`] means the consumer was already
+/// gone (a pipe into `head`) and the print counts as a quiet success, per
+/// spec/ctl.md § log.
 #[derive(Debug, PartialEq, Eq)]
 enum PrintEnd {
     Whole,
@@ -276,6 +276,34 @@ pub(crate) enum PrintLogError {
     },
 }
 
+/// The shared stdout write: every byte, flushed, with the raw `io::Error`
+/// riding on failure — the mapping to [`PrintLogError::Write`] happens in
+/// the callers' differing surfaces.
+fn write_flushed(out: &mut dyn io::Write, bytes: &[u8]) -> io::Result<()> {
+    out.write_all(bytes).and_then(|()| out.flush())
+}
+
+/// Write `bytes` to `out`: every byte or, when the consumer is gone
+/// (broken pipe), a quiet [`PrintEnd::BrokenPipe`]; any other failure
+/// names the stdout write operation. The quiet broken pipe is the
+/// `--no-pager` rule only — follow's write surface is strict.
+fn write_stdout(out: &mut dyn io::Write, bytes: &[u8]) -> Result<PrintEnd, PrintLogError> {
+    match write_flushed(out, bytes) {
+        Err(ref err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(PrintEnd::BrokenPipe),
+        other => other
+            .map(|()| PrintEnd::Whole)
+            .map_err(|source| PrintLogError::Write { source }),
+    }
+}
+
+/// Write `bytes` to `out`: every byte, or a failure naming the stdout
+/// write operation — follow's write surface. Follow ends only on Ctrl-C
+/// (spec/ctl.md § log), so a gone pipe reader here is a failure, never a
+/// quiet end.
+fn write_stdout_strict(out: &mut dyn io::Write, bytes: &[u8]) -> Result<(), PrintLogError> {
+    write_flushed(out, bytes).map_err(|source| PrintLogError::Write { source })
+}
+
 /// Print the whole Server log file to `out` byte-for-byte. A broken pipe
 /// is not an error: the consumer exited early and the print ends quietly.
 fn print_log_whole(log_file: &Path, out: &mut dyn io::Write) -> Result<PrintEnd, PrintLogError> {
@@ -283,26 +311,126 @@ fn print_log_whole(log_file: &Path, out: &mut dyn io::Write) -> Result<PrintEnd,
         path: log_file.display().to_string(),
         source,
     })?;
-    match out.write_all(&bytes) {
-        Ok(()) => Ok(PrintEnd::Whole),
-        Err(ref err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(PrintEnd::BrokenPipe),
-        Err(source) => Err(PrintLogError::Write { source }),
+    write_stdout(out, &bytes)
+}
+
+/// Announce an attached Server log file on stdout as
+/// `==> following <file name> <==` (spec/ctl.md § log): the shape is
+/// pinned; the wording is style.
+fn announce_attach(log_file: &Path, out: &mut dyn io::Write) -> Result<(), PrintLogError> {
+    let name = log_file.file_name().unwrap_or_default().to_string_lossy();
+    write_stdout_strict(out, format!("==> following {name} <==\n").as_bytes())
+}
+
+/// Stream `log_file` from `*pos` to EOF, printing every byte as it lands
+/// and advancing `*pos` past what printed. A vanished file (e.g. `clean`)
+/// drains nothing and is not an error — the follow polls keep running.
+fn drain_log(log_file: &Path, pos: &mut u64, out: &mut dyn io::Write) -> Result<(), PrintLogError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match fs::File::open(log_file) {
+        Ok(file) => file,
+        // The file vanishing mid-follow is not an error: nothing drains,
+        // the position holds still, and the polls keep running.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(PrintLogError::Read {
+                path: log_file.display().to_string(),
+                source,
+            });
+        }
+    };
+    file.seek(SeekFrom::Start(*pos))
+        .map_err(|source| PrintLogError::Read {
+            path: log_file.display().to_string(),
+            source,
+        })?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut chunk)
+            .map_err(|source| PrintLogError::Read {
+                path: log_file.display().to_string(),
+                source,
+            })?;
+        if read == 0 {
+            return Ok(());
+        }
+        write_stdout_strict(out, &chunk[..read])?;
+        *pos += read as u64;
+    }
+}
+
+/// The attach selection of one follow re-scan: every scanned log file
+/// whose epoch strictly exceeds `last_epoch`, epochs ascending — two
+/// restarts of the Server between polls still land both files
+/// (spec/ctl.md § log `--follow`). `scan` arrives epoch-sorted from the
+/// dir scan, which keeps the filename-epoch parser the single source of
+/// truth for what counts as a Server log file.
+fn attachments_after(last_epoch: u64, scan: &[paths::ServerLog]) -> Vec<paths::ServerLog> {
+    scan.iter()
+        .skip_while(|log| log.epoch <= last_epoch)
+        .cloned()
+        .collect()
+}
+
+/// The log dir re-scan cadence (spec/ctl.md § log `--follow` and § start
+/// flow): roughly every 100 ms.
+const POLL: Duration = Duration::from_millis(100);
+
+/// Streaming attendance of the newest Server log file (spec/ctl.md § log
+/// `--follow`): entirely host-side — no Connection is ever opened, so it
+/// keeps running while the container is down. The first attachment
+/// streams from the file's first byte after announcing itself; every
+/// cycle drains the attached file fully to EOF, then attaches every
+/// Server log file whose epoch strictly exceeds the last attachment,
+/// epochs ascending, each announced. A vanished current file or an empty
+/// scan is not an error: only Ctrl-C ends follow, exit 0.
+async fn follow_log(log_dir: &Path, first: paths::ServerLog) -> Result<(), CtlError> {
+    let mut out = io::stdout().lock();
+    let mut attached = first;
+    let mut pos: u64 = 0;
+    announce_attach(&attached.path, &mut out)?;
+    drain_log(&attached.path, &mut pos, &mut out)?;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(POLL) => {}
+        }
+        // Drain-then-switch: the attached file streams fully to EOF
+        // before anything newer attaches.
+        drain_log(&attached.path, &mut pos, &mut out)?;
+        let scan = paths::sorted_server_logs(log_dir);
+        for log in attachments_after(attached.epoch, &scan) {
+            announce_attach(&log.path, &mut out)?;
+            attached = log;
+            pos = 0;
+            drain_log(&attached.path, &mut pos, &mut out)?;
+        }
     }
 }
 
 async fn log(cfg: Config, flags: LogFlags) -> Result<(), CtlError> {
     let log_dir = &cfg.log_dir;
-    let newest = paths::newest_server_log_path(log_dir).ok_or_else(|| CtlError::NoLog {
-        dir: log_dir.display().to_string(),
-    })?;
+    let mut scan = paths::sorted_server_logs(log_dir);
+    let newest = match scan.pop() {
+        Some(newest) => newest,
+        None => {
+            return Err(CtlError::NoLog {
+                dir: log_dir.display().to_string(),
+            });
+        }
+    };
+    if flags.follow {
+        return follow_log(log_dir, newest).await;
+    }
     if flags.no_pager {
-        print_log_whole(&newest, &mut io::stdout().lock())?;
+        print_log_whole(&newest.path, &mut io::stdout().lock())?;
         return Ok(());
     }
     let (prog, args) = pager_command();
     let mut cmd = tokio::process::Command::new(&prog);
     cmd.args(&args);
-    cmd.arg(&newest);
+    cmd.arg(&newest.path);
     cmd.stdin(Stdio::inherit());
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
@@ -490,7 +618,7 @@ async fn start_inner(cfg: &Config) -> Result<(), CtlError> {
         if Instant::now() >= deadline {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(POLL).await;
     }
 
     let state = rt.inspect_state().await;
@@ -909,6 +1037,99 @@ mod tests {
         assert!(
             matches!(&err, PrintLogError::Read { path, .. } if path.ends_with("ncap-server-999.log")),
             "err={err}"
+        );
+    }
+
+    /// Attach candidates for one follow re-scan: the sorted scan over
+    /// epochs `1..` and `last_epoch` as `(epoch, file name)` output.
+    fn attach_epochs(last_epoch: u64, scan_epochs: &[u64]) -> Vec<(u64, u64)> {
+        let scan: Vec<paths::ServerLog> = scan_epochs
+            .iter()
+            .map(|epoch| paths::ServerLog {
+                epoch: *epoch,
+                path: std::path::PathBuf::from(format!("ncap-server-{epoch}.log")),
+            })
+            .collect();
+        attachments_after(last_epoch, &scan)
+            .into_iter()
+            .map(|log| (log.epoch, log.epoch))
+            .collect()
+    }
+
+    #[test_case(100u64, &[100u64, 200, 300] => vec![(200u64, 200u64), (300u64, 300u64)] ; "two_restarts_in_one_poll_window_attach_both_ascending")]
+    #[test_case(200u64, &[100u64, 200, 300] => vec![(300u64, 300u64)] ; "one_newer_epoch_attaches")]
+    #[test_case(300u64, &[100u64, 200, 300] => Vec::<(u64, u64)>::new() ; "no_epoch_above_the_last_attachment")]
+    #[test_case(100u64, &[100u64] => Vec::<(u64, u64)>::new() ; "equal_epoch_never_reattaches")]
+    #[test_case(100u64, &[] => Vec::<(u64, u64)>::new() ; "empty_scan_attaches_nothing")]
+    #[test_case(0u64, &[100u64, 200] => vec![(100u64, 100u64), (200u64, 200u64)] ; "fresh_watermark_selects_everything_ascending")]
+    fn attach_selection_is_strictly_above_the_last_epoch_ascending(
+        last_epoch: u64,
+        scan_epochs: &[u64],
+    ) -> Vec<(u64, u64)> {
+        attach_epochs(last_epoch, scan_epochs)
+    }
+
+    /// Seed a file with `body` and drain it from `start_pos`; returns the
+    /// new position and the printed bytes.
+    fn drained_from(overwritten_body: &str, start_pos: u64) -> (u64, Vec<u8>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("ncap-server-999.log");
+        fs::write(&log_file, overwritten_body).expect("log file");
+        let mut pos = start_pos;
+        let mut sink: Vec<u8> = Vec::new();
+        drain_log(&log_file, &mut pos, &mut sink).expect("drain succeeds");
+        (pos, sink)
+    }
+
+    #[test_case(b"first\nmore\n" as &[u8], 0u64 => (b"first\nmore\n".len() as u64, b"first\nmore\n".to_vec()) ; "first_drain_streams_from_the_first_byte")]
+    #[test_case(b"first\nmore\n" as &[u8], 6u64 => (b"first\nmore\n".len() as u64, b"more\n".to_vec()) ; "later_drain_streams_only_new_bytes")]
+    #[test_case(b"first\n" as &[u8], b"first\n".len() as u64 => (b"first\n".len() as u64, Vec::new()) ; "at_eof_drains_nothing")]
+    #[test_case(b"x" as &[u8], 1u64 => (1u64, Vec::new()) ; "position_at_eof_drains_nothing")]
+    fn drain_streams_from_its_position_to_eof(body: &[u8], start: u64) -> (u64, Vec<u8>) {
+        drained_from(
+            std::str::from_utf8(body).expect("test bodies are utf-8"),
+            start,
+        )
+    }
+
+    #[test]
+    fn a_vanished_file_drains_nothing_quietly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pos = 4u64;
+        let mut sink: Vec<u8> = Vec::new();
+        drain_log(&dir.path().join("ncap-server-999.log"), &mut pos, &mut sink)
+            .expect("gone file is not an error");
+        assert_eq!(pos, 4, "position holds still for the vanished file");
+        assert!(sink.is_empty(), "nothing prints: {sink:?}");
+    }
+
+    #[test]
+    fn a_stream_write_failure_other_than_broken_pipe_names_the_operation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("ncap-server-999.log");
+        fs::write(&log_file, "content\n").expect("log file");
+        let mut pos = 0u64;
+        let mut sink = FailingWriter {
+            kind: io::ErrorKind::PermissionDenied,
+        };
+        let err = drain_log(&log_file, &mut pos, &mut sink).expect_err("write must fail");
+        assert!(
+            err.to_string()
+                .starts_with("cannot write the server log to stdout"),
+            "err={err}"
+        );
+    }
+
+    #[test]
+    fn an_announce_names_the_file_with_the_pinned_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("ncap-server-1729512345678.log");
+        let mut sink: Vec<u8> = Vec::new();
+        announce_attach(&log_file, &mut sink).expect("announce succeeds");
+        assert_eq!(
+            String::from_utf8_lossy(&sink),
+            "==> following ncap-server-1729512345678.log <==\n",
+            "the announce shape is pinned by spec/ctl.md § log"
         );
     }
 }

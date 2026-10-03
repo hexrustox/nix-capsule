@@ -40,13 +40,66 @@ pub enum Cmd {
     SetupEnv,
 }
 
-/// The CLI flags of the `log` subcommand (spec/ctl.md § log): flag states
-/// are exactly no flag (pager), `--no-pager` (stdout).
+/// The CLI flags of the `log` subcommand (spec/ctl.md § log): three flag
+/// states — no flag (pager), `--no-pager` (stdout), `--follow` (stream;
+/// same stream on Server restarts, ends on Ctrl-C). The two flags are
+/// mutually exclusive at parse time: the usage error names both flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::Args)]
+#[group(required = false, multiple = false)]
 pub struct LogFlags {
     /// Print the newest server log file to stdout instead of opening a pager
     #[arg(long)]
     pub no_pager: bool,
+    /// Stream the newest server log file from its first byte and switch to
+    /// newer files when the Server restarts; Ctrl-C ends with exit 0
+    #[arg(long)]
+    pub follow: bool,
+}
+
+#[cfg(test)]
+mod log_flags_tests {
+    use clap::Parser;
+    use test_case::test_case;
+
+    use super::*;
+
+    /// Parse harness standing in for the binary: a subcommand dispatch
+    /// wrapped exactly as the real `Cli` holds it.
+    #[derive(clap::Parser)]
+    struct ParseHarness {
+        #[command(subcommand)]
+        cmd: Cmd,
+    }
+
+    fn parse_log(args: &[&str]) -> Result<LogFlags, clap::Error> {
+        ParseHarness::try_parse_from(
+            std::iter::once("ncap-ctl")
+                .chain(std::iter::once("log"))
+                .chain(args.iter().copied()),
+        )
+        .map(|harness| match harness.cmd {
+            Cmd::Log { flags } => flags,
+            other => panic!("log args must parse into Cmd::Log: {other:?}"),
+        })
+    }
+
+    #[test_case(&[] => matches Ok(flags) if !flags.no_pager && !flags.follow ; "no_flag_is_the_pager_state")]
+    #[test_case(&["--no-pager"] => matches Ok(flags) if flags.no_pager && !flags.follow ; "no_pager_flags_the_stdout_state")]
+    #[test_case(&["--follow"] => matches Ok(flags) if !flags.no_pager && flags.follow ; "follow_flags_the_stream_state")]
+    fn flag_state_is_a_bit_per_exclusive_flag(args: &[&str]) -> Result<LogFlags, clap::Error> {
+        parse_log(args)
+    }
+
+    #[test_case(&["--no-pager", "--follow"] ; "no_pager_then_follow")]
+    #[test_case(&["--follow", "--no-pager"] ; "follow_then_no_pager")]
+    fn the_two_flags_together_are_a_usage_error_naming_them(args: &[&str]) {
+        let err = parse_log(args).expect_err("both flags together must fail parse");
+        let rendered = err.render().to_string();
+        assert!(
+            rendered.contains("--no-pager") && rendered.contains("--follow"),
+            "usage error must name both flags: {rendered}"
+        );
+    }
 }
 
 /// Resolved configuration for one command. Fields a command does not use are

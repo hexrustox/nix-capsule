@@ -1272,8 +1272,18 @@ fn no_pager_piped_into_an_early_exiting_reader_stays_quiet() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `log --follow` (spec/ctl.md § log): a live follow session — attach,
+// announce, restart-switch, the Ctrl-C end — is intentionally NOT
+// integration-tested (parent issue's testing decision; the loop is
+// covered through the unit-tested pure pieces at the parse and
+// selection seams). The CLI seam only pins the parse-time rejections:
+// `--follow --no-pager` and follow with no first log file.
+// ---------------------------------------------------------------------------
+
 #[test_case(&[/* bare */] as &[&str] ; "bare_log_names_the_log_dir")]
 #[test_case(&["--no-pager"] as &[&str] ; "no_pager_names_the_log_dir")]
+#[test_case(&["--follow"] as &[&str] ; "follow_never_waits_for_a_first_file_either")]
 fn log_without_a_server_log_fails_naming_the_log_dir(args: &[&str]) {
     let fx = fixture::Fixture::new(fixture::Config::default());
     let out = fx.log(args);
@@ -1285,6 +1295,46 @@ fn log_without_a_server_log_fails_naming_the_log_dir(args: &[&str]) {
     assert!(
         stderr.contains(&fx.log_dir_from_env()),
         "the error must name the log dir: stderr={stderr}"
+    );
+}
+
+#[test_case(&["--no-pager", "--follow"] ; "no_pager_then_follow")]
+#[test_case(&["--follow", "--no-pager"] ; "follow_then_no_pager")]
+fn log_with_both_flags_fails_as_a_usage_error_naming_the_flags(args: &[&str]) {
+    // Parse-time rejection: no log dir needed for the usage error to fire.
+    let fx = fixture::Fixture::new(fixture::Config::default());
+    let out = fx.log(args);
+    assert!(
+        !out.status.success(),
+        "the two flags together must be rejected: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--no-pager") && stderr.contains("--follow"),
+        "the usage error must name both flags: stderr={stderr}"
+    );
+}
+
+#[test]
+fn completions_advertise_follow() {
+    let out = std::process::Command::new(common::client::bin_path("ncap-completions"))
+        .args(["ncap-ctl", "zsh"])
+        .output()
+        .expect("spawn ncap-completions");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--follow"),
+        "completions must advertise `--follow`: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("--no-pager"),
+        "completions must advertise `--no-pager`: stdout={stdout}"
     );
 }
 
