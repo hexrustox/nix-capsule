@@ -5,10 +5,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-/// The `ncap` command line, parsed by the binary; kept here so the
-/// completion generator can describe it too.
+/// Run COMMAND inside the project's container
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version)]
 pub struct Cli {
     /// Unix socket path of the project's server
     #[arg(short, long, value_name = "PATH", env = "NCAP_SOCKET")]

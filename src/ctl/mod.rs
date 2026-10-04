@@ -18,7 +18,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use crate::ctl::config::{Cmd, Config, ConfigError, LogFlags};
+use crate::ctl::cli::{Cmd, LogFlags};
+use crate::ctl::config::{Config, ConfigError};
 use crate::ctl::fs_error::FsError;
 use crate::ctl::runtime::RuntimeError;
 use crate::ctl::stamp::StampError;

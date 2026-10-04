@@ -17,6 +17,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use clap::ValueEnum as _;
 use tokio_util::codec::Framed;
 
 use crate::ctl::fs_error::FsError;
@@ -132,8 +133,9 @@ pub enum ServerError {
 /// The minimum severity the Server logs at — exactly `debug`, `info`,
 /// `warning`, `error` (spec/server.md § Logging). Ordering is
 /// `debug` < `info` < `warning` < `error`; the single source the Ctl
-/// contract validates against.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// contract validates against. The `ValueEnum` derive bricks the tags
+/// `--log-level` help lists as the possible values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum LogLevel {
     /// Finest-grained detail: connection opens, request lines, signals.
     Debug,
@@ -169,13 +171,10 @@ impl LogLevel {
 
     /// Exact match against the four tag strings; anything else is `None`.
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "debug" => Some(LogLevel::Debug),
-            "info" => Some(LogLevel::Info),
-            "warning" => Some(LogLevel::Warning),
-            "error" => Some(LogLevel::Error),
-            _ => None,
-        }
+        Self::value_variants()
+            .iter()
+            .find(|level| level.to_possible_value().expect("derives a possible value").matches(value, false))
+            .copied()
     }
 }
 
