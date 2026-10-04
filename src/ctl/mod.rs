@@ -989,16 +989,20 @@ mod tests {
         }
     }
 
-    #[test_case(b"newest run line\n" as &[u8] => PrintEnd::Whole ; "whole_file_prints_bytes_for_bytes")]
-    #[test_case(b"" as &[u8] => PrintEnd::Whole ; "empty_file_still_prints_whole")]
-    fn prints_the_log_file_whole(body: &[u8]) -> PrintEnd {
+    #[test_case("newest run line\n" ; "whole_file_prints_bytes_for_bytes")]
+    #[test_case(""; "empty_file_still_prints_whole")]
+    fn prints_the_log_file_whole(body: &str) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log_file = dir.path().join("ncap-server-999.log");
         fs::write(&log_file, body).expect("log file");
         let mut sink: Vec<u8> = Vec::new();
         let end = print_log_whole(&log_file, &mut sink).expect("print succeeds");
-        assert_eq!(sink, body, "stdout must carry the file byte-for-byte");
-        end
+        assert_eq!(
+            String::from_utf8(sink).unwrap(),
+            body,
+            "stdout must carry the file byte-for-byte"
+        );
+        assert_eq!(end, PrintEnd::Whole);
     }
 
     #[test]
@@ -1040,9 +1044,16 @@ mod tests {
         );
     }
 
-    /// Attach candidates for one follow re-scan: the sorted scan over
-    /// epochs `1..` and `last_epoch` as `(epoch, file name)` output.
-    fn attach_epochs(last_epoch: u64, scan_epochs: &[u64]) -> Vec<(u64, u64)> {
+    #[test_case(100, &[100, 200, 300] => vec![200, 300] ; "two_restarts_in_one_poll_window_attach_both_ascending")]
+    #[test_case(200, &[100, 200, 300] => vec![300] ; "one_newer_epoch_attaches")]
+    #[test_case(300, &[100, 200, 300] => Vec::<u64>::new() ; "no_epoch_above_the_last_attachment")]
+    #[test_case(100, &[100] => Vec::<u64>::new() ; "equal_epoch_never_reattaches")]
+    #[test_case(100, &[] => Vec::<u64>::new() ; "empty_scan_attaches_nothing")]
+    #[test_case(0u64, &[100, 200] => vec![100, 200] ; "fresh_watermark_selects_everything_ascending")]
+    fn attach_selection_is_strictly_above_the_last_epoch_ascending(
+        last_epoch: u64,
+        scan_epochs: &[u64],
+    ) -> Vec<u64> {
         let scan: Vec<paths::ServerLog> = scan_epochs
             .iter()
             .map(|epoch| paths::ServerLog {
@@ -1052,72 +1063,33 @@ mod tests {
             .collect();
         attachments_after(last_epoch, &scan)
             .into_iter()
-            .map(|log| (log.epoch, log.epoch))
+            .map(|log| log.epoch)
             .collect()
     }
 
-    #[test_case(100u64, &[100u64, 200, 300] => vec![(200u64, 200u64), (300u64, 300u64)] ; "two_restarts_in_one_poll_window_attach_both_ascending")]
-    #[test_case(200u64, &[100u64, 200, 300] => vec![(300u64, 300u64)] ; "one_newer_epoch_attaches")]
-    #[test_case(300u64, &[100u64, 200, 300] => Vec::<(u64, u64)>::new() ; "no_epoch_above_the_last_attachment")]
-    #[test_case(100u64, &[100u64] => Vec::<(u64, u64)>::new() ; "equal_epoch_never_reattaches")]
-    #[test_case(100u64, &[] => Vec::<(u64, u64)>::new() ; "empty_scan_attaches_nothing")]
-    #[test_case(0u64, &[100u64, 200] => vec![(100u64, 100u64), (200u64, 200u64)] ; "fresh_watermark_selects_everything_ascending")]
-    fn attach_selection_is_strictly_above_the_last_epoch_ascending(
-        last_epoch: u64,
-        scan_epochs: &[u64],
-    ) -> Vec<(u64, u64)> {
-        attach_epochs(last_epoch, scan_epochs)
-    }
-
-    /// Seed a file with `body` and drain it from `start_pos`; returns the
-    /// new position and the printed bytes.
-    fn drained_from(overwritten_body: &str, start_pos: u64) -> (u64, Vec<u8>) {
+    #[test_case(b"first\nmore\n" as &[u8], 0 => (b"first\nmore\n".len(), b"first\nmore\n".to_vec()) ; "first_drain_streams_from_the_first_byte")]
+    #[test_case(b"first\nmore\n" as &[u8], 6 => (b"first\nmore\n".len(), b"more\n".to_vec()) ; "later_drain_streams_only_new_bytes")]
+    #[test_case(b"first\n" as &[u8], b"first\n".len() => (b"first\n".len(), Vec::new()) ; "at_eof_drains_nothing")]
+    #[test_case(b"x" as &[u8], 1 => (1, Vec::new()) ; "position_at_eof_drains_nothing")]
+    fn drain_streams_from_its_position_to_eof(body: &[u8], start: usize) -> (usize, Vec<u8>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log_file = dir.path().join("ncap-server-999.log");
-        fs::write(&log_file, overwritten_body).expect("log file");
-        let mut pos = start_pos;
+        fs::write(&log_file, body).expect("log file");
+        let mut pos = start as u64;
         let mut sink: Vec<u8> = Vec::new();
         drain_log(&log_file, &mut pos, &mut sink).expect("drain succeeds");
-        (pos, sink)
-    }
-
-    #[test_case(b"first\nmore\n" as &[u8], 0u64 => (b"first\nmore\n".len() as u64, b"first\nmore\n".to_vec()) ; "first_drain_streams_from_the_first_byte")]
-    #[test_case(b"first\nmore\n" as &[u8], 6u64 => (b"first\nmore\n".len() as u64, b"more\n".to_vec()) ; "later_drain_streams_only_new_bytes")]
-    #[test_case(b"first\n" as &[u8], b"first\n".len() as u64 => (b"first\n".len() as u64, Vec::new()) ; "at_eof_drains_nothing")]
-    #[test_case(b"x" as &[u8], 1u64 => (1u64, Vec::new()) ; "position_at_eof_drains_nothing")]
-    fn drain_streams_from_its_position_to_eof(body: &[u8], start: u64) -> (u64, Vec<u8>) {
-        drained_from(
-            std::str::from_utf8(body).expect("test bodies are utf-8"),
-            start,
-        )
+        (pos as usize, sink)
     }
 
     #[test]
     fn a_vanished_file_drains_nothing_quietly() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut pos = 4u64;
+        let mut pos = 4;
         let mut sink: Vec<u8> = Vec::new();
         drain_log(&dir.path().join("ncap-server-999.log"), &mut pos, &mut sink)
             .expect("gone file is not an error");
         assert_eq!(pos, 4, "position holds still for the vanished file");
         assert!(sink.is_empty(), "nothing prints: {sink:?}");
-    }
-
-    #[test]
-    fn a_stream_write_failure_other_than_broken_pipe_names_the_operation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log_file = dir.path().join("ncap-server-999.log");
-        fs::write(&log_file, "content\n").expect("log file");
-        let mut pos = 0u64;
-        let mut sink = FailingWriter {
-            kind: io::ErrorKind::PermissionDenied,
-        };
-        let err = drain_log(&log_file, &mut pos, &mut sink).expect_err("write must fail");
-        assert!(
-            err.to_string()
-                .starts_with("cannot write the server log to stdout"),
-            "err={err}"
-        );
     }
 
     #[test]

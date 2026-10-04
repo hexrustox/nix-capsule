@@ -681,20 +681,6 @@ impl Fixture {
         run_ctl_removed(&self.env, &argv, &["PAGER"])
     }
 
-    /// Run `ncap-ctl log --no-pager` with stdout piped through `filter`
-    /// (a bash pipeline fragment such as `head -n 1`) and return the
-    /// combined output. The exit status is the `log` invocation's own
-    /// (`PIPESTATUS`), not just the pipeline tail — so a manufactured
-    /// error cannot hide behind the filter's exit 0.
-    pub(crate) fn log_piped(&self, filter: &str) -> Output {
-        let ctl = bin_path("ncap-ctl").to_string_lossy().into_owned();
-        let script = format!("{ctl:?} log --no-pager | {filter}; exit ${{PIPESTATUS[0]}}");
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(&script);
-        apply_ctl_env(&mut cmd, &self.env, &["PAGER"]);
-        cmd.output().expect("spawn bash pipeline")
-    }
-
     /// Seed a `.git` dir inside the Project root (git-mount tests).
     pub(crate) fn seed_git(&self) {
         fs::create_dir_all(self.root.join(".git")).expect("git dir");
