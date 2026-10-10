@@ -11,13 +11,13 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use clap::ValueEnum as _;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use clap::ValueEnum as _;
 use tokio_util::codec::Framed;
 
 use crate::ctl::fs_error::FsError;
@@ -173,7 +173,12 @@ impl LogLevel {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::value_variants()
             .iter()
-            .find(|level| level.to_possible_value().expect("derives a possible value").matches(value, false))
+            .find(|level| {
+                level
+                    .to_possible_value()
+                    .expect("derives a possible value")
+                    .matches(value, false)
+            })
             .copied()
     }
 }
