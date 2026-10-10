@@ -93,19 +93,35 @@ pub(super) fn parse_server_log_epoch(name: &str) -> Option<u64> {
     epoch.parse().ok()
 }
 
-/// The newest server log in `log_dir` by epoch stamp; `None` when there is
-/// no log file in the dir.
-pub(super) fn newest_server_log_path(log_dir: &Path) -> Option<PathBuf> {
-    let dir = fs::read_dir(log_dir).ok()?;
+/// One Server log file found by the dir scan: its epoch stamp and path.
+/// The pair travels together through every selection and the follow
+/// loop, so the position a stream holds never lands on another file.
+#[derive(Clone, Debug)]
+pub(super) struct ServerLog {
+    pub(super) epoch: u64,
+    pub(super) path: PathBuf,
+}
+
+/// The log dir scanned (spec/paths.md § Server log files): every server
+/// log file, sorted by ascending epoch — numerically, never lexically.
+/// Foreign entries and a missing dir read as no log files. The
+/// "highest-epoch wins" newest selection is this scan's last entry.
+pub(super) fn sorted_server_logs(log_dir: &Path) -> Vec<ServerLog> {
+    let Ok(dir) = fs::read_dir(log_dir) else {
+        return Vec::new();
+    };
     let mut entries = Vec::new();
     for entry in dir.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(epoch) = parse_server_log_epoch(&name) {
-            entries.push((epoch, entry.path()));
+            entries.push(ServerLog {
+                epoch,
+                path: entry.path(),
+            });
         }
     }
-    entries.sort_by_key(|(epoch, _)| *epoch);
-    entries.pop().map(|(_, path)| path)
+    entries.sort_by_key(|log| log.epoch);
+    entries
 }
 
 /// Ensure `dir` exists, creating it with mode 0700 when it is newly created.
@@ -134,5 +150,37 @@ mod tests {
     #[test_case("ncap-server-1.log.bak" => matches None ; "wrong_suffix_is_not_a_server_log")]
     fn parses_exactly_digit_epochs(name: &str) -> Option<u64> {
         parse_server_log_epoch(name)
+    }
+
+    /// Seed each filename into a fresh log dir (bodies never matter) and
+    /// return the epochs `sorted_server_logs` lists ascending.
+    fn scanned_epochs(seeded: &[&str]) -> Vec<u64> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in seeded {
+            fs::write(dir.path().join(name), "line").expect("log file");
+        }
+        sorted_server_logs(dir.path())
+            .into_iter()
+            .map(|log| log.epoch)
+            .collect::<Vec<_>>()
+    }
+
+    #[test_case(&["ncap-server-500.log", "ncap-server-70.log", "ncap-server-5.log"] => vec![5u64, 70, 500] ; "numerically_not_lexically_sorted_ascending")]
+    #[test_case(&["ncap-server-999.log", "ncap-server-100.log"] => vec![100u64, 999] ; "two_epochs_sort_ascending")]
+    #[test_case(&["ncap-server-7.log"] => vec![7u64] ; "one_epoch_sorts_as_itself")]
+    #[test_case(&["not-a-server-log.txt", "ncap-server-3.log.bak", "sub"] => vec![] as Vec<u64> ; "foreign_entries_are_ignored")]
+    #[test_case(&[] => vec![] as Vec<u64> ; "no_log_files_is_empty")]
+    fn scans_log_files_epoch_ascending_ignoring_foreigners(seeded: &[&str]) -> Vec<u64> {
+        scanned_epochs(seeded)
+    }
+
+    #[test]
+    fn scan_of_a_missing_dir_is_empty_not_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entries = sorted_server_logs(&dir.path().join("absent"));
+        assert!(
+            entries.is_empty(),
+            "a missing log dir reads as no log files: {entries:?}"
+        );
     }
 }

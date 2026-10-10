@@ -12,7 +12,6 @@ use futures_util::SinkExt;
 use test_case::test_case;
 use tokio::io::AsyncWriteExt;
 
-use nix_capsule::protocol::Message;
 use common::{
     Server,
     child::{
@@ -22,6 +21,7 @@ use common::{
     probe::{assert_clean_exit, read_until_terminal, send_request, stdout_of},
     script::{group_trap_script, surviving_trap_script, trapping_ticker_script},
 };
+use nix_capsule::protocol::Message;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_close_terms_group_and_next_connection_succeeds() {

@@ -4,23 +4,8 @@ use std::time::Duration;
 use clap::Parser;
 
 /// Serve exec requests from clients inside the container, streaming their stdio
-fn main() {
-    let cli = Cli::parse();
-    let runtime = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
-    let result = runtime.block_on(nix_capsule::server::run(
-        cli.socket,
-        cli.log_dir,
-        Duration::from_secs(cli.timeout),
-        cli.log_level,
-    ));
-    if let Err(err) = result {
-        eprintln!("{}: {err}", env!("CARGO_BIN_NAME"));
-        std::process::exit(1);
-    }
-}
-
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version)]
 struct Cli {
     /// Unix socket path to bind
     #[arg(long, value_name = "PATH")]
@@ -35,6 +20,21 @@ struct Cli {
     timeout: u64,
 
     /// Minimum severity the server logs at
-    #[arg(long, value_name = "LEVEL")]
+    #[arg(long, value_name = "LEVEL", value_enum)]
     log_level: nix_capsule::server::LogLevel,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let runtime = tokio::runtime::Runtime::new().expect("spawn tokio runtime");
+    let result = runtime.block_on(nix_capsule::server::run(
+        cli.socket,
+        cli.log_dir,
+        Duration::from_secs(cli.timeout),
+        cli.log_level,
+    ));
+    if let Err(err) = result {
+        eprintln!("{}: {err}", env!("CARGO_BIN_NAME"));
+        std::process::exit(1);
+    }
 }

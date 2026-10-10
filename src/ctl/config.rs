@@ -10,32 +10,6 @@ use super::shell::shell_escape;
 use crate::ctl::paths;
 use crate::server::LogLevel;
 
-/// A `ncap-ctl` subcommand: the variant selects the control flow and the
-/// demand set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::Subcommand)]
-pub enum Cmd {
-    /// Evaluate the devshell, cache it, and start/restart the container
-    Init,
-    /// Start the container from a cached env dump
-    Start,
-    /// Stop the running container
-    Stop,
-    /// Stop and restart the container
-    Restart,
-    /// Enter an interactive shell inside the container
-    Enter,
-    /// Print container status
-    Status,
-    /// Show the latest server log
-    Log,
-    /// Wipe all project state: cache, state dir, runtime dir
-    Clean,
-    /// Print the expanded runtime adapter options
-    ShowOptions,
-    /// Resolve the project-scoped envs and print them as bash `export` lines
-    SetupEnv,
-}
-
 /// Resolved configuration for one command. Fields a command does not use are
 /// populated anyway; the flows read what they demanded upfront.
 #[derive(Debug)]
