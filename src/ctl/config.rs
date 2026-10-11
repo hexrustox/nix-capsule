@@ -536,12 +536,12 @@ mod tests {
     }
 
     #[test]
-    fn setup_env_derives_and_quotes() {
+    fn setup_env_derives_and_quotes() -> Result<(), ConfigError> {
         let lookup = env(vec![
             ("NCAP_PROJECT_ROOT", "/tmp/my_project"),
             ("NCAP_CACHE_DIR", "/tmp/a'b dir"),
         ]);
-        let out = setup_env(&lookup).expect("setup-env succeeds");
+        let out = setup_env(&lookup)?;
         assert!(
             out.contains("export NCAP_PROJECT='my-project'\n"),
             "out={out}"
@@ -561,10 +561,11 @@ mod tests {
         assert!(lines[2].starts_with("export NCAP_SOCKET="), "out={out}");
         assert!(lines[3].starts_with("export NCAP_CACHE_DIR="), "out={out}");
         assert!(lines[4].starts_with("export NCAP_LOG_DIR="), "out={out}");
+        Ok(())
     }
 
     #[test]
-    fn setup_env_explicit_wins() {
+    fn setup_env_explicit_wins() -> Result<(), ConfigError> {
         let lookup = env(vec![
             ("NCAP_PROJECT_ROOT", "/tmp/my_project"),
             ("NCAP_PROJECT", "explicit"),
@@ -573,7 +574,7 @@ mod tests {
             ("NCAP_CACHE_DIR", "/tmp/c"),
             ("NCAP_LOG_DIR", "/tmp/l"),
         ]);
-        let out = setup_env(&lookup).expect("setup-env succeeds");
+        let out = setup_env(&lookup)?;
         assert!(
             out.contains("export NCAP_PROJECT='explicit'\n"),
             "out={out}"
@@ -582,17 +583,33 @@ mod tests {
             out.contains("export NCAP_CONTAINER='custom'\n"),
             "out={out}"
         );
+        assert!(
+            out.contains("export NCAP_SOCKET='/tmp/x.sock'\n"),
+            "out={out}"
+        );
+        assert_eq!(
+            out.lines().nth(3).expect("5 export lines"),
+            "export NCAP_CACHE_DIR='/tmp/c'"
+        );
+        assert_eq!(
+            out.lines().nth(4).expect("5 export lines"),
+            "export NCAP_LOG_DIR='/tmp/l'"
+        );
+        Ok(())
     }
 
     #[test]
     fn setup_env_needs_root() {
         let lookup = env(vec![]);
         let err = setup_env(&lookup).expect_err("root is demanded");
-        assert!(matches!(
-            err,
-            ConfigError::Missing {
-                var: "NCAP_PROJECT_ROOT"
-            }
-        ));
+        assert!(
+            matches!(
+                err,
+                ConfigError::Missing {
+                    var: "NCAP_PROJECT_ROOT"
+                }
+            ),
+            "err={err:?}"
+        );
     }
 }

@@ -1,5 +1,6 @@
 //! XDG layout with the `$TMPDIR` fallback for the runtime dir.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -17,16 +18,29 @@ pub(crate) struct NoHomeError {
 /// per the flat fallback of ADR-0001. `dirs` knows nothing of `$TMPDIR`,
 /// so the fallback stays here.
 pub(super) fn socket_path(project: &str) -> PathBuf {
-    let runtime_dir = match dirs::runtime_dir() {
-        Some(dir) => dir.join("nix-capsule").join(project),
-        None => {
-            let base = std::env::var_os("TMPDIR")
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| std::ffi::OsString::from("/tmp"));
-            Path::new(&base).join("nix-capsule").join(project)
-        }
+    socket_dir(
+        dirs::runtime_dir().as_deref(),
+        std::env::var_os("TMPDIR").as_deref(),
+        project,
+    )
+}
+
+/// [`socket_path`] with the env inputs injected: the XDG runtime dir as
+/// `dirs::runtime_dir()` reports it, the `$TMPDIR` value or `None` when
+/// unset.
+fn socket_dir(runtime_dir: Option<&Path>, tmpdir: Option<&OsStr>, project: &str) -> PathBuf {
+    let base = match (runtime_dir, tmpdir.filter(|value| !value.is_empty())) {
+        (Some(dir), _) => dir.join("nix-capsule").join(project),
+        (None, Some(tmpdir)) => Path::new(tmpdir)
+            .to_path_buf()
+            .join("nix-capsule")
+            .join(project),
+        (None, None) => Path::new("/tmp")
+            .to_path_buf()
+            .join("nix-capsule")
+            .join(project),
     };
-    runtime_dir.join("ncap.sock")
+    base.join("ncap.sock")
 }
 
 /// The per-project cache dir: `$XDG_CACHE_HOME`, else `$HOME/.cache`.
@@ -146,6 +160,7 @@ mod tests {
     #[test_case("ncap-server-+5.log" => matches None ; "leading_plus_is_not_digits")]
     #[test_case("ncap-server-.log" => matches None ; "empty_body_is_not_digits")]
     #[test_case("ncap-server-12x.log" => matches None ; "trailing_letter_is_not_digits")]
+    #[test_case("ncap-server-99999999999999999999999.log" => matches None ; "overflow_body_is_not_an_epoch")]
     #[test_case("other.log" => matches None ; "wrong_prefix_is_not_a_server_log")]
     #[test_case("ncap-server-1.log.bak" => matches None ; "wrong_suffix_is_not_a_server_log")]
     fn parses_exactly_digit_epochs(name: &str) -> Option<u64> {
@@ -182,5 +197,79 @@ mod tests {
             entries.is_empty(),
             "a missing log dir reads as no log files: {entries:?}"
         );
+    }
+
+    #[test]
+    fn a_non_utf8_filename_is_not_counted_as_a_server_log() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let name = std::ffi::OsStr::from_bytes(b"ncap-server-\xff\xfe.log");
+        fs::write(dir.path().join(name), "line").expect("log file");
+        let logs = sorted_server_logs(dir.path());
+        assert!(
+            logs.is_empty(),
+            "lossy-decoded invalid bytes are not digit epochs, scanned: {logs:?}"
+        );
+    }
+
+    #[test]
+    fn creates_nested_dir_with_mode_0700() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let nested = outer.path().join("a").join("b");
+        ensure_dir_0700(&nested).expect("create");
+        let mode = fs::metadata(&nested)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "created dir mode: {mode:o}");
+    }
+
+    #[test]
+    fn existing_dir_keeps_its_permissions() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let existing = outer.path().join("existing");
+        fs::create_dir(&existing).expect("seed dir");
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).expect("seed mode");
+
+        ensure_dir_0700(&existing).expect("ensure");
+
+        let mode = fs::metadata(&existing)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "existing dir mode after ensure: {mode:o}"
+        );
+    }
+
+    #[test_case(
+        Some("/run/user/1000".as_ref()), Some("/var/tmp".as_ref()) =>
+        "/run/user/1000/nix-capsule/demo/ncap.sock" ;
+        "xdg_runtime_dir_wins"
+    )]
+    #[test_case(
+        None, Some("/var/tmp".as_ref()) =>
+        "/var/tmp/nix-capsule/demo/ncap.sock" ;
+        "tmpdir_is_second_choice"
+    )]
+    #[test_case(
+        None, Some("".as_ref()) =>
+        "/tmp/nix-capsule/demo/ncap.sock" ;
+        "empty_tmpdir_is_ignored_for_tmp"
+    )]
+    #[test_case(
+        None, None =>
+        "/tmp/nix-capsule/demo/ncap.sock" ;
+        "no_runtime_or_tmpdir_defaults_to_tmp"
+    )]
+    fn places_socket_in_the_runtime_or_tmpdir(
+        runtime_dir: Option<&Path>,
+        tmpdir: Option<&OsStr>,
+    ) -> String {
+        socket_dir(runtime_dir, tmpdir, "demo")
+            .to_string_lossy()
+            .into_owned()
     }
 }

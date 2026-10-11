@@ -59,3 +59,23 @@ pub(crate) async fn wipe_history(nix_bin: &Path, profile: &Path) {
         .output()
         .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn print_dev_env_with_a_missing_nix_binary_is_a_spawn_error() {
+        let err = print_dev_env(
+            Path::new("/nonexistent/ncap-fake-nix"),
+            Path::new("/tmp/profile"),
+            "a-devshell",
+        )
+        .await
+        .expect_err("a missing binary cannot spawn");
+        assert!(
+            matches!(err, PrintDevEnvError::Spawn { .. }),
+            "a spawn failure must be the `Spawn` variant, got {err:?}"
+        );
+    }
+}

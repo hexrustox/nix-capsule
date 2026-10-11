@@ -14,7 +14,6 @@ mod tests {
 
     #[test_case("plain" => "plain" ; "no_special_chars_pass_through")]
     #[test_case("" => "" ; "empty_is_empty")]
-    #[test_case("/nix/store/xyz/bin/bash" => "/nix/store/xyz/bin/bash" ; "path_passes_through")]
     #[test_case("a b c" => "a b c" ; "spaces_pass_through_inside_quotes")]
     #[test_case("it's" => "it'\\''s" ; "embedded_quote_closes_reopens")]
     #[test_case("'" => "'\\''" ; "lone_quote_closes_reopens")]

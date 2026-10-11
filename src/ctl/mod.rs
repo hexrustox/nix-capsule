@@ -1027,9 +1027,8 @@ mod tests {
         let mut sink = FailingWriter { kind };
         let err = print_log_whole(&log_file, &mut sink).expect_err("write must fail");
         assert!(
-            err.to_string()
-                .starts_with("cannot write the server log to stdout"),
-            "err={err}"
+            matches!(err, PrintLogError::Write { .. }),
+            "a write failure other than a broken pipe must be the `Write` variant, got {err:?}"
         );
     }
 
@@ -1071,7 +1070,6 @@ mod tests {
     #[test_case(b"first\nmore\n" as &[u8], 0 => (b"first\nmore\n".len(), b"first\nmore\n".to_vec()) ; "first_drain_streams_from_the_first_byte")]
     #[test_case(b"first\nmore\n" as &[u8], 6 => (b"first\nmore\n".len(), b"more\n".to_vec()) ; "later_drain_streams_only_new_bytes")]
     #[test_case(b"first\n" as &[u8], b"first\n".len() => (b"first\n".len(), Vec::new()) ; "at_eof_drains_nothing")]
-    #[test_case(b"x" as &[u8], 1 => (1, Vec::new()) ; "position_at_eof_drains_nothing")]
     fn drain_streams_from_its_position_to_eof(body: &[u8], start: usize) -> (usize, Vec<u8>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log_file = dir.path().join("ncap-server-999.log");
@@ -1104,5 +1102,51 @@ mod tests {
             "==> following ncap-server-1729512345678.log <==\n",
             "the announce shape is pinned by spec/ctl.md § log"
         );
+    }
+
+    #[test]
+    fn a_symlinked_generation_link_is_removed_itself_not_its_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("profile-1");
+        fs::write(&target, b"env dump").expect("target");
+        std::os::unix::fs::symlink(&target, dir.path().join("profile-1-link"))
+            .expect("generation link");
+        remove_profile_generation_links(dir.path()).expect("cleanup succeeds");
+        assert!(
+            !dir.path().join("profile-1-link").exists(),
+            "the link itself must be gone"
+        );
+        assert!(
+            target.exists(),
+            "the link's target must survive the cleanup"
+        );
+    }
+
+    #[test]
+    fn a_generation_link_that_is_a_real_directory_is_removed_recursively() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_dir = dir.path().join("profile-1-link");
+        fs::create_dir_all(real_dir.join("gen")).expect("real directory");
+        fs::write(real_dir.join("gen").join("inner"), b"x").expect("inner file");
+        remove_profile_generation_links(dir.path()).expect("cleanup succeeds");
+        assert!(
+            !real_dir.exists(),
+            "a real directory wearing the link's name must still be removed"
+        );
+    }
+
+    #[test]
+    fn names_that_are_not_generation_links_survive_the_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["profile-x-link", "profile--link", "profile-1", "unrelated"] {
+            fs::write(dir.path().join(name), b"keep").expect(name);
+        }
+        remove_profile_generation_links(dir.path()).expect("cleanup succeeds");
+        for name in ["profile-x-link", "profile--link", "profile-1", "unrelated"] {
+            assert!(
+                dir.path().join(name).exists(),
+                "`{name}` must survive the cleanup"
+            );
+        }
     }
 }

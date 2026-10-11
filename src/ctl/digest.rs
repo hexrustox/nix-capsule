@@ -186,26 +186,58 @@ mod tests {
     }
 
     #[test]
-    fn freshness_matches_the_cached_hash_when_the_dump_exists() {
+    fn no_hash_file_yet_is_stale() {
         let cache = tempfile::tempdir().expect("tempdir");
         let root = tempfile::tempdir().expect("tempdir");
         write(&root.path().join("w.txt"), b"x");
-        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale,
             "no hash file yet"
         );
+    }
+
+    #[test]
+    fn stored_hash_of_unchanged_files_is_fresh() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().expect("tempdir");
+        write(&root.path().join("w.txt"), b"x");
+        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
+        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
         store(cache.path(), &digest).expect("store hash");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Fresh
         );
+    }
+
+    #[test]
+    fn stored_hash_of_changed_files_is_stale() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().expect("tempdir");
+        write(&root.path().join("w.txt"), b"x");
+        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
+        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
+        store(cache.path(), &digest).expect("store hash");
         write(&root.path().join("w.txt"), b"y");
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_with_an_unreadable_hash_file_is_stale() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().expect("tempdir");
+        write(&root.path().join("w.txt"), b"x");
+        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
+        fs::create_dir(hash_file(cache.path())).expect("directory at the hash path");
+        assert_eq!(
+            check(cache.path(), root.path(), &entries(&["w.txt"])),
+            Freshness::Stale,
+            "an unreadable hash file must not read as fresh even though the digest matches `compute`"
         );
     }
 
@@ -240,7 +272,12 @@ mod tests {
         // non-NotFound error even as root (permission bits are ignored
         // for root, so chmod-based fixtures would be flaky here).
         fs::create_dir_all(root.path().join("w.txt")).expect("watched dir");
-        assert!(compute(root.path(), &entries(&["w.txt"])).is_err());
+        let err = compute(root.path(), &entries(&["w.txt"])).expect_err("directory watch fails");
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::NotFound,
+            "a directory watch must fail with a non-NotFound error, got {err}"
+        );
         fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
         fs::write(hash_file(cache.path()), b"").expect("empty hash");
         assert_eq!(

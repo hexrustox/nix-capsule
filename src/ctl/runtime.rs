@@ -256,3 +256,34 @@ pub(super) fn is_name_in_use(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("already in use") || lower.contains("name in use")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use test_case::test_case;
+
+    use super::*;
+
+    #[test_case("Conflict. The container name \"/ncap-demo\" is already in use" => true ; "docker_wording_is_a_name_conflict")]
+    #[test_case("Error: name in use: ncap-demo" => true ; "podman_wording_is_a_name_conflict")]
+    #[test_case("Already In Use: ncap-demo" => true ; "case_insensitive_matches_either_wording")]
+    #[test_case("" => false ; "empty_stderr_is_no_conflict")]
+    #[test_case("no such container" => false ; "unrelated_stderr_is_no_conflict")]
+    fn recognizes_a_name_conflict_words(stderr: &str) -> bool {
+        is_name_in_use(stderr)
+    }
+
+    #[test_case(b"real failure\n", b"" => "real failure" ; "stderr_when_stderr_is_nonempty")]
+    #[test_case(b"   \n", b"stdout fallback\n" => "stdout fallback" ; "stdout_when_stderr_is_whitespace_only")]
+    #[test_case(b"", b"" => "" ; "empty_when_both_are_blank")]
+    fn captured_output_prefers_stderr_and_falls_back_to_stdout(
+        stderr: &[u8],
+        stdout: &[u8],
+    ) -> String {
+        captured_output(&std::process::Output {
+            status: std::process::ExitStatus::from_raw(0x100),
+            stderr: stderr.to_vec(),
+            stdout: stdout.to_vec(),
+        })
+    }
+}
