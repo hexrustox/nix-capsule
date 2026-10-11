@@ -412,7 +412,7 @@ mod tests {
 
     use test_case::test_case;
 
-    use super::build_env;
+    use super::{ClientError, build_env};
 
     /// A lookup over literal pairs, standing in for the process environment.
     fn lookup_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
@@ -465,15 +465,18 @@ mod tests {
     fn malformed_forward_is_an_error(forward: &str) {
         let err =
             build_env(&[], Some(forward), lookup_of(&[])).expect_err("malformed forward errors");
-        assert!(err.to_string().contains("NCAP_ENV_FORWARD"), "error={err}");
+        assert!(matches!(err, ClientError::ForwardEnv { .. }), "err={err:?}");
     }
 
-    #[test_case(&["=V"], "`--env` `=V`" ; "value_only")]
-    #[test_case(&["="], "`--env` `=`" ; "equals_alone")]
-    #[test_case(&[""], "`--env` ``" ; "empty_string")]
-    #[test_case(&["=V", "K=V"], "empty key" ; "errors_before_a_later_valid_flag_merges")]
-    fn empty_key_flag_is_an_error(cli: &[&str], expected_substring: &str) {
+    #[test_case(&["=V"], "=V" ; "value_only")]
+    #[test_case(&["="], "=" ; "equals_alone")]
+    #[test_case(&[""], "" ; "empty_string")]
+    #[test_case(&["=V", "K=V"], "=V" ; "errors_before_a_later_valid_flag_merges")]
+    fn empty_key_flag_is_an_error(cli: &[&str], expected_flag: &str) {
         let err = build_env(&owned(cli), None, lookup_of(&[])).expect_err("empty key errors");
-        assert!(err.to_string().contains(expected_substring), "error={err}");
+        let ClientError::EnvFlag { flag } = err else {
+            panic!("expected EnvFlag, got {err:?}");
+        };
+        assert_eq!(flag, expected_flag);
     }
 }

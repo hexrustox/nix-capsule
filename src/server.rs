@@ -756,8 +756,6 @@ fn epoch_millis() -> u128 {
 mod tests {
     use std::os::unix::process::CommandExt;
 
-    use proptest::prelude::*;
-
     use super::*;
 
     #[test]
@@ -782,42 +780,40 @@ mod tests {
         assert_eq!(format_utc(secs), expected);
     }
 
-    fn arb_log_level() -> impl Strategy<Value = LogLevel> {
-        prop_oneof![
-            Just(LogLevel::Debug),
-            Just(LogLevel::Info),
-            Just(LogLevel::Warning),
-            Just(LogLevel::Error),
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn log_emit_keeps_lines_at_or_above_the_minimum(min in arb_log_level()) {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let log = Log::start(dir.path(), min).expect("log starts");
-            log.debug("debug line");
-            log.info("info line");
-            log.warning("warning line");
-            log.error("error line");
-            let entries: Vec<PathBuf> = std::fs::read_dir(dir.path())
-                .expect("log dir")
-                .map(|entry| entry.expect("log dir entry").path())
-                .collect();
-            let logged = std::fs::read_to_string(&entries[0]).expect("read log file");
-            for (level, marker) in [
-                (LogLevel::Debug, "debug line"),
-                (LogLevel::Info, "info line"),
-                (LogLevel::Warning, "warning line"),
-                (LogLevel::Error, "error line"),
-            ] {
-                if level.rank() >= min.rank() {
-                    prop_assert!(logged.contains(&format!("{level}: {marker}")),
-                        "must keep {marker} at min {min}: {logged:?}");
-                } else {
-                    prop_assert!(!logged.contains(marker),
-                        "must drop {marker} below min {min}: {logged:?}");
-                }
+    #[test_case::test_case(LogLevel::Debug ; "minimum_debug_keeps_every_level")]
+    #[test_case::test_case(LogLevel::Info ; "minimum_info_drops_debug")]
+    #[test_case::test_case(LogLevel::Warning ; "minimum_warning_drops_debug_and_info")]
+    #[test_case::test_case(LogLevel::Error ; "minimum_error_keeps_only_error")]
+    fn log_emit_keeps_lines_at_or_above_the_minimum(min: LogLevel) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = Log::start(dir.path(), min).expect("log starts");
+        log.debug("debug line");
+        log.info("info line");
+        log.warning("warning line");
+        log.error("error line");
+        let mut entries = std::fs::read_dir(dir.path())
+            .expect("log dir")
+            .map(|entry| entry.expect("log dir entry").path())
+            .collect::<Vec<PathBuf>>();
+        entries.sort();
+        assert_eq!(entries.len(), 1, "one log file expected, got {entries:?}");
+        let logged = std::fs::read_to_string(&entries[0]).expect("read log file");
+        for (level, marker) in [
+            (LogLevel::Debug, "debug line"),
+            (LogLevel::Info, "info line"),
+            (LogLevel::Warning, "warning line"),
+            (LogLevel::Error, "error line"),
+        ] {
+            if level.rank() >= min.rank() {
+                assert!(
+                    logged.contains(&format!("{level}: {marker}")),
+                    "must keep {marker} at min {min}: {logged:?}"
+                );
+            } else {
+                assert!(
+                    !logged.contains(marker),
+                    "must drop {marker} below min {min}: {logged:?}"
+                );
             }
         }
     }
