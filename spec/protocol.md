@@ -15,7 +15,8 @@ payload.
   payload is JSON.
 - Stream frames (`Stdin`, `Stdout`, `Stderr`): payload is raw bytes. Producers
   chunk ~8 KiB; framing is chunk-agnostic — receivers make no assumption about
-  chunk boundaries.
+  chunk boundaries. An incomplete header or payload yields no frame — bytes
+  buffer until the frame is complete.
 - Payload length is capped at **16 MiB**. The cap is checked on the header
   before any payload bytes are buffered. A frame declaring more is a
   transport violation: the receiver treats the connection as failed (the
@@ -35,15 +36,18 @@ payload.
 | `0x07` | `ServerStopping` | server → client | empty |
 | `0x08` | `Version` | (none) | reserved — sent by no one; a receiver ignores it wherever it arrives |
 | `0x09` | `Signal` | client → server | `{ "signal": u8 }` (POSIX signal number, e.g. 2, 9, 15) |
-| `0x0A` | `RequestVersion` | client → server | empty — exactly 0 bytes |
+| `0x0A` | `RequestVersion` | client → server | empty |
 | `0x0B` | `ServerVersion` | server → client | `{ "version": str }` |
 
 JSON conventions:
 
 - Receivers tolerate unknown JSON fields.
-- Receivers reject a `ServerStopping` frame with a non-empty payload and an
+- Receivers reject a `ServerStopping` frame with a non-empty payload, a
+  `RequestVersion` frame with a non-empty payload, and an
   `Exit` frame with both `code` and `signal` set. (`None`, `None` is the
   unknowable-status exception, spec/server.md § Connection handling.)
+- A struct payload that is not valid JSON for its shape is rejected as a
+  decode failure, never a panic; framing already accepted the bytes.
 
 ## Connection lifecycle
 
