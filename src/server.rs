@@ -759,24 +759,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signal_to_a_reaped_group_maps_esrch() {
+    fn signal_to_a_reaped_group_maps_esrch() -> Result<(), Box<dyn std::error::Error>> {
         let mut child = std::process::Command::new("true")
             .process_group(0)
-            .spawn()
-            .expect("spawn");
+            .spawn()?;
         let pgid = child.id();
-        assert!(child.wait().expect("wait").success());
+        assert!(child.wait()?.success());
 
         let err = signal_group(pgid, libc::SIGTERM as u8)
             .expect_err("a reaped group cannot be signalled");
 
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "err={err}");
+        Ok(())
     }
 
     #[test_case::test_case(0, "1970-01-01T00:00:00Z"; "epoch")]
     #[test_case::test_case(86_399, "1970-01-01T23:59:59Z"; "end of day one")]
     #[test_case::test_case(951_782_400, "2000-02-29T00:00:00Z"; "leap day 2000")]
-    fn rfc3339_utc_formats_known_instants(secs: u64, expected: &str) {
+    fn format_utc_renders_known_instants(secs: u64, expected: &str) {
         assert_eq!(format_utc(secs), expected);
     }
 
@@ -784,20 +784,21 @@ mod tests {
     #[test_case::test_case(LogLevel::Info ; "minimum_info_drops_debug")]
     #[test_case::test_case(LogLevel::Warning ; "minimum_warning_drops_debug_and_info")]
     #[test_case::test_case(LogLevel::Error ; "minimum_error_keeps_only_error")]
-    fn log_emit_keeps_lines_at_or_above_the_minimum(min: LogLevel) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log = Log::start(dir.path(), min).expect("log starts");
+    fn log_emit_keeps_lines_at_or_above_the_minimum(
+        min: LogLevel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let log = Log::start(dir.path(), min)?;
         log.debug("debug line");
         log.info("info line");
         log.warning("warning line");
         log.error("error line");
-        let mut entries = std::fs::read_dir(dir.path())
-            .expect("log dir")
-            .map(|entry| entry.expect("log dir entry").path())
-            .collect::<Vec<PathBuf>>();
+        let mut entries = std::fs::read_dir(dir.path())?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<PathBuf>, std::io::Error>>()?;
         entries.sort();
         assert_eq!(entries.len(), 1, "one log file expected, got {entries:?}");
-        let logged = std::fs::read_to_string(&entries[0]).expect("read log file");
+        let logged = std::fs::read_to_string(&entries[0])?;
         for (level, marker) in [
             (LogLevel::Debug, "debug line"),
             (LogLevel::Info, "info line"),
@@ -816,5 +817,6 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 }

@@ -102,6 +102,7 @@ const SHUTDOWN_EXIT: i32 = 128 + libc::SIGTERM;
 
 /// Outcome of a session: the exit code the client process reports plus any
 /// notice the entry point renders on stderr before exiting.
+#[derive(Debug)]
 struct Outcome {
     code: i32,
     notice: Option<String>,
@@ -412,25 +413,9 @@ mod tests {
 
     use test_case::test_case;
 
-    use super::{ClientError, build_env};
-
-    /// A lookup over literal pairs, standing in for the process environment.
-    fn lookup_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
-        move |name| {
-            pairs
-                .iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| OsString::from(value.to_string()))
-        }
-    }
-
-    fn owned(items: &[&str]) -> Vec<OsString> {
-        items.iter().map(OsString::from).collect()
-    }
-
-    fn expected_strings(items: &[&str]) -> Vec<String> {
-        items.iter().map(|item| item.to_string()).collect()
-    }
+    use super::*;
+    use crate::ctl::test_helper::os_lookup_of as lookup_of;
+    use crate::protocol::Exit;
 
     #[test_case(&["K=V"], None, &[], &["K=V"] ; "explicit_key_value_passes_through")]
     #[test_case(&["K"], None, &[("K", "host")], &["K=host"] ; "bare_key_copies_when_set")]
@@ -454,9 +439,10 @@ mod tests {
         forward: Option<&str>,
         host: &[(&str, &str)],
         expected: &[&str],
-    ) {
-        let merged = build_env(&owned(cli), forward, lookup_of(host)).expect("merge succeeds");
+    ) -> Result<(), ClientError> {
+        let merged = build_env(&owned(cli), forward, lookup_of(host))?;
         assert_eq!(merged, expected_strings(expected));
+        Ok(())
     }
 
     #[test_case("not json" ; "malformed_json")]
@@ -478,5 +464,49 @@ mod tests {
             panic!("expected EnvFlag, got {err:?}");
         };
         assert_eq!(flag, expected_flag);
+    }
+
+    #[test_case(Some(127), None, 127, Some("sh: command not found") ; "code_127_notices_command_not_found")]
+    #[test_case(Some(126), None, 126, Some("sh: permission denied") ; "code_126_notices_permission_denied")]
+    #[test_case(Some(3), None, 3, None ; "any_other_code_reports_bare")]
+    #[test_case(None, Some(15), 143, None ; "signal_reports_128_plus_signal")]
+    fn exit_status_classifies_into_the_reported_outcome(
+        code: Option<u8>,
+        signal: Option<u8>,
+        expected_code: i32,
+        expected_notice: Option<&str>,
+    ) {
+        let outcome = exit_outcome(&Exit { code, signal }, "sh").expect("exit classifies");
+        assert_eq!(outcome.code, expected_code);
+        match (outcome.notice.as_deref(), expected_notice) {
+            (Some(actual), Some(expected)) => {
+                assert_eq!(actual, expected);
+            }
+            (None, None) => {}
+            (actual, expected) => {
+                panic!("notice mismatch: got {actual:?}, expected {expected:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn exit_with_neither_code_nor_signal_is_an_error() {
+        let err = exit_outcome(
+            &Exit {
+                code: None,
+                signal: None,
+            },
+            "sh",
+        )
+        .expect_err("neither code nor signal errors");
+        assert!(matches!(err, ClientError::MissingExitStatus), "err={err:?}");
+    }
+
+    fn owned(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    fn expected_strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
     }
 }

@@ -1,6 +1,5 @@
 //! XDG layout with the `$TMPDIR` fallback for the runtime dir.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -17,19 +16,13 @@ pub(crate) struct NoHomeError {
 /// (absolute, per the XDG spec), else `$TMPDIR` — defaulting to `/tmp` —
 /// per the flat fallback of ADR-0001. `dirs` knows nothing of `$TMPDIR`,
 /// so the fallback stays here.
-pub(super) fn socket_path(project: &str) -> PathBuf {
-    socket_dir(
-        dirs::runtime_dir().as_deref(),
-        std::env::var_os("TMPDIR").as_deref(),
-        project,
-    )
-}
-
-/// [`socket_path`] with the env inputs injected: the XDG runtime dir as
-/// `dirs::runtime_dir()` reports it, the `$TMPDIR` value or `None` when
-/// unset.
-fn socket_dir(runtime_dir: Option<&Path>, tmpdir: Option<&OsStr>, project: &str) -> PathBuf {
-    let base = match (runtime_dir, tmpdir.filter(|value| !value.is_empty())) {
+pub(crate) fn socket_path(project: &str) -> PathBuf {
+    let runtime_dir = dirs::runtime_dir();
+    let tmpdir = std::env::var_os("TMPDIR");
+    let base = match (
+        runtime_dir.as_deref(),
+        tmpdir.as_deref().filter(|value| !value.is_empty()),
+    ) {
         (Some(dir), _) => dir.join("nix-capsule").join(project),
         (None, Some(tmpdir)) => Path::new(tmpdir)
             .to_path_buf()
@@ -151,7 +144,12 @@ pub(super) fn ensure_dir_0700(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
+    use serial_test::serial;
     use test_case::test_case;
+
+    use crate::ctl::test_helper::EnvGuard;
 
     use super::*;
 
@@ -167,109 +165,223 @@ mod tests {
         parse_server_log_epoch(name)
     }
 
-    /// Seed each filename into a fresh log dir (bodies never matter) and
-    /// return the epochs `sorted_server_logs` lists ascending.
-    fn scanned_epochs(seeded: &[&str]) -> Vec<u64> {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for name in seeded {
-            fs::write(dir.path().join(name), "line").expect("log file");
-        }
-        sorted_server_logs(dir.path())
-            .into_iter()
-            .map(|log| log.epoch)
-            .collect::<Vec<_>>()
-    }
-
-    #[test_case(&["ncap-server-500.log", "ncap-server-70.log", "ncap-server-5.log"] => vec![5u64, 70, 500] ; "numerically_not_lexically_sorted_ascending")]
-    #[test_case(&["ncap-server-999.log", "ncap-server-100.log"] => vec![100u64, 999] ; "two_epochs_sort_ascending")]
-    #[test_case(&["ncap-server-7.log"] => vec![7u64] ; "one_epoch_sorts_as_itself")]
-    #[test_case(&["not-a-server-log.txt", "ncap-server-3.log.bak", "sub"] => vec![] as Vec<u64> ; "foreign_entries_are_ignored")]
-    #[test_case(&[] => vec![] as Vec<u64> ; "no_log_files_is_empty")]
-    fn scans_log_files_epoch_ascending_ignoring_foreigners(seeded: &[&str]) -> Vec<u64> {
+    #[test_case(&["ncap-server-500.log", "ncap-server-70.log", "ncap-server-5.log"] => matches Ok(v) if v == vec![5u64, 70, 500] ; "numerically_not_lexically_sorted_ascending")]
+    #[test_case(&["ncap-server-999.log", "ncap-server-100.log"] => matches Ok(v) if v == vec![100u64, 999] ; "two_epochs_sort_ascending")]
+    #[test_case(&["ncap-server-7.log"] => matches Ok(v) if v == vec![7u64] ; "one_epoch_sorts_as_itself")]
+    #[test_case(&["not-a-server-log.txt", "ncap-server-3.log.bak", "sub"] => matches Ok(v) if v.is_empty() ; "foreign_entries_are_ignored")]
+    #[test_case(&[] => matches Ok(v) if v.is_empty() ; "no_log_files_is_empty")]
+    fn scans_log_files_epoch_ascending_ignoring_foreigners(
+        seeded: &[&str],
+    ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
         scanned_epochs(seeded)
     }
 
+    /// Seed each filename into a fresh log dir (bodies never matter) and
+    /// return the epochs `sorted_server_logs` lists ascending.
+    fn scanned_epochs(seeded: &[&str]) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        for name in seeded {
+            fs::write(dir.path().join(name), "line")?;
+        }
+        Ok(sorted_server_logs(dir.path())
+            .into_iter()
+            .map(|log| log.epoch)
+            .collect())
+    }
+
     #[test]
-    fn scan_of_a_missing_dir_is_empty_not_an_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn scan_of_a_missing_dir_is_empty_not_an_error() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let entries = sorted_server_logs(&dir.path().join("absent"));
         assert!(
             entries.is_empty(),
             "a missing log dir reads as no log files: {entries:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_non_utf8_filename_is_not_counted_as_a_server_log() {
+    fn a_non_utf8_filename_is_not_counted_as_a_server_log() -> Result<(), Box<dyn std::error::Error>>
+    {
         use std::os::unix::ffi::OsStrExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let name = std::ffi::OsStr::from_bytes(b"ncap-server-\xff\xfe.log");
-        fs::write(dir.path().join(name), "line").expect("log file");
+        let dir = tempfile::tempdir()?;
+        let name = OsStr::from_bytes(b"ncap-server-\xff\xfe.log");
+        fs::write(dir.path().join(name), "line")?;
         let logs = sorted_server_logs(dir.path());
         assert!(
             logs.is_empty(),
             "lossy-decoded invalid bytes are not digit epochs, scanned: {logs:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn creates_nested_dir_with_mode_0700() {
-        let outer = tempfile::tempdir().expect("tempdir");
+    fn creates_nested_dir_with_mode_0700() -> Result<(), Box<dyn std::error::Error>> {
+        let outer = tempfile::tempdir()?;
         let nested = outer.path().join("a").join("b");
-        ensure_dir_0700(&nested).expect("create");
-        let mode = fs::metadata(&nested)
-            .expect("metadata")
-            .permissions()
-            .mode();
+        ensure_dir_0700(&nested)?;
+        let mode = fs::metadata(&nested)?.permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "created dir mode: {mode:o}");
+        Ok(())
     }
 
     #[test]
-    fn existing_dir_keeps_its_permissions() {
-        let outer = tempfile::tempdir().expect("tempdir");
+    fn existing_dir_keeps_its_permissions() -> Result<(), Box<dyn std::error::Error>> {
+        let outer = tempfile::tempdir()?;
         let existing = outer.path().join("existing");
-        fs::create_dir(&existing).expect("seed dir");
-        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).expect("seed mode");
+        fs::create_dir(&existing)?;
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755))?;
 
-        ensure_dir_0700(&existing).expect("ensure");
+        ensure_dir_0700(&existing)?;
 
-        let mode = fs::metadata(&existing)
-            .expect("metadata")
-            .permissions()
-            .mode();
+        let mode = fs::metadata(&existing)?.permissions().mode();
         assert_eq!(
             mode & 0o777,
             0o755,
             "existing dir mode after ensure: {mode:o}"
         );
+        Ok(())
     }
 
-    #[test_case(
-        Some("/run/user/1000".as_ref()), Some("/var/tmp".as_ref()) =>
-        "/run/user/1000/nix-capsule/demo/ncap.sock" ;
-        "xdg_runtime_dir_wins"
-    )]
-    #[test_case(
-        None, Some("/var/tmp".as_ref()) =>
-        "/var/tmp/nix-capsule/demo/ncap.sock" ;
-        "tmpdir_is_second_choice"
-    )]
-    #[test_case(
-        None, Some("".as_ref()) =>
-        "/tmp/nix-capsule/demo/ncap.sock" ;
-        "empty_tmpdir_is_ignored_for_tmp"
-    )]
-    #[test_case(
-        None, None =>
-        "/tmp/nix-capsule/demo/ncap.sock" ;
-        "no_runtime_or_tmpdir_defaults_to_tmp"
-    )]
-    fn places_socket_in_the_runtime_or_tmpdir(
-        runtime_dir: Option<&Path>,
-        tmpdir: Option<&OsStr>,
-    ) -> String {
-        socket_dir(runtime_dir, tmpdir, "demo")
-            .to_string_lossy()
-            .into_owned()
+    #[test]
+    fn log_paths_point_at_the_seeded_files() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        for name in [
+            "ncap-server-70.log",
+            "ncap-server-500.log",
+            "ncap-server-5.log",
+        ] {
+            fs::write(dir.path().join(name), "line")?;
+        }
+
+        let got: Vec<(u64, PathBuf)> = sorted_server_logs(dir.path())
+            .into_iter()
+            .map(|log| (log.epoch, log.path))
+            .collect();
+        let expected: Vec<(u64, PathBuf)> = [5, 70, 500]
+            .map(|epoch| (epoch, dir.path().join(format!("ncap-server-{epoch}.log"))))
+            .into_iter()
+            .collect();
+        assert_eq!(got, expected, "scanned logs: {got:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn server_log_path_round_trips_through_the_parser() {
+        let dir = Path::new("/state/logs");
+        for epoch in [1u128, 1729512345678] {
+            let path = server_log_path(dir, epoch);
+            assert_eq!(path, dir.join(format!("ncap-server-{epoch}.log")));
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("file name is plain ascii");
+            assert_eq!(
+                parse_server_log_epoch(name),
+                Some(epoch.try_into().expect("epoch fits u64")),
+                "epoch {epoch} round-trips: {name}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn socket_prefers_the_xdg_runtime_dir() {
+        let _xdg = EnvGuard::set("XDG_RUNTIME_DIR", "/run/user/1000");
+        for tmpdir in ["", "/var/tmp"] {
+            let _tmp = EnvGuard::set("TMPDIR", tmpdir);
+            assert_eq!(
+                socket_path("demo"),
+                PathBuf::from("/run/user/1000/nix-capsule/demo/ncap.sock"),
+                "TMPDIR {tmpdir:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn socket_falls_back_to_tmpdir() {
+        let _xdg = EnvGuard::unset("XDG_RUNTIME_DIR");
+        let _tmp = EnvGuard::set("TMPDIR", "/var/tmp");
+        assert_eq!(
+            socket_path("demo"),
+            PathBuf::from("/var/tmp/nix-capsule/demo/ncap.sock")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn socket_treats_an_empty_tmpdir_as_unset() {
+        let _xdg = EnvGuard::unset("XDG_RUNTIME_DIR");
+        let _tmp = EnvGuard::set("TMPDIR", "");
+        assert_eq!(
+            socket_path("demo"),
+            PathBuf::from("/tmp/nix-capsule/demo/ncap.sock")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn socket_defaults_to_tmp_when_nothing_is_set() {
+        let _xdg = EnvGuard::unset("XDG_RUNTIME_DIR");
+        let _tmp = EnvGuard::unset("TMPDIR");
+        assert_eq!(
+            socket_path("demo"),
+            PathBuf::from("/tmp/nix-capsule/demo/ncap.sock")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cache_dir_honors_xdg_cache_home_then_home() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let cache = home.path().join("cache");
+
+        {
+            let _xdg = EnvGuard::set("XDG_CACHE_HOME", cache.as_os_str());
+            assert_eq!(cache_dir("demo")?, cache.join("nix-capsule").join("demo"));
+        }
+
+        // `dirs` computes the `$HOME/.cache` fallback internally, so what a
+        // test can pin through env is only that the fallback is passed
+        // through joined with the project name.
+        {
+            let _xdg = EnvGuard::unset("XDG_CACHE_HOME");
+            let _home = EnvGuard::set("HOME", home.path());
+            assert_eq!(
+                cache_dir("demo")?,
+                home.path().join(".cache").join("nix-capsule").join("demo")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn log_dir_honors_xdg_state_home_then_home() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let state = home.path().join("state");
+
+        {
+            let _xdg = EnvGuard::set("XDG_STATE_HOME", state.as_os_str());
+            assert_eq!(
+                log_dir("demo")?,
+                state.join("nix-capsule").join("demo").join("logs")
+            );
+        }
+
+        {
+            let _xdg = EnvGuard::unset("XDG_STATE_HOME");
+            let _home = EnvGuard::set("HOME", home.path());
+            assert_eq!(
+                log_dir("demo")?,
+                home.path()
+                    .join(".local/state")
+                    .join("nix-capsule")
+                    .join("demo")
+                    .join("logs")
+            );
+        }
+        Ok(())
     }
 }

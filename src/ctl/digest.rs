@@ -88,81 +88,90 @@ impl Write for HashWriter<'_> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     fn entries(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
     }
 
-    fn write(path: &Path, contents: &[u8]) {
+    fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent");
+            fs::create_dir_all(parent)?;
         }
-        fs::write(path, contents).expect("write fixture");
+        fs::write(path, contents)
     }
 
     #[test]
-    fn empty_watch_list_is_the_empty_input_xxhash64_vector() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let digest = compute(root.path(), &[]).expect("digest");
+    fn empty_watch_list_is_the_empty_input_xxhash64_vector()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let digest = compute(root.path(), &[])?;
         assert_eq!(digest, "ef46db3751d8e999");
+        Ok(())
     }
 
     #[test]
-    fn digest_is_independent_of_entry_order() {
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("a.txt"), b"alpha");
-        write(&root.path().join("b.txt"), b"beta");
-        let one = compute(root.path(), &entries(&["a.txt", "b.txt"])).expect("digest");
-        let two = compute(root.path(), &entries(&["b.txt", "a.txt"])).expect("digest");
+    fn digest_is_independent_of_entry_order() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        write(&root.path().join("a.txt"), b"alpha")?;
+        write(&root.path().join("b.txt"), b"beta")?;
+        let one = compute(root.path(), &entries(&["a.txt", "b.txt"]))?;
+        let two = compute(root.path(), &entries(&["b.txt", "a.txt"]))?;
         assert_eq!(one, two);
+        Ok(())
     }
 
     #[test]
-    fn content_change_flips_digest() {
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"before");
-        let before = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        write(&root.path().join("w.txt"), b"after");
-        let after = compute(root.path(), &entries(&["w.txt"])).expect("digest");
+    fn content_change_flips_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"before")?;
+        let before = compute(root.path(), &entries(&["w.txt"]))?;
+        write(&root.path().join("w.txt"), b"after")?;
+        let after = compute(root.path(), &entries(&["w.txt"]))?;
         assert_ne!(before, after);
+        Ok(())
     }
 
     #[test]
-    fn appearing_or_disappearing_file_flips_digest() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let absent = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        write(&root.path().join("w.txt"), b"");
-        let empty_but_present = compute(root.path(), &entries(&["w.txt"])).expect("digest");
+    fn appearing_or_disappearing_file_flips_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let absent = compute(root.path(), &entries(&["w.txt"]))?;
+        write(&root.path().join("w.txt"), b"")?;
+        let empty_but_present = compute(root.path(), &entries(&["w.txt"]))?;
         assert_ne!(absent, empty_but_present);
+        Ok(())
     }
 
     #[test]
-    fn mtime_only_touch_keeps_digest() {
-        let root = tempfile::tempdir().expect("tempdir");
+    fn mtime_only_touch_keeps_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
         let path = root.path().join("w.txt");
-        write(&path, b"same");
-        let first = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        write(&path, b"same");
-        let second = compute(root.path(), &entries(&["w.txt"])).expect("digest");
+        write(&path, b"same")?;
+        let first = compute(root.path(), &entries(&["w.txt"]))?;
+        write(&path, b"same")?;
+        let second = compute(root.path(), &entries(&["w.txt"]))?;
         assert_eq!(first, second);
+        Ok(())
     }
 
     #[test]
-    fn nested_entries_hash_under_their_relative_path() {
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("dir/w.txt"), b"same");
-        let flat = compute(root.path(), &entries(&["dir/w.txt"])).expect("digest");
-        write(&root.path().join("other/w.txt"), b"same");
-        let moved = compute(root.path(), &entries(&["other/w.txt"])).expect("digest");
+    fn nested_entries_hash_under_their_relative_path() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        write(&root.path().join("dir/w.txt"), b"same")?;
+        let flat = compute(root.path(), &entries(&["dir/w.txt"]))?;
+        write(&root.path().join("other/w.txt"), b"same")?;
+        let moved = compute(root.path(), &entries(&["other/w.txt"]))?;
         assert_ne!(flat, moved, "the relative path is part of the record");
+        Ok(())
     }
 
     #[test]
-    fn digest_is_lowercase_hex_without_a_newline() {
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"contents");
-        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
+    fn digest_is_lowercase_hex_without_a_newline() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"contents")?;
+        let digest = compute(root.path(), &entries(&["w.txt"]))?;
         assert_eq!(digest.len(), 16, "digest={digest}");
         assert!(
             digest
@@ -170,120 +179,130 @@ mod tests {
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
             "digest={digest}"
         );
+        Ok(())
     }
 
     #[test]
-    fn freshness_is_missing_without_an_env_dump() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"x");
-        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        store(cache.path(), &digest).expect("store hash");
+    fn freshness_is_missing_without_an_env_dump() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"x")?;
+        let digest = compute(root.path(), &entries(&["w.txt"]))?;
+        store(cache.path(), &digest)?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Missing
         );
+        Ok(())
     }
 
     #[test]
-    fn no_hash_file_yet_is_stale() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"x");
-        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
+    fn no_hash_file_yet_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"x")?;
+        fs::write(env_file(cache.path()), b"export FOO=bar")?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale,
             "no hash file yet"
         );
+        Ok(())
     }
 
     #[test]
-    fn stored_hash_of_unchanged_files_is_fresh() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"x");
-        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        store(cache.path(), &digest).expect("store hash");
+    fn stored_hash_of_unchanged_files_is_fresh() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"x")?;
+        let digest = compute(root.path(), &entries(&["w.txt"]))?;
+        fs::write(env_file(cache.path()), b"export FOO=bar")?;
+        store(cache.path(), &digest)?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Fresh
         );
+        Ok(())
     }
 
     #[test]
-    fn stored_hash_of_changed_files_is_stale() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"x");
-        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        store(cache.path(), &digest).expect("store hash");
-        write(&root.path().join("w.txt"), b"y");
+    fn stored_hash_of_changed_files_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"x")?;
+        let digest = compute(root.path(), &entries(&["w.txt"]))?;
+        fs::write(env_file(cache.path()), b"export FOO=bar")?;
+        store(cache.path(), &digest)?;
+        write(&root.path().join("w.txt"), b"y")?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale
         );
+        Ok(())
     }
 
     #[test]
-    fn freshness_with_an_unreadable_hash_file_is_stale() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"x");
-        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        fs::create_dir(hash_file(cache.path())).expect("directory at the hash path");
+    fn freshness_with_an_unreadable_hash_file_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"x")?;
+        fs::write(env_file(cache.path()), b"export FOO=bar")?;
+        fs::create_dir(hash_file(cache.path()))?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale,
             "an unreadable hash file must not read as fresh even though the digest matches `compute`"
         );
+        Ok(())
     }
 
     #[test]
-    fn stored_hash_has_no_trailing_newline() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        store(cache.path(), "0123456789abcdef").expect("store");
-        let raw = fs::read(hash_file(cache.path())).expect("hash file");
+    fn stored_hash_has_no_trailing_newline() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        store(cache.path(), "0123456789abcdef")?;
+        let raw = fs::read(hash_file(cache.path()))?;
         assert_eq!(raw, b"0123456789abcdef");
+        Ok(())
     }
 
     #[test]
-    fn freshness_tolerates_a_trailing_newline_in_the_cached_hash() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("w.txt"), b"x");
-        let digest = compute(root.path(), &entries(&["w.txt"])).expect("digest");
-        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        fs::write(hash_file(cache.path()), format!("{digest}\n")).expect("hash with newline");
+    fn freshness_tolerates_a_trailing_newline_in_the_cached_hash()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
+        write(&root.path().join("w.txt"), b"x")?;
+        let digest = compute(root.path(), &entries(&["w.txt"]))?;
+        fs::write(env_file(cache.path()), b"export FOO=bar")?;
+        fs::write(hash_file(cache.path()), format!("{digest}\n"))?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Fresh,
             "a trailing newline must read as fresh, matching `status`"
         );
+        Ok(())
     }
 
     #[test]
-    fn computed_error_reads_stale_never_fresh() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        let root = tempfile::tempdir().expect("tempdir");
+    fn computed_error_reads_stale_never_fresh() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        let root = tempdir()?;
         // A directory at a watched path makes `of()` fail with a
         // non-NotFound error even as root (permission bits are ignored
         // for root, so chmod-based fixtures would be flaky here).
-        fs::create_dir_all(root.path().join("w.txt")).expect("watched dir");
+        fs::create_dir_all(root.path().join("w.txt"))?;
         let err = compute(root.path(), &entries(&["w.txt"])).expect_err("directory watch fails");
         assert_ne!(
             err.kind(),
             io::ErrorKind::NotFound,
             "a directory watch must fail with a non-NotFound error, got {err}"
         );
-        fs::write(env_file(cache.path()), b"export FOO=bar").expect("env dump");
-        fs::write(hash_file(cache.path()), b"").expect("empty hash");
+        fs::write(env_file(cache.path()), b"export FOO=bar")?;
+        fs::write(hash_file(cache.path()), b"")?;
         assert_eq!(
             check(cache.path(), root.path(), &entries(&["w.txt"])),
             Freshness::Stale,
             "computed-error plus empty cached hash must not read as fresh"
         );
+        Ok(())
     }
 }

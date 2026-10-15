@@ -60,28 +60,31 @@ pub(super) fn guard(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
-    fn absent_stamp_is_written() {
-        let cache = tempfile::tempdir().expect("tempdir");
+    fn absent_stamp_is_written() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
         let root = Path::new("/tmp/my-root");
-        guard(cache.path(), "proj", root).expect("guard");
-        let stored = fs::read_to_string(project_stamp_file(cache.path())).expect("stamp file");
+        guard(cache.path(), "proj", root)?;
+        let stored = fs::read_to_string(project_stamp_file(cache.path()))?;
         assert_eq!(stored, "/tmp/my-root");
+        Ok(())
     }
 
     #[test]
-    fn accepts_same_root_on_second_guard() {
-        let cache = tempfile::tempdir().expect("tempdir");
+    fn accepts_same_root_on_second_guard() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
         let root = Path::new("/tmp/my-root");
-        guard(cache.path(), "proj", root).expect("first guard");
-        guard(cache.path(), "proj", root).expect("second guard with same root");
+        guard(cache.path(), "proj", root)?;
+        guard(cache.path(), "proj", root)?;
+        Ok(())
     }
 
     #[test]
-    fn different_root_is_a_hard_error() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        guard(cache.path(), "proj", Path::new("/tmp/root-a")).expect("first guard");
+    fn different_root_is_a_hard_error() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        guard(cache.path(), "proj", Path::new("/tmp/root-a"))?;
         let err = guard(cache.path(), "proj", Path::new("/tmp/root-b")).expect_err("must error");
         assert!(
             matches!(
@@ -90,33 +93,38 @@ mod tests {
             ),
             "err={err:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_stamp_with_trailing_newlines_matches_the_bare_root() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        fs::write(project_stamp_file(cache.path()), "/tmp/my-root\r\n").expect("stamp file");
-        guard(cache.path(), "proj", Path::new("/tmp/my-root"))
-            .expect("a trimmed stamp must match the same root");
+    fn a_stamp_with_trailing_newlines_matches_the_bare_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
+        fs::write(project_stamp_file(cache.path()), "/tmp/my-root\r\n")?;
+        guard(cache.path(), "proj", Path::new("/tmp/my-root"))?;
+        Ok(())
     }
 
     #[test]
-    fn absent_cache_dir_is_created_before_writing() {
-        let cache = tempfile::tempdir().expect("tempdir");
+    fn absent_cache_dir_is_created_before_writing() -> Result<(), Box<dyn std::error::Error>> {
+        let cache = tempdir()?;
         let nested = cache.path().join("cache");
-        guard(&nested, "proj", Path::new("/tmp/my-root")).expect("guard succeeds");
-        let stored = fs::read_to_string(project_stamp_file(&nested)).expect("stamp file written");
+        guard(&nested, "proj", Path::new("/tmp/my-root"))?;
+        let stored = fs::read_to_string(project_stamp_file(&nested))?;
         assert_eq!(stored, "/tmp/my-root");
+        Ok(())
     }
 
     #[test]
-    fn a_read_failure_other_than_absence_is_an_fs_error() {
-        let cache = tempfile::tempdir().expect("tempdir");
-        fs::create_dir(project_stamp_file(cache.path())).expect("directory at the stamp path");
+    fn a_read_failure_other_than_absence_is_an_fs_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cache = tempdir()?;
+        fs::create_dir(project_stamp_file(cache.path()))?;
         let err = guard(cache.path(), "proj", Path::new("/tmp/my-root")).expect_err("must error");
         assert!(
             matches!(err, StampError::Fs(FsError::Read { .. })),
             "a read failure that is not `NotFound` must surface as `StampError::Fs` carrying the read, got {err:?}"
         );
+        Ok(())
     }
 }

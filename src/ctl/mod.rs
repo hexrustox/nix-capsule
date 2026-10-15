@@ -10,6 +10,8 @@ pub(crate) mod paths;
 pub(crate) mod runtime;
 pub(crate) mod shell;
 pub(crate) mod stamp;
+#[cfg(test)]
+pub(crate) mod test_helper;
 pub(crate) mod version;
 
 use std::fs;
@@ -917,21 +919,11 @@ fn is_env_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::ctl::test_helper::lookup_of;
+
     use super::*;
     use std::io::Write;
     use test_case::test_case;
-
-    /// A lookup over literal pairs, standing in for the process environment.
-    /// Absent names yield `None`, the same signal `expand_one` gets from
-    /// `std::env::var(..).ok()`.
-    fn lookup_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        move |name| {
-            pairs
-                .iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.to_string())
-        }
-    }
 
     #[test_case("prefix-$A-suffix", &[("A", "hello")], "prefix-hello-suffix" ; "dollar_var_mid_string")]
     #[test_case("a-${A}-b", &[("A", "world")], "a-world-b" ; "braced_var_mid_string")]
@@ -940,9 +932,14 @@ mod tests {
     #[test_case("a-$A-b", &[("A", "")], "a--b" ; "empty_value_is_empty_not_error")]
     #[test_case("a-${A}-b", &[("A", "")], "a--b" ; "braced_empty_value_is_empty_not_error")]
     #[test_case("-v $A:/mnt", &[("A", "/tmp/foo bar")], "-v /tmp/foo bar:/mnt" ; "space_value_stays_one_arg")]
-    fn expands_set_vars(template: &str, env: &[(&str, &str)], want: &str) {
-        let out = expand_with(template, &lookup_of(env)).expect("expand succeeds");
+    fn expands_set_vars(
+        template: &str,
+        env: &[(&str, &str)],
+        want: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let out = expand_with(template, &lookup_of(env))?;
         assert_eq!(out, want, "template={template}");
+        Ok(())
     }
 
     #[test_case("literal-no-dollar" ; "plain_text")]
@@ -956,9 +953,8 @@ mod tests {
     #[test_case("$$" ; "double_dollar")]
     #[test_case("$-x" ; "dollar_dash_is_not_a_name")]
     #[test_case("${5-NC AP}" ; "invalid_name_never_consults_env")]
+    #[test_case("" ; "empty_input_stays_empty")]
     fn leaves_non_names_literal(input: &str) {
-        // Invalid braced names never consult the environment and never error,
-        // even when the text inside names a variable set to another value.
         let out =
             expand_with(input, &lookup_of(&[("5", "set"), ("foo", "set")])).expect("literal stays");
         assert_eq!(out, input);
@@ -975,35 +971,21 @@ mod tests {
         );
     }
 
-    /// A writer reporting a write failure of the given `kind` — the
-    /// stand-in for stdout when the consumer misbehaves.
-    struct FailingWriter {
-        kind: io::ErrorKind,
-    }
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(self.kind, "sink says no"))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test_case("newest run line\n" ; "whole_file_prints_bytes_for_bytes")]
     #[test_case(""; "empty_file_still_prints_whole")]
-    fn prints_the_log_file_whole(body: &str) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn prints_the_log_file_whole(body: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let log_file = dir.path().join("ncap-server-999.log");
-        fs::write(&log_file, body).expect("log file");
+        fs::write(&log_file, body)?;
         let mut sink: Vec<u8> = Vec::new();
-        let end = print_log_whole(&log_file, &mut sink).expect("print succeeds");
+        let end = print_log_whole(&log_file, &mut sink)?;
         assert_eq!(
-            String::from_utf8(sink).unwrap(),
+            String::from_utf8(sink).expect("sink holds the UTF-8 body just written"),
             body,
             "stdout must carry the file byte-for-byte"
         );
         assert_eq!(end, PrintEnd::Whole);
+        Ok(())
     }
 
     #[test]
@@ -1029,6 +1011,19 @@ mod tests {
         assert!(
             matches!(err, PrintLogError::Write { .. }),
             "a write failure other than a broken pipe must be the `Write` variant, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_pipe_is_an_error_on_the_strict_surface() {
+        let mut sink = FailingWriter {
+            kind: io::ErrorKind::BrokenPipe,
+        };
+        let err = write_stdout_strict(&mut sink, b"still streaming\n")
+            .expect_err("follow's gone pipe must fail");
+        assert!(
+            matches!(err, PrintLogError::Write { .. }),
+            "follow's broken pipe names the write, got {err:?}"
         );
     }
 
@@ -1067,17 +1062,32 @@ mod tests {
             .collect()
     }
 
-    #[test_case(b"first\nmore\n" as &[u8], 0 => (b"first\nmore\n".len(), b"first\nmore\n".to_vec()) ; "first_drain_streams_from_the_first_byte")]
-    #[test_case(b"first\nmore\n" as &[u8], 6 => (b"first\nmore\n".len(), b"more\n".to_vec()) ; "later_drain_streams_only_new_bytes")]
-    #[test_case(b"first\n" as &[u8], b"first\n".len() => (b"first\n".len(), Vec::new()) ; "at_eof_drains_nothing")]
-    fn drain_streams_from_its_position_to_eof(body: &[u8], start: usize) -> (usize, Vec<u8>) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    #[test_case(b"first\nmore\n" as &[u8], 0, b"first\nmore\n".len(), Some(b"first\nmore\n".as_slice()) ; "first_drain_streams_from_the_first_byte")]
+    #[test_case(b"first\nmore\n" as &[u8], 6, b"first\nmore\n".len(), Some(b"more\n".as_slice()) ; "later_drain_streams_only_new_bytes")]
+    #[test_case(b"first\n" as &[u8], b"first\n".len(), b"first\n".len(), None ; "at_eof_drains_nothing")]
+    fn drain_streams_from_its_position_to_eof(
+        body: &[u8],
+        start: usize,
+        end: usize,
+        new_bytes: Option<&[u8]>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let log_file = dir.path().join("ncap-server-999.log");
-        fs::write(&log_file, body).expect("log file");
+        fs::write(&log_file, body)?;
         let mut pos = start as u64;
         let mut sink: Vec<u8> = Vec::new();
-        drain_log(&log_file, &mut pos, &mut sink).expect("drain succeeds");
-        (pos as usize, sink)
+        drain_log(&log_file, &mut pos, &mut sink)?;
+        assert_eq!(pos as usize, end, "drain advances to EOF: {sink:?}");
+        match new_bytes {
+            Some(expected) => {
+                assert_eq!(sink, expected, "drain streams the new bytes from {start}")
+            }
+            None => assert!(
+                sink.is_empty(),
+                "at EOF the drain streams nothing: {sink:?}"
+            ),
+        }
+        Ok(())
     }
 
     #[test]
@@ -1092,26 +1102,27 @@ mod tests {
     }
 
     #[test]
-    fn an_announce_names_the_file_with_the_pinned_shape() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log_file = dir.path().join("ncap-server-1729512345678.log");
+    fn an_announce_names_the_file_with_the_pinned_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let log_file = std::path::PathBuf::from("ncap-server-1729512345678.log");
         let mut sink: Vec<u8> = Vec::new();
-        announce_attach(&log_file, &mut sink).expect("announce succeeds");
+        announce_attach(&log_file, &mut sink)?;
         assert_eq!(
             String::from_utf8_lossy(&sink),
             "==> following ncap-server-1729512345678.log <==\n",
             "the announce shape is pinned by spec/ctl.md § log"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_symlinked_generation_link_is_removed_itself_not_its_target() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn a_symlinked_generation_link_is_removed_itself_not_its_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let target = dir.path().join("profile-1");
-        fs::write(&target, b"env dump").expect("target");
-        std::os::unix::fs::symlink(&target, dir.path().join("profile-1-link"))
-            .expect("generation link");
-        remove_profile_generation_links(dir.path()).expect("cleanup succeeds");
+        fs::write(&target, b"env dump")?;
+        std::os::unix::fs::symlink(&target, dir.path().join("profile-1-link"))?;
+        remove_profile_generation_links(dir.path())?;
         assert!(
             !dir.path().join("profile-1-link").exists(),
             "the link itself must be gone"
@@ -1120,33 +1131,53 @@ mod tests {
             target.exists(),
             "the link's target must survive the cleanup"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_generation_link_that_is_a_real_directory_is_removed_recursively() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn a_generation_link_that_is_a_real_directory_is_removed_recursively()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let real_dir = dir.path().join("profile-1-link");
-        fs::create_dir_all(real_dir.join("gen")).expect("real directory");
-        fs::write(real_dir.join("gen").join("inner"), b"x").expect("inner file");
-        remove_profile_generation_links(dir.path()).expect("cleanup succeeds");
+        fs::create_dir_all(real_dir.join("gen"))?;
+        fs::write(real_dir.join("gen").join("inner"), b"x")?;
+        remove_profile_generation_links(dir.path())?;
         assert!(
             !real_dir.exists(),
             "a real directory wearing the link's name must still be removed"
         );
+        Ok(())
     }
 
     #[test]
-    fn names_that_are_not_generation_links_survive_the_cleanup() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn names_that_are_not_generation_links_survive_the_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         for name in ["profile-x-link", "profile--link", "profile-1", "unrelated"] {
-            fs::write(dir.path().join(name), b"keep").expect(name);
+            fs::write(dir.path().join(name), b"keep")?;
         }
-        remove_profile_generation_links(dir.path()).expect("cleanup succeeds");
+        remove_profile_generation_links(dir.path())?;
         for name in ["profile-x-link", "profile--link", "profile-1", "unrelated"] {
             assert!(
                 dir.path().join(name).exists(),
                 "`{name}` must survive the cleanup"
             );
+        }
+        Ok(())
+    }
+
+    /// A writer reporting a write failure of the given `kind` — the
+    /// stand-in for stdout when the consumer misbehaves.
+    struct FailingWriter {
+        kind: io::ErrorKind,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(self.kind, "sink says no"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 }

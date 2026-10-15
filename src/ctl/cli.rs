@@ -62,49 +62,48 @@ mod tests {
 
     use super::*;
 
-    /// The `Log` subcommand's flags, panicing on any other subcommand —
-    /// every test below parses only `log`.
+    #[test_case(&["--no-pager", "--follow"] ; "no_pager_then_follow")]
+    #[test_case(&["--follow", "--no-pager"] ; "follow_then_no_pager")]
+    fn the_two_flags_together_are_a_usage_error(flags: &[&str]) {
+        let err = Cli::try_parse_from([&["ncap-ctl", "log"], flags].concat())
+            .err()
+            .expect("both flags together must not parse");
+        assert!(
+            matches!(err.kind(), clap::error::ErrorKind::ArgumentConflict),
+            "the two flags together must conflict, got: {err}"
+        );
+    }
+
+    #[test_case("--no-pager", true, false ; "accepts_no_pager_alone")]
+    #[test_case("--follow", false, true ; "accepts_follow_alone")]
+    fn log_parses_with_exactly_one_flag_set(
+        flag: &str,
+        no_pager: bool,
+        follow: bool,
+    ) -> Result<(), clap::Error> {
+        let flags = log_flags_of(Cli::try_parse_from(["ncap-ctl", "log", flag])?);
+        assert_eq!(
+            flags.no_pager, no_pager,
+            "passing `{flag}` alone sets `no_pager`"
+        );
+        assert_eq!(flags.follow, follow, "passing `{flag}` alone sets `follow`");
+        Ok(())
+    }
+
+    #[test]
+    fn log_with_no_flag_yields_the_default_pager_state() -> Result<(), clap::Error> {
+        let flags = log_flags_of(Cli::try_parse_from(["ncap-ctl", "log"])?);
+        assert!(!flags.no_pager, "no flags keeps `no_pager` off");
+        assert!(!flags.follow, "no flags keeps `follow` off");
+        Ok(())
+    }
+
+    /// The `Log` subcommand's flags, panicking on any other subcommand —
+    /// every test above parses only `log`.
     fn log_flags_of(cli: Cli) -> LogFlags {
         match cli.command {
             Cmd::Log { flags } => flags,
             _ => panic!("expected the `log` subcommand"),
         }
-    }
-
-    #[test_case(&["--no-pager", "--follow"] ; "no_pager_then_follow")]
-    #[test_case(&["--follow", "--no-pager"] ; "follow_then_no_pager")]
-    fn the_two_flags_together_are_a_usage_error_naming_them(flags: &[&str]) {
-        let err = <Cli as clap::Parser>::try_parse_from([&["ncap-ctl", "log"], flags].concat())
-            .err()
-            .expect("both flags together must not parse");
-        assert!(
-            err.to_string().contains("no-pager") && err.to_string().contains("follow"),
-            "usage error must name both flags, got: {err}"
-        );
-    }
-
-    #[test_case("--no-pager" ; "accepts_no_pager_alone")]
-    #[test_case("--follow" ; "accepts_follow_alone")]
-    fn log_parses_with_one_flag_set(flag: &str) {
-        let cli = <Cli as clap::Parser>::try_parse_from(["ncap-ctl", "log", flag])
-            .unwrap_or_else(|err| panic!("one flag must parse: {err}"));
-        let flags = log_flags_of(cli);
-        let (flag_on, other_on) = (flags.no_pager, flags.follow);
-        if flag == "--no-pager" {
-            assert!(flag_on, "passing `{flag}` alone must set `no_pager`");
-            assert!(!other_on, "passing `{flag}` alone must not set `follow`");
-        } else {
-            assert!(!flag_on, "passing `{flag}` alone must not set `no_pager`");
-            assert!(other_on, "passing `{flag}` alone must set `follow`");
-        }
-    }
-
-    #[test]
-    fn log_with_no_flag_yields_the_default_pager_state() {
-        let cli = <Cli as clap::Parser>::try_parse_from(["ncap-ctl", "log"])
-            .unwrap_or_else(|err| panic!("no flags must parse: {err}"));
-        let flags = log_flags_of(cli);
-        assert!(!flags.no_pager, "no flags keeps the pager state");
-        assert!(!flags.follow, "no flags keeps the pager state");
     }
 }

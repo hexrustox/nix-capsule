@@ -358,43 +358,14 @@ fn sanitize(basename: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
+    use serial_test::serial;
     use test_case::test_case;
 
+    use crate::ctl::test_helper::EnvGuard;
+
     use super::*;
-
-    /// An owned lookup; when a var appears twice the last pair wins, so
-    /// `full(extra)` can override the base.
-    fn env(pairs: Vec<(&str, &str)>) -> impl Fn(&str) -> Option<String> {
-        let pairs: Vec<(String, String)> = pairs
-            .into_iter()
-            .map(|(var, value)| (var.to_owned(), value.to_owned()))
-            .collect();
-        move |var| {
-            pairs
-                .iter()
-                .rev()
-                .find(|(name, _)| name == var)
-                .map(|(_, value)| value.clone())
-        }
-    }
-
-    fn single(var: &str, value: Option<&str>) -> impl Fn(&str) -> Option<String> {
-        env(match value {
-            Some(value) => vec![(var, value)],
-            None => Vec::new(),
-        })
-    }
-
-    /// A detector that rejects every name: the empty-PATH world.
-    fn reject_all(name: &str) -> bool {
-        let _ = name;
-        false
-    }
-
-    /// A detector that reports the given names as present in `PATH`.
-    fn in_path_detector<'a>(names: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |name: &str| names.contains(&name)
-    }
 
     #[test_case(None => matches Err(ConfigError::Missing { var: "NCAP_HARDEN" }) ; "unset_is_missing")]
     #[test_case(Some("") => matches Err(ConfigError::Missing { .. }) ; "empty_string_counts_as_missing")]
@@ -492,8 +463,9 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(root.path().join("dir")).expect("watched dir");
         std::fs::write(root.path().join("file"), b"x").expect("watched file");
-        std::os::unix::fs::symlink("file", root.path().join("link")).expect("symlink");
-        std::os::unix::fs::symlink("nowhere", root.path().join("broken")).expect("dangling");
+        std::fs::write(root.path().join("dir/file"), b"x").expect("watched nested file");
+        symlink("file", root.path().join("link")).expect("symlink");
+        symlink("nowhere", root.path().join("broken")).expect("dangling");
         let owned: Vec<String> = entries.iter().map(|entry| entry.to_string()).collect();
         validate_watch_files(root.path(), &owned)
     }
@@ -611,5 +583,141 @@ mod tests {
             ),
             "err={err:?}"
         );
+    }
+
+    #[test]
+    fn resolve_wires_the_full_env_into_the_config() -> Result<(), ConfigError> {
+        let config = resolve(&env(base_vars()))?;
+        assert_eq!(config.root, PathBuf::from("/tmp/my_project"));
+        assert_eq!(config.project, "my-project");
+        assert_eq!(config.runtime, "podman");
+        assert_eq!(config.timeout, 30);
+        assert!(!config.harden);
+        assert_eq!(config.log_level, LogLevel::Warning);
+        assert_eq!(config.cache_dir, PathBuf::from("/tmp/c"));
+        assert_eq!(config.devshell, "dev");
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_validates_every_var_even_before_its_consumer_runs() -> Result<(), ConfigError> {
+        let mut vars = base_vars();
+        vars.push(("NCAP_RUN_OPTS", "[1]"));
+        let err = resolve(&env(vars)).expect_err("malformed NCAP_RUN_OPTS errors on every command");
+        assert!(
+            matches!(
+                err,
+                ConfigError::NotJsonArray {
+                    var: "NCAP_RUN_OPTS",
+                    ..
+                }
+            ),
+            "err={err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_names_the_first_missing_demand() -> Result<(), ConfigError> {
+        let mut vars = base_vars();
+        vars.retain(|(var, _)| *var != "NCAP_DEVSHELL");
+        let err = resolve(&env(vars)).expect_err("NCAP_DEVSHELL is demanded");
+        assert!(
+            matches!(
+                err,
+                ConfigError::Missing {
+                    var: "NCAP_DEVSHELL"
+                }
+            ),
+            "err={err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn detect_in_path_reports_only_executable_files() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let executable = dir.path().join("podman");
+        std::fs::write(&executable, b"binary").expect("podman stand-in");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o111))?;
+        std::fs::write(dir.path().join("docker"), b"binary").expect("docker stand-in");
+        let _path = EnvGuard::set("PATH", dir.path().as_os_str());
+        assert!(
+            detect_in_path("podman"),
+            "an executable file in PATH detects"
+        );
+        assert!(
+            !detect_in_path("docker"),
+            "a non-executable file in PATH misses, PATH={:?}",
+            dir.path(),
+        );
+        assert!(!detect_in_path("missing"), "an absent name misses");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn detect_in_path_without_a_path_reports_false() {
+        let _path = EnvGuard::unset("PATH");
+        assert!(!detect_in_path("podman"));
+    }
+
+    fn base_vars() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("NCAP_RUNTIME", "podman"),
+            ("NCAP_TIMEOUT", "30"),
+            ("NCAP_WATCH_FILES", "[]"),
+            ("NCAP_RUN_OPTS", "[]"),
+            ("NCAP_HARDEN", "false"),
+            ("NCAP_LOG_LEVEL", "warning"),
+            ("NCAP_PROJECT_ROOT", "/tmp/my_project"),
+            ("NCAP_PROJECT", "my-project"),
+            ("NCAP_CONTAINER", "ncap-my-project"),
+            ("NCAP_SOCKET", "/tmp/p/ncap.sock"),
+            ("NCAP_CACHE_DIR", "/tmp/c"),
+            ("NCAP_LOG_DIR", "/tmp/l"),
+            ("NCAP_DEVSHELL", "dev"),
+            ("NCAP_NIX", "/usr/bin/nix"),
+            ("NCAP_IMAGE", "img"),
+            ("NCAP_SERVER", "/usr/bin/ncap-server"),
+            ("NCAP_BASH", "/usr/bin/bash"),
+        ]
+    }
+
+    /// An owned lookup; when a var appears twice the last pair wins, so
+    /// `full(extra)` can override the base.
+    fn env(pairs: Vec<(&str, &str)>) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .into_iter()
+            .map(|(var, value)| (var.to_owned(), value.to_owned()))
+            .collect();
+        move |var| {
+            pairs
+                .iter()
+                .rev()
+                .find(|(name, _)| name == var)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    fn single(var: &str, value: Option<&str>) -> impl Fn(&str) -> Option<String> {
+        env(match value {
+            Some(value) => vec![(var, value)],
+            None => Vec::new(),
+        })
+    }
+
+    /// A detector that rejects every name: the empty-PATH world.
+    fn reject_all(name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// A detector that reports the given names as present in `PATH`.
+    fn in_path_detector<'a>(names: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
+        move |name: &str| names.contains(&name)
     }
 }
