@@ -85,6 +85,8 @@ it directly. The protocol is the only path.
 | Terminal frame is `Error`, a transport/decode failure, or a local failure (e.g. malformed `NCAP_ENV_FORWARD`, invalid `--env`, a `Signal`-frame send failure) | `1` |
 | `ServerStopping` received — the Client bails immediately and stops streaming — or the socket closed without a terminal frame | `143` (128 + SIGTERM) |
 
+The `127`/`126` rows, the unknowable-status row, and the `Error` row each also print a stderr notice naming the cause; exact text is test-design and unpinned.
+
 `ServerStopping` is terminal for the Client but non-terminal server-side:
 after bailing the Client never processes a later terminal frame on that
 Connection, while the Server keeps the bridge running through the drain
