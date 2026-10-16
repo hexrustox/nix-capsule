@@ -19,7 +19,7 @@ references them and never restates them.
 | `enter` | `<runtime> exec -it <name> <bash> -c "source '<cache>/env' && exec '<bash>'"` — interactive escape hatch, outside the protocol. Container down ⇒ error suggesting `ncap-ctl init`. |
 | `status` | Three lines on stdout: container running (with name) or not running; socket connectable (with path) or unreachable (with path); cache fresh/stale/missing (spec/paths.md § Freshness and the digest). |
 | `log` | Print or follow the newest Server log file (spec/paths.md § Server log files); see § log. |
-| `clean` | Stop the Container (best-effort), remove the (stopped) container, remove this project's cache files and log files (spec/paths.md § Cache contents) and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. |
+| `clean` | Stop the Container (best-effort), remove the (stopped) container, remove this project's cache files and log files (spec/paths.md § Cache contents) and delete the socket file + best-effort parent dir — never recursive on an explicit path that may be shared. Idempotent: a second `clean` with nothing left succeeds. |
 | `show-options` | Print the `$VAR`-expanded contents of `NCAP_RUN_OPTS` (expansion per spec/runtime.md § Mounts), one arg per line. |
 | `setup-env` | Resolve the five project-scoped vars and print them as `export` lines for the Host shell to source. Needs only `NCAP_PROJECT_ROOT` (§ NCAP_* contract). Never starts containers, never touches the Cache. |
 
@@ -68,7 +68,8 @@ error names the flags.
 - No flag: the file opens in `$PAGER` (split on whitespace into program +
   args; fallback `less -R` when unset or blank), stdio inherited. A pager
   that fails to spawn or exits non-zero ⇒ failure.
-- `--no-pager`: the whole file to stdout byte-for-byte, then done.
+- `--no-pager`: the whole file to stdout byte-for-byte, then done; success
+  stays quiet on stderr.
   `$PAGER` is never consulted. The consuming reader exiting early (a pipe
   into `head`) is a broken pipe ⇒ quiet exit 0; any other stdout write
   failure ⇒ failure naming the operation.

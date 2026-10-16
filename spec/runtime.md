@@ -13,7 +13,9 @@ time, before any flow runs except `setup-env` (which needs only
 `NCAP_PROJECT_ROOT` and never resolves the runtime): `podman` is picked when
 an executable `podman` exists in a `PATH` directory — executable meaning a
 regular file with any execute bit set, found via `PATH` splitting — else
-`docker`, else an error naming `NCAP_RUNTIME`. The check is PATH existence
+ `docker`, else an error naming `NCAP_RUNTIME`. The neither-found failure
+ reports instead of any not-running status — no fallthrough to liveness
+ output. The check is PATH existence
 only — no probe that the binary runs, no caching across invocations. An
 explicit `podman`/`docker` skips detection entirely. `auto` resolves to the
 concrete name; all downstream behavior treats `auto` exactly as the resolved
