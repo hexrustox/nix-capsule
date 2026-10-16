@@ -16,7 +16,7 @@ CLI: `--socket`, `--log-dir`, `--timeout` (drain grace, seconds),
 required; `--timeout` is a non-negative integer number of seconds.
 
 - If the socket path exists: probe it. Connectable ⇒ another Server owns it —
-  error out naming the path, leaving the owner untouched. Stale (connect
+  print error naming the path, leaving the owner untouched. Stale (connect
   fails) ⇒ remove the file and bind.
 
 ## Connection handling
