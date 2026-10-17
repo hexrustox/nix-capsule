@@ -11,6 +11,12 @@ session loads, in what order, and what "done" means per file. Product code,
 `src/` unit tests, and new dev-dependencies are not part of the rewrite. The
 human holds the per-file approval gate, not the style choices.
 
+Baseline: deletion-first. The old suite is already gone — every `tests/**`
+file, `tests/common/` included, was deleted up front on the working base
+(`integration-test-rewrite`, `b3f1daf`; `main` stays untouched until the
+end). Each turn writes its file from nothing; nothing under `tests/` exists
+until its turn writes it.
+
 ## Load set
 
 A rewriting session loads exactly:
@@ -27,9 +33,10 @@ A rewriting session loads exactly:
 
 ## Blackout
 
-No rewriting session ever loads any file under `tests/` — neither the file
-under rewrite nor `tests/common/`. Old test code never enters the writing
-context in any pass. The old suite's pinned behaviors already live in `spec/`
+No rewriting session ever loads old test code — not from the working tree
+(it's gone) and not from git history: everything under `tests/` before the
+baseline deletion is off-limits in any pass. Old test code never enters the
+writing context. The old suite's pinned behaviors already live in `spec/`
 (the absorption pass is complete); a behavior missing from `spec/` is an
 unknown (see Escalation), never a reason to peek.
 
@@ -41,8 +48,8 @@ here. Standing preferences for this effort:
 - **DAMP over DRY.** Plain, explicit, slightly repetitive beats clever and
   shared.
 - **Self-contained fixtures.** Each rewritten file defines the helpers it
-  needs inline — no `mod common;`, no shared harness. `tests/common/` stays
-  untouched and serves only the not-yet-rewritten files.
+  needs inline — no `mod common;`, no shared harness. `tests/common/` does
+  not come back: no rewritten file imports it, and no turn recreates it.
 - **No new dev-dependencies** by default.
 - **One behavior, one test**, placed at the narrowest integration point that
   observes it. Walk the `spec/` sections the file's integration point
@@ -69,14 +76,16 @@ reading; the load set stands regardless.
 
 For the file's turn:
 
-1. Branch `test/rewrite-<stem>` off the merge target.
+1. Branch `test/rewrite-<stem>` off `integration-test-rewrite` (the working
+   base).
 2. Write `tests/<stem>.rs` from the load set alone, with self-contained
    helpers inline (see Conventions).
 3. Walk both skill checklists; fix what they flag.
-4. `cargo test` green across the whole suite — the remaining old files still
-   compile and still pass.
-5. Open one PR that replaces `tests/<stem>.rs` at the same path: no other
-   file changes, no `tests/common/` changes, no product-code changes.
+4. `cargo test` green — the file's tests, the files rewritten so far, and
+   the `src/` unit tests.
+5. Open one PR against `integration-test-rewrite` that adds
+   `tests/<stem>.rs` and nothing else: no other file changes, no
+   product-code changes.
 6. Human approval, merge, then the next file.
 
 ## Done-gate
@@ -97,6 +106,6 @@ do not improvise.
 
 ## After the sixth file
 
-The six PRs leave `tests/common/` with no importers. Deleting or shrinking it
-is a separate follow-up, tracked on the map's fog ("`common/` dissolution");
-it is not part of any rewrite PR.
+With file six merged into the working base, open one final PR:
+`integration-test-rewrite` → `main`. The whole suite lands together, behind
+the six per-file gates already passed; nothing else rides in that PR.
