@@ -7,38 +7,28 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tempfile::tempdir;
+use test_case::test_case;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::Framed;
 
 use nix_capsule::protocol::{Exit, FrameCodec, Message, Request, SignalMsg};
 
+#[test_case(libc::SIGINT, 2 ; "sigint_sends_one_verbatim_signal_frame")]
+#[test_case(libc::SIGTERM, 15 ; "sigterm_sends_one_verbatim_signal_frame")]
 #[tokio::test]
-async fn sigint_sends_one_verbatim_signal_frame() -> Result<(), Box<dyn std::error::Error>> {
+async fn host_signal_sends_one_verbatim_signal_frame(
+    sig: i32,
+    signal: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
     let (mut child, mut conn) = open_session(&listener, &sock, dir.path()).await;
 
-    kill(child.id(), libc::SIGINT);
+    kill(child.id(), sig);
     let got = recv(&mut conn).await;
 
-    assert_eq!(got, Message::Signal(SignalMsg { signal: 2 }));
-    send(&mut conn, exit(0)).await;
-    child.wait()?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn sigterm_sends_one_verbatim_signal_frame() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempdir()?;
-    let sock = dir.path().join("ncap.sock");
-    let listener = UnixListener::bind(&sock)?;
-    let (mut child, mut conn) = open_session(&listener, &sock, dir.path()).await;
-
-    kill(child.id(), libc::SIGTERM);
-    let got = recv(&mut conn).await;
-
-    assert_eq!(got, Message::Signal(SignalMsg { signal: 15 }));
+    assert_eq!(got, Message::Signal(SignalMsg { signal }));
     send(&mut conn, exit(0)).await;
     child.wait()?;
     Ok(())
@@ -150,18 +140,18 @@ async fn signal_frame_send_failure_exits_1() -> Result<(), Box<dyn std::error::E
 }
 
 #[tokio::test]
-async fn sigquit_kills_the_client_outright() -> Result<(), Box<dyn std::error::Error>> {
+async fn sighup_kills_the_client_outright() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
     let (mut child, mut conn) = open_session(&listener, &sock, dir.path()).await;
 
-    kill(child.id(), libc::SIGQUIT);
+    kill(child.id(), libc::SIGHUP);
 
     let status = child.wait()?;
     let relayed = drain(&mut conn).await;
 
-    assert_eq!(status.signal(), Some(libc::SIGQUIT));
+    assert_eq!(status.signal(), Some(libc::SIGHUP));
     assert!(
         !relayed.iter().any(|m| matches!(m, Message::Signal(_))),
         "expected no relayed Signal frame, got {relayed:?}"
