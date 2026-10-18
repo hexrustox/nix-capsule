@@ -224,10 +224,33 @@ async fn relay_still_flows_after_stdin_eof() -> Result<(), Box<dyn std::error::E
 
 #[tokio::test]
 async fn host_stdin_keeps_pumping_across_host_signals() -> Result<(), Box<dyn std::error::Error>> {
+    struct ChildGuard(Child);
+
+    impl std::ops::Deref for ChildGuard {
+        type Target = Child;
+
+        fn deref(&self) -> &Child {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for ChildGuard {
+        fn deref_mut(&mut self) -> &mut Child {
+            &mut self.0
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
-    let mut child = spawn_ncap(&sock, dir.path(), Stdio::piped());
+    let mut child = ChildGuard(spawn_ncap(&sock, dir.path(), Stdio::piped()));
     let mut conn = accept_conn(&listener).await;
     let _request = recv(&mut conn).await;
 
@@ -308,16 +331,13 @@ async fn signal_reaches_grandchildren_in_the_process_group()
     std::fs::write(
         &grandchild,
         format!(
-            "trap 'printf x > \"{marker}\"' TERM\nprintf 'ready\\n'\nsleep 30\n",
-            marker = marker.display()
+            "trap 'printf x > \"{}\"' TERM\nprintf 'ready\\n'\nsleep 30\n",
+            marker.display()
         ),
     )?;
     std::fs::write(
         &child_script,
-        format!(
-            "sh \"{grandchild}\" &\nwait\n",
-            grandchild = grandchild.display()
-        ),
+        format!("sh \"{}\" &\nwait\n", grandchild.display()),
     )?;
     let (mut server, mut conn) = boot_server(&sock, &log_dir, "error").await;
 
