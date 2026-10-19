@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -74,11 +75,10 @@ async fn runs_a_silent_child_of_a_vanished_client_to_completion() -> Result<(), 
     let dir = server.dir();
     let marker = dir.join("m");
     let script = format!(
-        "trap 'printf termed > {d}/m; exit 0' TERM
-     printf %s $$ > {d}/child.pid
+        "trap 'printf termed > {m}; exit 0' TERM
      sleep 1
-     printf done > {d}/m",
-        d = dir.display()
+     printf done > {m}",
+        m = marker.display()
     );
     conn.send(sh_request(dir, &script).into_frame()?).await?;
     conn.send(Message::Stdin(Vec::new()).into_frame()?).await?;
@@ -96,18 +96,19 @@ async fn terms_the_child_process_group_when_the_client_vanishes_mid_bridge()
     let dir = server.dir();
     let marker = dir.join("m");
     let grand_marker = dir.join("gm");
-    let gready = dir.join("gready");
+    let ready = dir.join("ready");
     // The background `sh` shares the Child's process group; its marker proves
     // the TERM targeted the group rather than just the Child.
     let script = format!(
-        "sh -c 'trap \"printf g > {d}/gm; exit 0\" TERM; printf x > {d}/gready; sleep 30' &
-     trap 'printf termed > {d}/m; exit 0' TERM
-     printf %s $$ > {d}/child.pid
+        "sh -c 'trap \"printf g > {}; exit 0\" TERM; printf x > {}; sleep 30' &
+     trap 'printf termed > {}; exit 0' TERM
      while :; do echo x; done",
-        d = dir.display()
+        grand_marker.display(),
+        ready.display(),
+        marker.display(),
     );
     conn.send(sh_request(dir, &script).into_frame()?).await?;
-    wait_for("the grandchild's trap to be armed", || gready.exists()).await?;
+    wait_for("the grandchild's trap to be armed", || ready.exists()).await?;
     drop(conn);
     wait_for("the Child's TERM marker", || marker.exists()).await?;
     wait_for("the grandchild's TERM marker", || grand_marker.exists()).await?;
@@ -124,10 +125,11 @@ async fn reaps_the_child_after_a_disconnect_term() -> Result<(), Box<dyn Error>>
     let marker = dir.join("m");
     let pidfile = dir.join("child.pid");
     let script = format!(
-        "trap 'printf termed > {d}/m; exit 0' TERM
-     printf %s $$ > {d}/child.pid
+        "trap 'printf termed > {}; exit 0' TERM
+     printf %s $$ > {}
      while :; do echo x; done",
-        d = dir.display()
+        marker.display(),
+        pidfile.display()
     );
     conn.send(sh_request(dir, &script).into_frame()?).await?;
     wait_for("the Child to start", || pidfile.exists()).await?;
@@ -149,10 +151,11 @@ async fn honors_the_child_term_grace_instead_of_killing_it() -> Result<(), Box<d
     let marker = dir.join("m");
     let pidfile = dir.join("child.pid");
     let script = format!(
-        "trap 'sleep 2; printf done > {d}/m; exit 0' TERM
-     printf %s $$ > {d}/child.pid
+        "trap 'sleep 2; printf done > {}; exit 0' TERM
+     printf %s $$ > {}
      while :; do echo x; done",
-        d = dir.display()
+        marker.display(),
+        pidfile.display()
     );
     conn.send(sh_request(dir, &script).into_frame()?).await?;
     wait_for("the Child to start", || pidfile.exists()).await?;
@@ -165,59 +168,32 @@ async fn honors_the_child_term_grace_instead_of_killing_it() -> Result<(), Box<d
     Ok(())
 }
 
+#[test_case(0x09, b"not json" ; "an_undecodable_mid_bridge_frame")]
+#[test_case(0x7f, b"" ; "a_codec_error_mid_bridge_frame")]
 #[tokio::test]
-async fn sends_a_terminal_error_then_terms_the_child_on_an_undecodable_mid_bridge_frame()
--> Result<(), Box<dyn Error>> {
+async fn sends_a_terminal_error_then_terms_the_child_on_a_mid_bridge_frame_the_protocol_rejects(
+    tag: u8,
+    payload: &'static [u8],
+) -> Result<(), Box<dyn Error>> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     let dir = server.dir();
     let marker = dir.join("m");
     let pidfile = dir.join("child.pid");
     let script = format!(
-        "trap 'printf termed > {d}/m; exit 0' TERM
-     printf %s $$ > {d}/child.pid
+        "trap 'printf termed > {}; exit 0' TERM
+     printf %s $$ > {}
      sleep 30",
-        d = dir.display()
+        marker.display(),
+        pidfile.display()
     );
     conn.send(sh_request(dir, &script).into_frame()?).await?;
     wait_for("the Child to start", || pidfile.exists()).await?;
     // A `Signal` frame is what the bridge decodes mid-bridge; `not json` is
-    // the undecodable payload case (spec/protocol.md: a struct payload that is
-    // not valid JSON for its shape is rejected as a decode failure).
-    conn.get_mut()
-        .write_all(&raw_frame(0x09, b"not json"))
-        .await?;
-    let msg = recv(&mut conn).await?;
-    assert!(matches!(&msg, Message::Error(_)), "got {msg:?}");
-    let after = timeout(Duration::from_secs(5), conn.next())
-        .await
-        .map_err(|_| "the Server held the Connection open after the terminal Error")?;
-    assert!(
-        after.is_none(),
-        "expected the Error to be terminal, got {after:?}"
-    );
-    wait_for("the Child's TERM marker", || marker.exists()).await?;
-    assert_eq!(fs::read_to_string(&marker)?, "termed");
-    Ok(())
-}
-
-#[tokio::test]
-async fn sends_a_terminal_error_then_terms_the_child_on_a_codec_error_mid_bridge_frame()
--> Result<(), Box<dyn Error>> {
-    let server = Server::start().await?;
-    let mut conn = server.connect().await?;
-    let dir = server.dir();
-    let marker = dir.join("m");
-    let pidfile = dir.join("child.pid");
-    let script = format!(
-        "trap 'printf termed > {d}/m; exit 0' TERM
-     printf %s $$ > {d}/child.pid
-     sleep 30",
-        d = dir.display()
-    );
-    conn.send(sh_request(dir, &script).into_frame()?).await?;
-    wait_for("the Child to start", || pidfile.exists()).await?;
-    conn.get_mut().write_all(&raw_frame(0x7f, b"")).await?;
+    // the undecodable-payload case (spec/protocol.md: a payload that is not
+    // valid JSON for its shape is a decode failure) and `0x7f` the
+    // unknown-tag codec-error case.
+    conn.get_mut().write_all(&raw_frame(tag, payload)).await?;
     let msg = recv(&mut conn).await?;
     assert!(matches!(&msg, Message::Error(_)), "got {msg:?}");
     let after = timeout(Duration::from_secs(5), conn.next())
@@ -239,9 +215,9 @@ async fn keeps_serving_other_connections_during_a_disconnect() -> Result<(), Box
     let dir = server.dir();
     let pidfile = dir.join("child.pid");
     let script = format!(
-        "printf %s $$ > {d}/child.pid
+        "printf %s $$ > {}
      while :; do echo x; done",
-        d = dir.display()
+        pidfile.display()
     );
     vanishing
         .send(sh_request(dir, &script).into_frame()?)
@@ -358,12 +334,12 @@ impl Drop for Server {
             return;
         };
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().ends_with(".pid") {
-                if let Ok(pid) = read_pid(&entry.path()) {
-                    // The Child is its process-group leader, so one kill takes
-                    // down the whole group — grandchildren included.
-                    unsafe { libc::kill(-pid, libc::SIGKILL) };
-                }
+            if entry.file_name().to_string_lossy().ends_with(".pid")
+                && let Ok(pid) = read_pid(&entry.path())
+            {
+                // The Child is its process-group leader, so one kill takes
+                // down the whole group — grandchildren included.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
             }
         }
     }
