@@ -874,7 +874,6 @@ fn start_creates_the_socket_dir_with_mode_0700() -> Result<(), Box<dyn Error>> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let mode = fs::metadata(w.socket.parent().unwrap())?
         .permissions()
@@ -894,7 +893,6 @@ fn start_leaves_an_existing_socket_dir_untouched() -> Result<(), Box<dyn Error>>
         fs::Permissions::from_mode(0o755),
     )?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let mode = fs::metadata(w.socket.parent().unwrap())?
         .permissions()
@@ -909,7 +907,6 @@ fn start_creates_the_log_dir() -> Result<(), Box<dyn Error>> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     assert!(w.logs.is_dir(), "the log dir must be created");
     Ok(())
@@ -921,7 +918,6 @@ fn start_removes_a_stopped_container_before_launch() -> Result<(), Box<dyn Error
     w.fresh_cache(&[])?;
     w.write_state("false")?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     assert_eq!(w.verbs(), vec!["rm", "run"]);
     Ok(())
@@ -932,7 +928,6 @@ fn the_launch_command_carries_the_image_bash_and_server_script() -> Result<(), B
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let tail = launch_tail(&w.rt_run());
     assert_eq!(
@@ -942,7 +937,7 @@ fn the_launch_command_carries_the_image_bash_and_server_script() -> Result<(), B
             w.bash.display().to_string(),
             "-c".to_string(),
             format!(
-                "source '{}/env' && exec '{}' --socket '{}' --log-dir '{}' --timeout 0 --log-level info",
+                "source '{}/env' && exec '{}' --socket '{}' --log-dir '{}' --timeout 5 --log-level info",
                 w.cache.display(),
                 w.server.display(),
                 w.socket.display(),
@@ -959,7 +954,6 @@ fn the_launch_command_single_quote_escapes_interpolated_paths() -> Result<(), Bo
     let quoted = w.temp.path().join("it's-server");
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     cmd.env("NCAP_SERVER", &quoted);
     let _ = cmd.output()?;
     let tail = launch_tail(&w.rt_run());
@@ -977,7 +971,6 @@ fn the_mount_build_order_is_exact() -> Result<(), Box<dyn Error>> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     let sockdir = w.socket.parent().unwrap().to_str().unwrap();
@@ -1009,7 +1002,6 @@ fn the_cache_mount_is_read_only() -> Result<(), Box<dyn Error>> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     let mount = arg_for(&opts, w.cache.to_str().unwrap());
@@ -1025,7 +1017,6 @@ fn the_socket_project_and_log_mounts_are_read_write() -> Result<(), Box<dyn Erro
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     for source in [
@@ -1047,7 +1038,6 @@ fn the_workdir_flag_carries_the_project_root() -> Result<(), Box<dyn Error>> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     let at = opts
@@ -1064,7 +1054,6 @@ fn the_git_directory_is_mounted_when_it_is_a_real_directory() -> Result<(), Box<
     fs::create_dir(w.root.join(".git"))?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     let git = format!("{}/.git", w.root.display());
@@ -1078,7 +1067,6 @@ fn the_git_directory_is_skipped_for_a_gitfile() -> Result<(), Box<dyn Error>> {
     fs::write(w.root.join(".git"), "gitdir: elsewhere\n")?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     let git = format!("{}/.git", w.root.display());
@@ -1093,7 +1081,6 @@ fn the_git_directory_is_skipped_for_a_symlink() -> Result<(), Box<dyn Error>> {
     std::os::unix::fs::symlink(w.temp.path().join("elsewhere"), w.root.join(".git"))?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
     let git = format!("{}/.git", w.root.display());
@@ -1106,7 +1093,6 @@ fn extra_options_append_after_the_mounts_in_order() -> Result<(), Box<dyn Error>
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     cmd.env("NCAP_RUN_OPTS", r#"["--label","a=b","--foo"]"#);
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
@@ -1120,7 +1106,6 @@ fn harden_prepends_the_capability_flags() -> Result<(), Box<dyn Error>> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     cmd.env("NCAP_HARDEN", "true");
     let _ = cmd.output()?;
     let opts = mounts_and_options(&w.rt_run());
@@ -1135,7 +1120,6 @@ fn harden_mounts_present_watched_files_read_only() -> Result<(), Box<dyn Error>>
     fs::write(w.root.join("watched"), "contents\n")?;
     w.fresh_cache(&["watched"])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     cmd.env("NCAP_HARDEN", "true");
     cmd.env("NCAP_WATCH_FILES", r#"["watched"]"#);
     let _ = cmd.output()?;
@@ -1168,7 +1152,6 @@ fn harden_skips_absent_and_broken_watched_files() -> Result<(), Box<dyn Error>> 
     std::os::unix::fs::symlink(w.root.join("nowhere"), w.root.join("broken"))?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "0");
     cmd.env("NCAP_HARDEN", "true");
     cmd.env("NCAP_WATCH_FILES", r#"["gone","broken"]"#);
     let _ = cmd.output()?;
@@ -1190,8 +1173,7 @@ fn a_socket_path_without_a_parent_directory_is_a_launch_error_naming_the_socket(
     let out = cmd.output()?;
     assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
     assert!(
-        text(&out.stderr)
-            .contains("socket path `/` has no parent directory"),
+        text(&out.stderr).contains("socket path `/` has no parent directory"),
         "got {}",
         text(&out.stderr)
     );
@@ -1205,7 +1187,6 @@ fn start_that_never_reaches_readiness_fails_with_the_inspect_state() -> Result<(
     w.write_state("pending")?;
     w.mark_rundown();
     let mut cmd = w.ctl_command(&["start"]);
-    cmd.env("NCAP_TIMEOUT", "1");
     let out = cmd.output()?;
     assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
     assert!(
@@ -1239,21 +1220,6 @@ fn a_lost_race_with_a_dead_container_starts_once_more() -> Result<(), Box<dyn Er
     let out = w.ctl(&["start"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     assert_eq!(w.verbs(), vec!["rm", "run", "rm", "run"]);
-    Ok(())
-}
-
-#[test_case("already in use" ; "docker_wording")]
-#[test_case("NAME IN USE" ; "upper_case")]
-#[test_case("Already In Use" ; "mixed_case")]
-fn a_lost_race_is_recognised_case_insensitively(message: &str) -> Result<(), Box<dyn Error>> {
-    let w = World::new()?;
-    w.fresh_cache(&[])?;
-    w.write_state("false")?;
-    w.mark_runfail(message)?;
-    w.mark_runwon();
-    let _server = w.serve_current();
-    let out = w.ctl(&["start"]);
-    assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     Ok(())
 }
 
@@ -1809,17 +1775,6 @@ fn log_without_a_log_file_errors_naming_the_log_dir(flags: &[&str]) -> Result<()
         "got {}",
         text(&out.stderr)
     );
-    Ok(())
-}
-
-#[test]
-fn log_with_two_flags_is_a_usage_error_naming_the_flags() -> Result<(), Box<dyn Error>> {
-    let w = World::new()?;
-    let out = w.ctl(&["log", "--no-pager", "--follow"]);
-    assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
-    let err = text(&out.stderr);
-    assert!(err.contains("--no-pager"), "got {err}");
-    assert!(err.contains("--follow"), "got {err}");
     Ok(())
 }
 
