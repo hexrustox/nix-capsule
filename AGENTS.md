@@ -2,10 +2,10 @@
 
 ## Vocabulary
 
-- Use `CONTEXT.md` when writing or editing code, specs, or docs: it fixes this
+- Use `GLOSSARY.md` when writing or editing code, specs, or docs: it fixes this
   repo's shared vocabulary (Host shell vs Container shell, Client, Server, Ctl,
   Wrapper, Runtime adapter, …) and lists the synonyms to avoid. Done when new
-  text uses the CONTEXT.md terms.
+  text uses the GLOSSARY.md terms.
 
 ## Behavior
 
@@ -35,5 +35,5 @@ The five canonical triage roles: `needs-triage`, `needs-info`,
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See
+Single-context: one `GLOSSARY.md` at the repo root plus `docs/adr/`. See
 `docs/agents/domain.md`.

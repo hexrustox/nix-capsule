@@ -24,7 +24,7 @@ A rewriting session loads exactly:
 - **`spec/*.md`** — the sole source of truth: `protocol.md`, `client.md`,
   `server.md`, `ctl.md`, `runtime.md`, `env.md`, `paths.md`, `flake-api.md`.
   Wire literals — tags, framing, exit codes — re-derive from `spec/protocol.md`.
-- **`CONTEXT.md`** — vocabulary: Client, Server, Ctl, Child, Terminal frame,
+- **`GLOSSARY.md`** — vocabulary: Client, Server, Ctl, Child, Terminal frame,
   Wrapper, Runtime adapter.
 - **skills `writing-tests`, then `rust-writing-tests`** — the whole
   convention set, in that order (the Rust skill is a patch over the base).
