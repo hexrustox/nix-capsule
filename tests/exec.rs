@@ -1,570 +1,995 @@
-//! Integration tests for the first exec path (ticket 02): a real `ncap`
-//! client talking to a real `ncap-server` over a tempdir socket, plus raw
-//! wire-protocol tests for the frames the CLI cannot drive directly.
+//! Client exec-path integration tests: every test drives the real `ncap`
+//! binary against a scripted stand-in for the Server over the wire protocol
+//! (spec/protocol.md), pinning the Client behaviors of spec/client.md.
 
-mod common;
+use std::ffi::OsStr;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixListener;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use std::{fs, os::unix::fs::PermissionsExt};
-
-use futures_util::SinkExt;
-use nix_capsule::protocol::{
-    CURRENT_VERSION, ErrorMsg, Exit, Frame, FrameType, Message, Request, VersionMsg,
-};
-use proptest::prelude::*;
+use serde_json::{Value, json};
+use tempfile::tempdir;
 use test_case::test_case;
 
-use common::{
-    Client, Server, WAIT_TIGHT,
-    assert::assert_exit_and_stdout,
-    missing_socket,
-    probe::{
-        assert_clean_exit, read_frames_until, read_until_stdout_contains, read_until_terminal,
-        request, run_raw_request, send_request, send_request_version, send_signal, stdout_of,
-        terminal_of,
-    },
-    script::SHELL_HOLD,
-};
-
-#[test_case(
-    None, &["sh", "-c", "printf out; printf err >&2; exit 7"], Some("out"), Some("err"), 7
-    ; "copies_stdout_stderr_and_exit_7"
-)]
-#[test_case(
-    None, &["sh", "-c", "kill -TERM $$"], None, None, 143
-    ; "signal_reports_128_plus_signal"
-)]
-#[test_case(
-    None, &["no-such-binary-xyz"], None,
-    Some("ncap: no-such-binary-xyz: command not found\n"), 127
-    ; "enoent_yields_127_with_synthesized_stderr"
-)]
-#[test_case(
-    Some("/nonexistent-xyz-abc-123"), &["echo", "hi"], None, None, 1
-    ; "bad_cwd_yields_exit_1"
-)]
-#[tokio::test(flavor = "multi_thread")]
-async fn exec_maps_child_result_to_stdio_and_exit_code(
-    cwd: Option<&str>,
-    args: &[&str],
-    stdout: Option<&str>,
-    stderr: Option<&str>,
-    code: i32,
-) {
-    let server = Server::builder().start().await;
-    let mut client = server.client();
-    if let Some(cwd_override) = cwd {
-        client = client.cwd(std::path::Path::new(cwd_override));
-    }
-    let out = client.run(args);
-    server.stop();
-
-    assert_exit_and_stdout(&out, code, stdout);
-    if let Some(want) = stderr {
-        assert_eq!(out.stderr, want);
-    }
-}
-
-#[test_case(None ; "defaults_to_client_current_dir")]
-#[test_case(Some("work") ; "override_uses_given_dir")]
-#[tokio::test(flavor = "multi_thread")]
-async fn pwd_reports_effective_cwd(override_dir: Option<&str>) {
-    let server = Server::builder().start().await;
-    let work = server.path().join("work");
-    if override_dir.is_some() {
-        fs::create_dir(&work).unwrap();
-    }
-    let mut client = server.client();
-    if override_dir.is_some() {
-        client = client.cwd(&work);
-    }
-    let out = client.run(&["sh", "-c", "pwd"]);
-    server.stop();
-
-    let expected = match override_dir {
-        Some(_) => work.to_str().unwrap().to_owned(),
-        None => std::env::current_dir()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-    };
-    assert_eq!(out.stdout.trim_end(), expected);
-    assert_eq!(out.status.code(), Some(0));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn piped_stdin_reaches_child_and_closing_write_half_gives_eof() {
-    let server = Server::builder().start().await;
-    let out = server
-        .client()
-        .stdin(b"hello\n")
-        .run(&["sh", "-c", "cat; echo EOF-REACHED"]);
-    server.stop();
-
-    assert!(out.stdout.contains("hello"), "stdout={}", out.stdout);
-    assert!(out.stdout.contains("EOF-REACHED"), "stdout={}", out.stdout);
-    assert_eq!(out.status.code(), Some(0));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn eacces_yields_126_with_synthesized_stderr() {
-    let server = Server::builder().start().await;
-    let work = server.path().join("work");
-    fs::create_dir(&work).unwrap();
-    let blocked = work.join("blocked");
-    fs::write(&blocked, b"#!/bin/sh\necho hi\n").unwrap();
-    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o644)).unwrap();
-    let out = server.client().cwd(&work).run(&["./blocked"]);
-    server.stop();
-
-    assert_eq!(out.status.code(), Some(126));
-    assert_eq!(out.stderr, "ncap: ./blocked: permission denied\n");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn explicit_env_flag_reaches_child_environment() {
-    let server = Server::builder().start().await;
-    let out = server.client().env_flag("NCAP_TEST_LAYER=from-flag").run(&[
-        "sh",
-        "-c",
-        "printf %s \"$NCAP_TEST_LAYER\"",
-    ]);
-    server.stop();
-
-    assert_eq!(out.stdout, "from-flag");
-    assert_eq!(out.status.code(), Some(0));
-}
-
-#[test_case(
-    Some("host-value") ; "bare_key_copies_when_set_on_host"
-)]
-#[test_case(
-    None ; "bare_key_is_omitted_when_unset_on_host"
-)]
-#[tokio::test(flavor = "multi_thread")]
-async fn bare_env_flag_copies_or_omits_host_value(host: Option<&str>) {
-    let server = Server::builder().start().await;
-    let mut client = server.client().env_flag("NCAP_TEST_BARE");
-    if let Some(value) = host {
-        client = client.env("NCAP_TEST_BARE", value);
-    }
-    let out = client.run(&[
-        "sh",
-        "-c",
-        "printf %s \"${NCAP_TEST_BARE:-unset-fallback}\"",
-    ]);
-    server.stop();
-
-    assert_eq!(out.stdout, host.unwrap_or("unset-fallback"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn forwarded_name_resolves_fresh_value_per_invocation() {
-    let server = Server::builder().start().await;
-    let forward = r#"["NCAP_TEST_FRESH"]"#;
-    let first = server
-        .client()
-        .env("NCAP_ENV_FORWARD", forward)
-        .env("NCAP_TEST_FRESH", "first")
-        .run(&["sh", "-c", "printf %s \"$NCAP_TEST_FRESH\""]);
-    let second = server
-        .client()
-        .env("NCAP_ENV_FORWARD", forward)
-        .env("NCAP_TEST_FRESH", "second")
-        .run(&["sh", "-c", "printf %s \"$NCAP_TEST_FRESH\""]);
-    server.stop();
-
-    assert_eq!(first.stdout, "first");
-    assert_eq!(second.stdout, "second");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn forwarded_name_unset_on_host_is_silently_omitted() {
-    let server = Server::builder().start().await;
-    let out = server
-        .client()
-        .env("NCAP_ENV_FORWARD", r#"["NCAP_TEST_MISSING"]"#)
-        .run(&[
-            "sh",
-            "-c",
-            "printf %s \"${NCAP_TEST_MISSING:-unset-fallback}\"",
-        ]);
-    server.stop();
-
-    assert_eq!(out.stdout, "unset-fallback");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn duplicate_env_flags_keep_last_value() {
-    let server = Server::builder().start().await;
-    let out = server
-        .client()
-        .env_flag("NCAP_TEST_DUP=first")
-        .env_flag("NCAP_TEST_DUP=second")
-        .run(&["sh", "-c", "printf %s \"$NCAP_TEST_DUP\""]);
-    server.stop();
-
-    assert_eq!(out.stdout, "second");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn merged_env_arrives_deduplicated_in_request() {
-    let server = Server::builder()
-        .respond(vec![Message::Exit(Exit {
-            code: Some(0),
-            signal: None,
-        })])
-        .start()
-        .await;
-    let out = server
-        .client()
-        .env(
-            "NCAP_ENV_FORWARD",
-            r#"["NCAP_TEST_FWD_A", "NCAP_TEST_FWD_C"]"#,
-        )
-        .env("NCAP_TEST_FWD_A", "host-a")
-        .env("NCAP_TEST_FWD_C", "host-c")
-        .env_flag("NCAP_TEST_FWD_A=flag-a")
-        .env_flag("NCAP_TEST_FWD_B=flag-b")
-        .env_flag("NCAP_TEST_FWD_B=flag-b2")
-        .run(&["true"]);
-
-    assert_eq!(out.status.code(), Some(0));
-    let request = server.captured_request().expect("captured request");
-    server.stop();
-    let merged: std::collections::BTreeMap<String, String> = request
-        .env
-        .iter()
-        .map(|entry| entry.split_once('=').expect("entry carries ="))
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
-    assert_eq!(
-        merged.len(),
-        request.env.len(),
-        "duplicates arrived: {:?}",
-        request.env
-    );
-    assert_eq!(
-        merged.get("NCAP_TEST_FWD_A").map(String::as_str),
-        Some("flag-a"),
-        "env={merged:?}"
-    );
-    assert_eq!(
-        merged.get("NCAP_TEST_FWD_B").map(String::as_str),
-        Some("flag-b2"),
-        "env={merged:?}"
-    );
-    assert_eq!(
-        merged.get("NCAP_TEST_FWD_C").map(String::as_str),
-        Some("host-c"),
-        "env={merged:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn request_env_overrides_inherited_env() {
-    let server = Server::builder().start().await;
-    let run = run_raw_request(
-        &mut server.raw().await,
-        Request {
-            env: vec!["NCAP_TEST_VAR=hello".into()],
-            ..request(server.path(), "printf %s \"$NCAP_TEST_VAR\"")
-        },
-    )
-    .await;
-    server.stop();
-
-    assert_clean_exit(&run.frames, "request env must override the inherited env");
-    assert_eq!(run.stdout, "hello");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn non_request_first_frame_is_error_and_close() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    framed
-        .send(Message::Stdout(b"hi".to_vec()).into_frame().unwrap())
-        .await
-        .unwrap();
-    let frames = read_until_terminal(&mut framed).await;
-    server.stop();
-
+#[test]
+fn fails_when_no_socket_is_configured() -> TestResult {
+    let mut child = ncap().args(["printf", "hi"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
     assert!(
-        matches!(terminal_of(&frames), Some(Message::Error(_))),
-        "expected Error: frames={frames:?}"
+        !status.success(),
+        "expected a usage failure, exited {status}"
     );
+    Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn version_probe_serves_server_version_then_closes_without_child() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    send_request_version(&mut framed).await;
+#[test]
+fn reads_the_socket_path_from_the_environment() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap()
+        .env("NCAP_SOCKET", &sock)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(0));
+    Ok(())
+}
 
-    let frames = read_frames_until(&mut framed, WAIT_TIGHT, |_| false).await;
+#[test]
+fn exits_1_hinting_the_socket_and_init_when_connect_fails() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (status, _, stderr) = finish(&mut child)?;
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        stderr.contains(sock.to_string_lossy().as_ref()),
+        "hint should name the socket path, stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains("ncap-ctl init"),
+        "hint should suggest `ncap-ctl init`, stderr was: {stderr}"
+    );
+    Ok(())
+}
 
+#[test]
+fn rejects_an_empty_command_before_building_a_request() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let listener = UnixListener::bind(&sock)?;
+    let mut child = ncap().arg("--socket").arg(&sock).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    assert!(!status.success(), "expected rejection, exited {status}");
+    assert_no_connection(&listener)?;
+    Ok(())
+}
+
+#[test]
+fn fails_locally_on_an_unresolvable_current_directory() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let listener = UnixListener::bind(&sock)?;
+    let doomed = tempdir()?;
+    let mut child = Command::new("/bin/sh")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("-c")
+        .arg("cd \"$1\" && /bin/rm -rf \"$1\" && exec \"$2\" --socket \"$3\" printf gone")
+        .arg("doomed")
+        .arg(doomed.path())
+        .arg(env!("CARGO_BIN_EXE_ncap"))
+        .arg(&sock)
+        .spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    assert_eq!(status.code(), Some(1));
+    assert_no_connection(&listener)?;
+    Ok(())
+}
+
+#[test]
+fn opens_the_exec_connection_with_a_request_carrying_the_invocation() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let workdir = tempdir()?;
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .current_dir(workdir.path())
+        .args(["printf", "hello", "world"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (tag, payload) = server.result();
+    assert_eq!(tag, REQUEST);
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["command"], "printf");
+    assert_eq!(request["args"], json!(["hello", "world"]));
+    let expected_cwd = fs::canonicalize(workdir.path())?
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(request["cwd"], expected_cwd.as_str());
+    assert_eq!(request["env"], json!([]));
+    Ok(())
+}
+
+#[test]
+fn passes_the_cwd_flag_through_to_the_request() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let workdir = tempdir()?;
+    let cwd = fs::canonicalize(workdir.path())?
+        .to_string_lossy()
+        .into_owned();
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--cwd")
+        .arg(&cwd)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["cwd"], cwd.as_str());
+    Ok(())
+}
+
+#[test]
+fn accepts_the_short_flag_forms_for_socket_env_and_cwd() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let workdir = tempdir()?;
+    let cwd = fs::canonicalize(workdir.path())?
+        .to_string_lossy()
+        .into_owned();
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("-s")
+        .arg(&sock)
+        .arg("-e")
+        .arg("SHORT_FLAG=short-value")
+        .arg("-c")
+        .arg(&cwd)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["SHORT_FLAG=short-value"]));
+    assert_eq!(request["cwd"], cwd.as_str());
+    Ok(())
+}
+
+#[test]
+fn passes_args_after_the_separator_verbatim() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--")
+        .args(["grep", "-e", "needle", "haystack.txt"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["command"], "grep");
+    assert_eq!(request["args"], json!(["-e", "needle", "haystack.txt"]));
+    Ok(())
+}
+
+#[test]
+fn converts_non_utf8_command_line_values_lossily() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--env")
+        .arg(OsStr::from_bytes(b"BAD\xff=v\xfe"))
+        .arg("printf")
+        .arg(OsStr::from_bytes(b"lossy\xff"))
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["args"], json!(["lossy\u{FFFD}"]));
+    assert_eq!(request["env"], json!(["BAD\u{FFFD}=v\u{FFFD}"]));
+    Ok(())
+}
+
+#[test]
+fn resolves_forwarded_names_from_the_client_environment() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .env("NCAP_ENV_FORWARD", r#"["FWD_SET", "FWD_MISSING"]"#)
+        .env("FWD_SET", "alpha")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["FWD_SET=alpha"]));
+    Ok(())
+}
+
+#[test]
+fn copies_bare_env_flags_from_the_client_environment() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--env")
+        .arg("BARE_SET")
+        .arg("--env")
+        .arg("BARE_MISSING")
+        .env("BARE_SET", "bare-value")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["BARE_SET=bare-value"]));
+    Ok(())
+}
+
+#[test]
+fn passes_empty_and_equals_bearing_flag_values_verbatim() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--env")
+        .arg("EMPTY=")
+        .arg("--env")
+        .arg("EQ=a=b")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["EMPTY=", "EQ=a=b"]));
+    Ok(())
+}
+
+#[test]
+fn lets_later_layers_win_by_key_without_moving_position() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .env("NCAP_ENV_FORWARD", r#"["LAYER_A", "LAYER_B", "LAYER_C"]"#)
+        .env("LAYER_A", "forwarded-a")
+        .env("LAYER_B", "forwarded-b")
+        .env("LAYER_C", "forwarded-c")
+        .arg("--env")
+        .arg("LAYER_B=flag-b")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(
+        request["env"],
+        json!([
+            "LAYER_A=forwarded-a",
+            "LAYER_B=flag-b",
+            "LAYER_C=forwarded-c"
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn lets_a_later_flag_replace_an_earlier_flag_by_key() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--env")
+        .arg("FIRST=one")
+        .arg("--env")
+        .arg("DUP=first")
+        .arg("--env")
+        .arg("DUP=second")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["FIRST=one", "DUP=second"]));
+    Ok(())
+}
+
+#[test_case("not json at all"; "not json")]
+#[test_case(r#"["A", 7]"#; "not an array of names")]
+fn fails_locally_on_a_malformed_env_forward_list(raw: &str) -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let listener = UnixListener::bind(&sock)?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .env("NCAP_ENV_FORWARD", raw)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    assert_eq!(status.code(), Some(1));
+    assert_no_connection(&listener)?;
+    Ok(())
+}
+
+#[test_case("=VALUE"; "key is empty with a value")]
+#[test_case(""; "flag is the empty string")]
+fn fails_locally_on_an_env_flag_with_an_empty_key(flag_value: &str) -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let listener = UnixListener::bind(&sock)?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--env")
+        .arg(flag_value)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    assert_eq!(status.code(), Some(1));
+    assert_no_connection(&listener)?;
+    Ok(())
+}
+
+#[test]
+fn pumps_stdin_frames_until_host_stdin_eof() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        let first = wire.read_frame().expect("stdin data frame arrives");
+        let eof = wire.read_frame().expect("stdin eof frame arrives");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+        vec![first, eof]
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["cat"]).spawn()?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin.write_all(b"feed me")?;
+    drop(stdin);
+    let (_, _, _) = finish(&mut child)?;
+    let frames = server.result();
     assert_eq!(
         frames,
-        vec![Message::ServerVersion(VersionMsg {
-            version: CURRENT_VERSION.to_string(),
-        })],
-        "the probe gets exactly one ServerVersion frame: frames={frames:?}"
+        vec![(STDIN, b"feed me".to_vec()), (STDIN, Vec::new())]
     );
-
-    // The reply is terminal: whatever follows the close carries no Exit/Error.
-    let after = read_frames_until(&mut framed, WAIT_TIGHT, |_| false).await;
-    let logs = read_server_log(server.path().join("logs"));
-    server.stop();
-
-    assert!(
-        !after
-            .iter()
-            .any(|frame| matches!(frame, Message::Exit(_) | Message::Error(_))),
-        "no terminal frame may follow the probe reply: frames={after:?}"
-    );
-    assert!(
-        logs.contains("version probe served"),
-        "the debug probe line must appear: {logs:?}"
-    );
-    assert!(
-        !logs.contains("exec request"),
-        "no Child may spawn for a probe: {logs:?}"
-    );
+    Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn version_probe_with_non_empty_payload_is_error_and_close() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    framed
-        .send(Frame {
-            frame_type: FrameType::RequestVersion,
-            payload: b"junk".to_vec(),
-        })
-        .await
-        .unwrap();
-    let frames = read_until_terminal(&mut framed).await;
-    server.stop();
+#[test]
+fn sends_a_lone_empty_stdin_frame_when_stdin_is_immediately_eof() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        let frame = wire.read_frame().expect("stdin eof frame arrives");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+        frame
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .args(["cat"])
+        .stdin(Stdio::null())
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let frame = server.result();
+    assert_eq!(frame, (STDIN, Vec::new()));
+    Ok(())
+}
 
+#[test]
+fn chunks_large_stdin_across_multiple_frames() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let payload = "0123456789abcdef".repeat(6 * 1024).into_bytes();
+    let total = payload.len();
+    let server = serve(&sock, move |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        let mut received = Vec::new();
+        let mut frames = 0;
+        while received.len() < total {
+            let (tag, data) = wire.read_frame().expect("stdin frame arrives");
+            assert_eq!(tag, STDIN, "only stdin frames carry the pump");
+            received.extend_from_slice(&data);
+            frames += 1;
+        }
+        (received, frames)
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["cat"]).spawn()?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin.write_all(&payload)?;
+    drop(stdin);
+    let (_, _, _) = finish(&mut child)?;
+    let (received, frames) = server.result();
+    assert_eq!(received, payload);
     assert!(
-        matches!(terminal_of(&frames), Some(Message::Error(_))),
-        "expected Error: frames={frames:?}"
+        frames >= 2,
+        "expected the pump to chunk around 8 KiB at a time, got {frames} frames for {total} bytes"
     );
+    Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn reserved_version_frame_mid_bridge_is_ignored() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    send_request(&mut framed, server.path(), "printf ok").await;
-    framed
-        .send(
-            Message::Version(VersionMsg {
-                version: "9.9.9".into(),
-            })
-            .into_frame()
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let run = read_until_terminal(&mut framed).await;
-    server.stop();
-
-    assert_clean_exit(&run, "a stray Version frame must not kill the bridge");
-    assert_eq!(stdout_of(&run), "ok");
+#[test]
+fn treats_a_host_stdin_read_error_as_eof() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    // a directory fd makes the client's stdin read fail with EISDIR, the read
+    // error the pump must fold into EOF
+    let stdin_directory = fs::File::open(holder.path())?;
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        let frame = wire.read_frame().expect("stdin eof frame arrives");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+        frame
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .args(["cat"])
+        .stdin(Stdio::from(stdin_directory))
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let frame = server.result();
+    assert_eq!(frame, (STDIN, Vec::new()));
+    Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn old_style_request_with_version_field_still_decodes_and_runs() {
-    let server = Server::builder().start().await;
-    let mut framed = server.raw().await;
-    let old_style = format!(
-        r#"{{"command":"sh","args":["-c","printf ok"],"cwd":"{}","env":[],"version":"9.9.9"}}"#,
-        server.path().display()
-    );
-    framed
-        .send(Frame {
-            frame_type: FrameType::Request,
-            payload: old_style.into_bytes(),
-        })
-        .await
-        .unwrap();
-    let run = read_until_terminal(&mut framed).await;
-    server.stop();
-
-    assert_clean_exit(&run, "an old-style versioned Request must still run");
-    assert_eq!(stdout_of(&run), "ok");
+#[test]
+fn keeps_the_child_exit_code_when_the_child_finishes_before_stdin_eof() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(EXIT, br#"{"code":7}"#)
+            .expect("exit frame sends");
+    })?;
+    // stdin stays open, so the client's eof frame races the closed socket and
+    // its failed send must not turn the exit into 1
+    let mut child = ncap().arg("--socket").arg(&sock).args(["cat"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(7));
+    Ok(())
 }
 
-// A failed kill is the test vehicle only: the subject is the emit-time
-// severity gate shared by the log file and the stderr mirror. The signal
-// number 200 is invalid, so the failure does not race the child's life like
-// an already-exited group would.
-const OUT_OF_RANGE_SIGNAL: u8 = 200;
+#[test]
+fn streams_child_stdout_and_stderr_to_the_terminal() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(STDOUT, b"stream-out")
+            .expect("stdout frame sends");
+        wire.write_frame(STDERR, b"stream-err")
+            .expect("stderr frame sends");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["tee"]).spawn()?;
+    let (_, stdout, stderr) = finish(&mut child)?;
+    server.result();
+    assert_eq!(stdout, "stream-out");
+    assert_eq!(stderr, "stream-err");
+    Ok(())
+}
 
-#[test_case("error", false ; "error_level_suppresses_kill_warning_in_both_sinks")]
-#[test_case("debug", true ; "debug_level_keeps_kill_warning_in_both_sinks")]
-#[tokio::test(flavor = "multi_thread")]
-async fn kill_warning_appears_in_both_sinks_only_at_debug_level(level: &str, emits: bool) {
-    let server = Server::builder().log_level(level).start().await;
-    let stderr_before = server.stderr();
-    let mut framed = server.raw().await;
-    // The child holds the full hold after `READY`, so the signal frame —
-    // already sent — is near-certainly processed before the terminal read
-    // finishes; absence of the warning is the assertion, not proof it fired.
-    send_request(
-        &mut framed,
-        server.path(),
-        &format!("echo READY; sleep {SHELL_HOLD}"),
-    )
-    .await;
-    read_until_stdout_contains(&mut framed, "READY").await;
-    send_signal(&mut framed, OUT_OF_RANGE_SIGNAL).await;
-    let frames = read_until_terminal(&mut framed).await;
-    let stderr = server.stderr_since(&stderr_before);
-    let log_file = read_server_log(server.path().join("logs"));
-    server.stop();
+#[test]
+fn reassembles_chunked_output_frames_per_stream_in_order() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(STDOUT, b"chunk-")
+            .expect("stdout frame sends");
+        wire.write_frame(STDOUT, b"one")
+            .expect("stdout frame sends");
+        wire.write_frame(STDERR, b"err-1")
+            .expect("stderr frame sends");
+        wire.write_frame(STDERR, b"err-2")
+            .expect("stderr frame sends");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (_, stdout, stderr) = finish(&mut child)?;
+    server.result();
+    assert_eq!(stdout, "chunk-one");
+    assert_eq!(stderr, "err-1err-2");
+    Ok(())
+}
 
-    assert_clean_exit(&frames, "the connection must continue past the bad signal");
-    assert_eq!(
-        stderr.contains("kill(-"),
-        emits,
-        "the {level} level must gate the stderr mirror: {stderr:?}"
+#[test]
+fn exits_with_the_child_code_carried_by_the_exit_frame() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(EXIT, br#"{"code":42}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["false"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(42));
+    Ok(())
+}
+
+#[test]
+fn exits_with_128_plus_the_child_signal() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(EXIT, br#"{"signal":9}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sleep"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(137));
+    Ok(())
+}
+
+#[test_case(127; "code 127")]
+#[test_case(126; "code 126")]
+fn exits_the_spawn_failure_codes_with_a_stderr_notice(code: u8) -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let payload = format!(r#"{{"code":{code}}}"#);
+    let server = serve(&sock, move |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(EXIT, payload.as_bytes())
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, stderr) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(code as i32));
+    assert!(
+        !stderr.is_empty(),
+        "the client should print a notice naming the cause"
     );
-    assert_eq!(
-        log_file.contains("kill(-"),
-        emits,
-        "the {level} level must gate the log file: {log_file:?}"
+    Ok(())
+}
+
+#[test]
+fn exits_1_with_a_notice_when_the_exit_frame_carries_no_fields() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(EXIT, b"{}").expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, stderr) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        !stderr.is_empty(),
+        "the client should print a notice naming the cause"
     );
-    if emits {
-        let signal_number = OUT_OF_RANGE_SIGNAL.to_string();
-        assert!(
-            stderr.contains(&signal_number) && log_file.contains(&signal_number),
-            "the warning must name the signal: stderr={stderr:?} log={log_file:?}"
-        );
+    Ok(())
+}
+
+#[test]
+fn exits_1_naming_the_cause_when_the_terminal_frame_is_error() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(ERROR, br#"{"message":"no such directory"}"#)
+            .expect("error frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, stderr) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        stderr.contains("no such directory"),
+        "the notice should name the cause, stderr was: {stderr}"
+    );
+    Ok(())
+}
+
+#[test_case(EXIT, br#"{"code":1,"signal":9}"#; "exit frame with both code and signal set")]
+#[test_case(EXIT, b"not-json"; "exit payload that is not json")]
+#[test_case(SERVER_STOPPING, b"unexpected"; "server stopping frame with a non-empty payload")]
+fn exits_1_on_terminal_frames_the_protocol_rejects(tag: u8, payload: &'static [u8]) -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, move |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(tag, payload)
+            .expect("rejected frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(1));
+    Ok(())
+}
+
+#[test]
+fn exits_1_on_a_frame_declaring_more_than_the_payload_cap() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        // 16 MiB is the cap; this Stdout header declares one byte more and never sends a payload
+        wire.stream
+            .write_all(&[STDOUT, 0x01, 0x00, 0x00, 0x01])
+            .expect("oversized header sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(1));
+    Ok(())
+}
+
+#[test]
+fn exits_1_on_an_unknown_tag_byte() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        // 0x7f matches no tag in the protocol's frame table
+        wire.write_frame(0x7F, b"?")
+            .expect("unknown tag frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(1));
+    Ok(())
+}
+
+#[test]
+fn ignores_the_reserved_tag_byte_wherever_it_arrives() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        // the payload is the ServerVersion shape so the pin stays about
+        // ignoring the reserved tag, not about decode failures
+        wire.write_frame(VERSION, br#"{"version":"stray"}"#)
+            .expect("reserved frame sends");
+        wire.write_frame(STDOUT, b"after-reserved")
+            .expect("stdout frame sends");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, stdout, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(stdout, "after-reserved");
+    Ok(())
+}
+
+#[test]
+fn ignores_misdirected_frames_from_the_server() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(STDIN, b"misdirected")
+            .expect("misdirected frame sends");
+        wire.write_frame(STDOUT, b"kept-streaming")
+            .expect("stdout frame sends");
+        wire.write_frame(EXIT, br#"{"code":0}"#)
+            .expect("exit frame sends");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, stdout, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(stdout, "kept-streaming");
+    Ok(())
+}
+
+#[test]
+fn bails_with_143_and_stops_streaming_on_server_stopping() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+        wire.write_frame(STDOUT, b"before-stopping")
+            .expect("stdout frame sends");
+        wire.write_frame(SERVER_STOPPING, b"")
+            .expect("stopping frame sends");
+        // the client bails on ServerStopping, so later sends may fail; either
+        // way the frames must not be processed
+        let _ = wire.write_frame(STDOUT, b"after-stopping");
+        let _ = wire.write_frame(EXIT, br#"{"code":0}"#);
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, stdout, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(143));
+    assert_eq!(stdout, "before-stopping");
+    Ok(())
+}
+
+#[test]
+fn exits_143_when_the_socket_closes_without_a_terminal_frame() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives");
+    })?;
+    let mut child = ncap().arg("--socket").arg(&sock).args(["sh"]).spawn()?;
+    let (status, _, _) = finish(&mut child)?;
+    server.result();
+    assert_eq!(status.code(), Some(143));
+    Ok(())
+}
+
+#[test]
+fn opens_no_version_probe_connection() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let listener = UnixListener::bind(&sock)?;
+    let tag = thread::scope(|scope| -> io::Result<u8> {
+        let handled = scope.spawn(|| {
+            let (stream, _) = listener.accept().expect("the client connects");
+            let mut wire = Wire { stream };
+            let frame = wire.read_frame().expect("the request frame arrives");
+            wire.write_frame(EXIT, br#"{"code":0}"#)
+                .expect("exit frame sends");
+            frame
+        });
+        let mut child = ncap()
+            .arg("--socket")
+            .arg(&sock)
+            .args(["printf", "hi"])
+            .spawn()?;
+        let (status, _, _) = finish(&mut child)?;
+        assert_eq!(status.code(), Some(0));
+        let (tag, _) = handled.join().expect("the server script finishes");
+        Ok(tag)
+    })?;
+    assert_eq!(tag, REQUEST, "the only connection carries the exec request");
+    assert_no_connection(&listener)?;
+    Ok(())
+}
+
+#[test]
+fn sends_a_changed_forwarded_value_on_the_next_invocation() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .env("NCAP_ENV_FORWARD", r#"["FWD_SET"]"#)
+        .env("FWD_SET", "alpha")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["FWD_SET=alpha"]));
+    fs::remove_file(&sock)?;
+
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .env("NCAP_ENV_FORWARD", r#"["FWD_SET"]"#)
+        .env("FWD_SET", "beta")
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    assert_eq!(request["env"], json!(["FWD_SET=beta"]));
+    Ok(())
+}
+
+#[test]
+fn converts_a_non_utf8_cwd_lossily() -> TestResult {
+    let holder = tempdir()?;
+    let sock = holder.path().join("ncap.sock");
+    let workdir = tempdir()?;
+    let odd = workdir.path().join(OsStr::from_bytes(b"dir\xff"));
+    fs::create_dir(&odd)?;
+    let server = serve(&sock, |mut wire| {
+        wire.read_frame().expect("request frame arrives")
+    })?;
+    let mut child = ncap()
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--cwd")
+        .arg(&odd)
+        .args(["printf", "hi"])
+        .spawn()?;
+    let (_, _, _) = finish(&mut child)?;
+    let (_, payload) = server.result();
+    let request: Value = serde_json::from_slice(&payload)?;
+    let expected = format!("{}/dir\u{FFFD}", workdir.path().to_string_lossy());
+    assert_eq!(request["cwd"], expected.as_str());
+    Ok(())
+}
+
+// Frame tags from spec/protocol.md § Frames.
+const REQUEST: u8 = 0x01;
+const STDIN: u8 = 0x02;
+const STDOUT: u8 = 0x03;
+const STDERR: u8 = 0x04;
+const EXIT: u8 = 0x05;
+const ERROR: u8 = 0x06;
+const SERVER_STOPPING: u8 = 0x07;
+const VERSION: u8 = 0x08;
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn ncap() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ncap"));
+    // the request env is built from the client's own environment, so tests
+    // start from a clean one
+    command
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+struct Wire {
+    stream: std::os::unix::net::UnixStream,
+}
+
+impl Wire {
+    fn read_frame(&mut self) -> io::Result<(u8, Vec<u8>)> {
+        let mut head = [0u8; 5];
+        self.stream.read_exact(&mut head)?;
+        let len = u32::from_be_bytes(head[1..].try_into().expect("the length slice is 4 bytes"));
+        let mut payload = vec![0u8; len as usize];
+        self.stream.read_exact(&mut payload)?;
+        Ok((head[0], payload))
+    }
+
+    fn write_frame(&mut self, tag: u8, payload: &[u8]) -> io::Result<()> {
+        let mut frame = Vec::with_capacity(5 + payload.len());
+        frame.push(tag);
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+        self.stream.write_all(&frame)
     }
 }
 
-#[test_case(
-    vec![Message::Exit(Exit {
-        code: None,
-        signal: None,
-    })],
-    None, 1, "carries neither"
-    ; "exit_null_null_warns_and_exits_1"
-)]
-#[test_case(
-    vec![Message::Error(ErrorMsg {
-        message: "boom".into(),
-    })],
-    None, 1, "boom"
-    ; "error_frame_exits_1_with_message_on_stderr"
-)]
-#[tokio::test(flavor = "multi_thread")]
-async fn client_maps_terminal_frame_to_exit_code(
-    respond: Vec<Message>,
-    stdout: Option<&str>,
-    code: i32,
-    stderr: &str,
-) {
-    let server = Server::builder().respond(respond).start().await;
-    let out = server.client().run(&["echo", "hi"]);
-    server.stop();
-
-    assert_exit_and_stdout(&out, code, stdout);
-    assert!(out.stderr.contains(stderr), "stderr={}", out.stderr);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn connect_failure_names_socket_and_suggests_init() {
-    let (_dir, socket) = missing_socket();
-
-    let out = Client::at(&socket).run(&["echo", "hi"]);
-
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        out.stderr.contains(socket.to_str().unwrap()),
-        "stderr={}",
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("ncap-ctl init"),
-        "stderr={}",
-        out.stderr
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn empty_key_env_flag_fails_locally_without_connect_hint() {
-    let (_dir, socket) = missing_socket();
-
-    let out = Client::at(&socket).env_flag("=VALUE").run(&["echo", "hi"]);
-
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        out.stderr.contains("`--env` `=VALUE` has an empty key"),
-        "stderr={}",
-        out.stderr
-    );
-    assert!(
-        !out.stderr.contains("ncap-ctl init"),
-        "the connect hint must not appear: stderr={}",
-        out.stderr
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn stdio_round_trips_verbatim_with_exit_0() {
-    let server = Server::builder().start().await;
-    // Each case spawns real processes, so a reduced case count keeps the
-    // suite fast while the shared server carries the expensive setup.
-    proptest!(ProptestConfig::with_cases(16), |(stdout_text in arbitrary_payload(), stderr_text in arbitrary_payload())| {
-        let result = server
-            .client()
-            .run(&[
-                "sh",
-                "-c",
-                "printf %s \"$1\"; printf %s \"$2\" >&2",
-                "sh",
-                &stdout_text,
-                &stderr_text,
-            ]);
-        prop_assert_eq!(result.stdout, stdout_text);
-        prop_assert_eq!(result.stderr, stderr_text);
-        prop_assert_eq!(result.status.code(), Some(0));
+fn serve<T, F>(sock: &std::path::Path, script: F) -> io::Result<Server<T>>
+where
+    T: Send + 'static,
+    F: FnOnce(Wire) -> T + Send + 'static,
+{
+    let listener = UnixListener::bind(sock)?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        // catch_unwind surfaces script panics through Server::result instead
+        // of stalling it on a dropped channel
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (stream, _) = listener.accept().expect("the client connects");
+            script(Wire { stream })
+        }));
+        let _ = tx.send(outcome);
     });
-    server.stop();
+    Ok(Server { rx })
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn stdin_writes_verbatim_to_child_file() {
-    let server = Server::builder().start().await;
-    // Each case spawns real processes, so a reduced case count keeps the
-    // suite fast while the shared server carries the expensive setup.
-    proptest!(ProptestConfig::with_cases(16), |(bytes in prop::collection::vec(any::<u8>(), 0..20000))| {
-        let file = tempfile::NamedTempFile::new_in(server.path()).unwrap();
-        let result = server
-            .client()
-            .stdin(&bytes)
-            .run(&["sh", "-c", "cat > \"$1\"", "sh", file.path().to_str().unwrap()]);
-        prop_assert_eq!(result.status.code(), Some(0));
-        prop_assert_eq!(fs::read(file.path()).unwrap(), bytes);
-    });
-    server.stop();
+struct Server<T> {
+    rx: mpsc::Receiver<thread::Result<T>>,
 }
 
-fn read_server_log(dir: std::path::PathBuf) -> String {
-    let entries: Vec<_> = fs::read_dir(&dir)
-        .expect("log dir")
-        .map(|entry| entry.expect("log dir entry").path())
-        .collect();
-    assert_eq!(entries.len(), 1, "one run, one log file");
-    fs::read_to_string(&entries[0]).expect("read log file")
+impl<T> Server<T> {
+    fn result(self) -> T {
+        match self.rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(Ok(value)) => value,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => panic!("the server script did not finish within 30s"),
+        }
+    }
 }
 
-// A NUL-free Unicode string: full range of multibyte, newline, and control
-// characters, sized so large payloads cross the server's pipe-read chunk
-// boundaries. NUL is filtered out because execve argv cannot carry it.
-fn arbitrary_payload() -> impl Strategy<Value = String> {
-    prop::collection::vec(any::<char>(), 0..2048)
-        .prop_map(|chars| chars.into_iter().filter(|c| *c != '\0').collect())
+fn finish(
+    child: &mut std::process::Child,
+) -> io::Result<(std::process::ExitStatus, String, String)> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("ncap did not exit within 30s");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = drain(child.stdout.take())?;
+    let stderr = drain(child.stderr.take())?;
+    Ok((status, stdout, stderr))
+}
+
+fn drain<R: Read>(pipe: Option<R>) -> io::Result<String> {
+    let mut collected = String::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_string(&mut collected)?;
+    }
+    Ok(collected)
+}
+
+fn assert_no_connection(listener: &UnixListener) -> io::Result<()> {
+    listener.set_nonblocking(true)?;
+    match listener.accept() {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        other => panic!("expected no connection attempt, accept says {other:?}"),
+    }
 }

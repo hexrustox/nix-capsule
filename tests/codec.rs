@@ -1,350 +1,435 @@
-//! Byte-level tests for the wire protocol at its public seam: `nix_capsule::protocol`.
-//!
-//! Example-based tables pin the documented wire format with exact literals;
-//! property-based tests generalize round-tripping, chunk tolerance, and
-//! transport-violation handling across arbitrary inputs.
+//! Wire framing and frame payloads, pinned to `spec/protocol.md`.
 
-use bytes::{BufMut, BytesMut};
-use nix_capsule::protocol::{
-    CURRENT_VERSION, DecodeError, EncodeError, ErrorMsg, Exit, FrameCodec, FrameType, MAX_PAYLOAD,
-    Message, Request, SignalMsg, VersionMsg,
-};
-use proptest::prelude::*;
+use std::error::Error;
+
+use bytes::BytesMut;
 use test_case::test_case;
 use tokio_util::codec::{Decoder, Encoder};
 
-fn encoded(msg: &Message) -> Vec<u8> {
+use nix_capsule::protocol::{
+    DecodeError, EncodeError, ErrorMsg, Exit, Frame, FrameCodec, FrameType, Message, Request,
+    SignalMsg, VersionMsg,
+};
+
+#[test]
+fn encodes_tag_then_big_endian_length_then_payload() -> Result<(), Box<dyn Error>> {
+    // 0x00010203: the four length bytes differ, so byte order is pinned.
+    let payload = vec![0xA5; 66_051];
+    let mut codec = FrameCodec;
     let mut dst = BytesMut::new();
-    FrameCodec
-        .encode(msg.clone().into_frame().unwrap(), &mut dst)
-        .unwrap();
-    dst.to_vec()
+    codec.encode(
+        Frame {
+            frame_type: FrameType::Stdout,
+            payload: payload.clone(),
+        },
+        &mut dst,
+    )?;
+    assert_eq!(&dst[..5], &[0x03, 0x00, 0x01, 0x02, 0x03][..]);
+    assert_eq!(&dst[5..], payload.as_slice());
+    Ok(())
 }
 
-fn decoded(buf: &[u8]) -> Message {
+#[test]
+fn decodes_hand_built_wire_bytes() -> Result<(), Box<dyn Error>> {
     let mut codec = FrameCodec;
-    let mut src = BytesMut::from(buf);
-    let frame = codec.decode(&mut src).unwrap().expect("a complete frame");
-    Message::from_frame(frame).unwrap()
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&[0x03, 0x00, 0x00, 0x00, 0x02, 0xC3, 0x28]);
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("all seven bytes of one frame are buffered");
+    assert_eq!(frame.frame_type, FrameType::Stdout);
+    assert_eq!(frame.payload.as_slice(), &[0xC3, 0x28][..]);
+    Ok(())
 }
 
-fn framed(tag: u8, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(5 + payload.len());
-    out.push(tag);
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
-    out
-}
-
-fn feed_in_chunks(bytes: &[u8], chunk: usize) -> Result<Vec<Message>, DecodeError> {
+#[test]
+fn yields_no_frame_while_header_incomplete() -> Result<(), Box<dyn Error>> {
     let mut codec = FrameCodec;
-    let mut src = BytesMut::new();
-    let mut out = Vec::new();
-    for piece in bytes.chunks(chunk.max(1)) {
-        src.extend_from_slice(piece);
-        while let Some(frame) = codec.decode(&mut src)? {
-            out.push(Message::from_frame(frame).unwrap());
-        }
-    }
-    Ok(out)
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&[0x03]);
+    assert!(
+        codec.decode(&mut buf)?.is_none(),
+        "no frame from a 1-byte header prefix"
+    );
+    buf.extend_from_slice(&[0x00]);
+    assert!(
+        codec.decode(&mut buf)?.is_none(),
+        "no frame from a 2-byte header prefix"
+    );
+    buf.extend_from_slice(&[0x00]);
+    assert!(
+        codec.decode(&mut buf)?.is_none(),
+        "no frame from a 3-byte header prefix"
+    );
+    buf.extend_from_slice(&[0x00]);
+    assert!(
+        codec.decode(&mut buf)?.is_none(),
+        "no frame from a 4-byte header prefix"
+    );
+    Ok(())
 }
 
-prop_compose! {
-    fn arb_request()
-        (command in ".*",
-         args in prop::collection::vec(".*", 0..8),
-         cwd in ".*",
-         env in prop::collection::vec(".*", 0..8))
-        -> Request {
-        Request { command, args, cwd, env }
-    }
+#[test]
+fn decodes_frame_fed_in_arbitrary_chunks() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&[0x03, 0x00]);
+    assert!(
+        codec.decode(&mut buf)?.is_none(),
+        "no frame from 2 of 5 header bytes"
+    );
+    buf.extend_from_slice(&[0x00, 0x00, 0x03, b'a']);
+    assert!(
+        codec.decode(&mut buf)?.is_none(),
+        "no frame from a complete header and 1 of 3 payload bytes"
+    );
+    buf.extend_from_slice(&[b'b', b'c']);
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("the frame completes with the third fragment");
+    assert_eq!(frame.frame_type, FrameType::Stdout);
+    assert_eq!(frame.payload.as_slice(), b"abc".as_slice());
+    Ok(())
 }
 
-fn arb_message() -> impl Strategy<Value = Message> {
-    prop_oneof![
-        arb_request().prop_map(Message::Request),
-        prop::collection::vec(any::<u8>(), 0..256).prop_map(Message::Stdin),
-        prop::collection::vec(any::<u8>(), 0..256).prop_map(Message::Stdout),
-        prop::collection::vec(any::<u8>(), 0..256).prop_map(Message::Stderr),
-        // `Exit` with both fields set is never valid on the wire
-        // (`None`, `None` is the unknowable-status exception), so the
-        // round-trip strategy excludes it; both-set rejection is pinned
-        // below.
-        (any::<Option<u8>>(), any::<Option<u8>>(),)
-            .prop_filter("not both set", |(code, signal)| !(code.is_some()
-                && signal.is_some()))
-            .prop_map(|(code, signal)| Message::Exit(Exit { code, signal })),
-        ".*".prop_map(|message| Message::Error(ErrorMsg { message })),
-        Just(Message::ServerStopping),
-        Just(Message::RequestVersion),
-        ".*".prop_map(|version| Message::Version(VersionMsg { version })),
-        ".*".prop_map(|version| Message::ServerVersion(VersionMsg { version })),
-        any::<u8>().prop_map(|signal| Message::Signal(SignalMsg { signal })),
-    ]
+#[test]
+fn decodes_back_to_back_frames_in_fifo_order() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(0x03, b"first"));
+    buf.extend_from_slice(&wire(0x04, b"second"));
+    buf.extend_from_slice(&[0x02]);
+
+    let first_frame = codec
+        .decode(&mut buf)?
+        .expect("the first frame is fully buffered");
+    assert_eq!(first_frame.frame_type, FrameType::Stdout);
+    assert_eq!(first_frame.payload.as_slice(), b"first".as_slice());
+
+    let second_frame = codec
+        .decode(&mut buf)?
+        .expect("the second frame is fully buffered");
+    assert_eq!(second_frame.frame_type, FrameType::Stderr);
+    assert_eq!(second_frame.payload.as_slice(), b"second".as_slice());
+
+    let trailing = codec.decode(&mut buf)?;
+    assert!(
+        trailing.is_none(),
+        "a lone 0x02 byte is 1 of 5 header bytes, got {trailing:?}"
+    );
+    Ok(())
 }
 
-fn arb_known_tag() -> impl Strategy<Value = u8> {
-    0x01u8..=0x0b
+#[test]
+fn rejects_payload_above_the_cap_from_the_header_alone() {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    // 0x01000001 = 16_777_217 = the 16 MiB cap + 1.
+    buf.extend_from_slice(&[0x03, 0x01, 0x00, 0x00, 0x01]);
+    let err = codec.decode(&mut buf).unwrap_err();
+    assert!(
+        matches!(err, DecodeError::PayloadTooLarge(16_777_217)),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn accepts_header_declaring_exactly_the_cap() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    // 0x01000000 = 16_777_216 = the cap itself.
+    buf.extend_from_slice(&[0x03, 0x01, 0x00, 0x00, 0x00]);
+    let decoded = codec.decode(&mut buf)?;
+    assert!(
+        decoded.is_none(),
+        "the cap itself is a legal length; the frame is merely incomplete, got {decoded:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_encoding_payload_above_the_cap() {
+    let mut codec = FrameCodec;
+    let mut dst = BytesMut::new();
+    let frame = Frame {
+        frame_type: FrameType::Stdout,
+        payload: vec![0; 16_777_217],
+    };
+    let err = codec.encode(frame, &mut dst).unwrap_err();
+    assert!(
+        matches!(err, EncodeError::PayloadTooLarge(16_777_217)),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn encodes_payload_at_exactly_the_cap() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut dst = BytesMut::new();
+    codec.encode(
+        Frame {
+            frame_type: FrameType::Stdout,
+            payload: vec![0xA7; 16_777_216],
+        },
+        &mut dst,
+    )?;
+    assert_eq!(&dst[..5], &[0x03, 0x01, 0x00, 0x00, 0x00][..]);
+    assert_eq!(dst.len(), 16_777_221);
+    Ok(())
+}
+
+#[test_case(0x00; "below_the_tag_table")]
+#[test_case(0x0C; "above_the_tag_table")]
+fn rejects_unknown_tag_byte(tag: u8) {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&[tag, 0x00, 0x00, 0x00, 0x00]);
+    let err = codec.decode(&mut buf).unwrap_err();
+    assert!(
+        matches!(&err, DecodeError::UnknownFrameType(seen) if *seen == tag),
+        "got {err:?}"
+    );
 }
 
 #[test_case(
     Message::Request(Request {
-        command: "sh".into(),
-        args: vec![],
-        cwd: "/".into(),
-        env: vec![],
+        command: "git".into(),
+        args: vec!["status".into(), "--porcelain".into()],
+        cwd: "/build".into(),
+        env: vec!["LC_ALL=C".into()],
     }),
-    framed(0x01, br#"{"command":"sh","args":[],"cwd":"/","env":[]}"#)
-    ; "request_encodes_without_version"
+    0x01,
+    br#"{"command":"git","args":["status","--porcelain"],"cwd":"/build","env":["LC_ALL=C"]}"#;
+    "request_serializes_every_field_as_json"
 )]
 #[test_case(
-    Message::Stdin(vec![0xde, 0xad]),
-    b"\x02\x00\x00\x00\x02\xde\xad".to_vec()
-    ; "stdin_encodes_to_tag_02"
+    Message::Stdin(b"\xFF\xFE\x00".to_vec()),
+    0x02,
+    b"\xFF\xFE\x00";
+    "stdin_carries_raw_non_utf8_bytes"
 )]
 #[test_case(
-    Message::Stdout(b"out".to_vec()),
-    b"\x03\x00\x00\x00\x03out".to_vec()
-    ; "stdout_encodes_to_tag_03"
+    Message::Stdin(Vec::new()),
+    0x02,
+    b"";
+    "stdin_eof_travels_as_a_zero_length_frame"
 )]
 #[test_case(
-    Message::Stderr(Vec::new()),
-    b"\x04\x00\x00\x00\x00".to_vec()
-    ; "stderr_empty"
+    Message::Stdout(b"stdout-bytes".to_vec()),
+    0x03,
+    b"stdout-bytes";
+    "stdout_carries_raw_bytes"
 )]
 #[test_case(
-    Message::Error(ErrorMsg { message: "boom".into() }),
-    b"\x06\x00\x00\x00\x12{\"message\":\"boom\"}".to_vec()
-    ; "error_encodes_message_json"
+    Message::Stderr(b"stderr!".to_vec()),
+    0x04,
+    b"stderr!";
+    "stderr_carries_raw_bytes"
+)]
+#[test_case(
+    Message::Exit(Exit {
+        code: Some(7),
+        signal: None,
+    }),
+    0x05,
+    br#"{"code":7}"#;
+    "exit_code_omits_the_unset_signal_field"
+)]
+#[test_case(
+    Message::Exit(Exit {
+        code: None,
+        signal: Some(9),
+    }),
+    0x05,
+    br#"{"signal":9}"#;
+    "exit_signal_omits_the_unset_code_field"
+)]
+#[test_case(
+    Message::Exit(Exit {
+        code: None,
+        signal: None,
+    }),
+    0x05,
+    br#"{}"#;
+    "exit_with_neither_field_is_the_unknowable_status"
+)]
+#[test_case(
+    Message::Error(ErrorMsg {
+        message: "spawn failed".into(),
+    }),
+    0x06,
+    br#"{"message":"spawn failed"}"#;
+    "error_serializes_its_message_as_json"
 )]
 #[test_case(
     Message::ServerStopping,
-    b"\x07\x00\x00\x00\x00".to_vec()
-    ; "server_stopping_empty_payload"
+    0x07,
+    b"";
+    "server_stopping_carries_an_empty_payload"
 )]
 #[test_case(
-    Message::Version(VersionMsg { version: CURRENT_VERSION.into() }),
-    framed(
-        0x08,
-        format!("{{\"version\":\"{CURRENT_VERSION}\"}}").as_bytes()
-    )
-    ; "version_carries_crate_version"
-)]
-#[test_case(
-    Message::RequestVersion,
-    b"\x0a\x00\x00\x00\x00".to_vec()
-    ; "request_version_is_tag_0a_empty"
-)]
-#[test_case(
-    Message::ServerVersion(VersionMsg { version: CURRENT_VERSION.into() }),
-    framed(
-        0x0b,
-        format!("{{\"version\":\"{CURRENT_VERSION}\"}}").as_bytes()
-    )
-    ; "server_version_is_tag_0b"
+    Message::Version(VersionMsg {
+        version: "9.9.9".into(),
+    }),
+    0x08,
+    br#"{"version":"9.9.9"}"#;
+    "reserved_version_frame_carries_its_payload"
 )]
 #[test_case(
     Message::Signal(SignalMsg { signal: 15 }),
-    b"\x09\x00\x00\x00\x0d{\"signal\":15}".to_vec()
-    ; "signal_encodes_number_json"
+    0x09,
+    br#"{"signal":15}"#;
+    "signal_serializes_its_number_as_json"
 )]
-fn encodes_the_documented_wire_bytes(msg: Message, want: Vec<u8>) {
-    assert_eq!(encoded(&msg), want);
-}
+#[test_case(
+    Message::RequestVersion,
+    0x0A,
+    b"";
+    "request_version_carries_an_empty_payload"
+)]
+#[test_case(
+    Message::ServerVersion(VersionMsg {
+        version: "10.0.0-rc.1".into(),
+    }),
+    0x0B,
+    br#"{"version":"10.0.0-rc.1"}"#;
+    "server_version_serializes_its_version_as_json"
+)]
+fn round_trips_message_as_wire_frame(
+    message: Message,
+    expected_tag: u8,
+    expected_payload: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let frame = message.clone().into_frame()?;
+    assert_eq!(frame.frame_type.to_byte(), expected_tag);
+    assert_eq!(frame.payload.as_slice(), expected_payload);
 
-#[test_case(Some(7), None => framed(0x05, br#"{"code":7}"#) ; "emits_code_only")]
-#[test_case(None, Some(9) => framed(0x05, br#"{"signal":9}"#) ; "emits_signal_only")]
-#[test_case(None, None => framed(0x05, b"{}") ; "neither_set_is_unknowable_status_exception")]
-fn encode_exit_emits_only_set_field(code: Option<u8>, signal: Option<u8>) -> Vec<u8> {
-    encoded(&Message::Exit(Exit { code, signal }))
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    codec.encode(frame, &mut buf)?;
+    let expected_wire = wire(expected_tag, expected_payload);
+    assert_eq!(&buf[..], &expected_wire[..]);
+
+    let decoded = codec
+        .decode(&mut buf)?
+        .expect("one complete frame was just encoded");
+    assert_eq!(Message::from_frame(decoded)?, message);
+    Ok(())
 }
 
 #[test]
-fn encode_exit_with_both_fields_set_is_rejected() {
-    let frame = Message::Exit(Exit {
-        code: Some(1),
+fn tolerates_unknown_json_fields_in_struct_payload() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(
+        0x01,
+        br#"{"command":"nix","args":["build"],"cwd":"/build","env":["FOO=bar"],"future_field":true}"#,
+    ));
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("the full frame is buffered");
+    assert_eq!(
+        Message::from_frame(frame)?,
+        Message::Request(Request {
+            command: "nix".into(),
+            args: vec!["build".into()],
+            cwd: "/build".into(),
+            env: vec!["FOO=bar".into()],
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_server_stopping_with_non_empty_payload() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(0x07, b"leftover"));
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("framing accepted the eight payload bytes");
+    let err = Message::from_frame(frame).unwrap_err();
+    assert!(
+        matches!(err, DecodeError::NonEmptyServerStopping(8)),
+        "got {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_request_version_with_non_empty_payload() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(0x0A, b"junk"));
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("framing accepted the four payload bytes");
+    let err = Message::from_frame(frame).unwrap_err();
+    assert!(
+        matches!(err, DecodeError::NonEmptyRequestVersion(4)),
+        "got {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_exit_with_both_code_and_signal_on_decode() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(0x05, br#"{"code":2,"signal":9}"#));
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("framing accepted the payload bytes");
+    let err = Message::from_frame(frame).unwrap_err();
+    assert!(matches!(err, DecodeError::InvalidExit), "got {err:?}");
+    Ok(())
+}
+
+#[test]
+fn rejects_exit_with_both_code_and_signal_on_encode() {
+    let err = Message::Exit(Exit {
+        code: Some(2),
         signal: Some(9),
     })
-    .into_frame();
-    assert!(
-        matches!(frame, Err(EncodeError::InvalidExit)),
-        "both set must not encode, got {frame:?}"
-    );
+    .into_frame()
+    .unwrap_err();
+    assert!(matches!(err, EncodeError::InvalidExit), "got {err:?}");
 }
 
 #[test]
-fn decode_exit_with_both_fields_set_is_rejected() {
-    let wire = framed(0x05, br#"{"code":1,"signal":9}"#);
+fn returns_decode_error_for_payload_that_is_not_json() -> Result<(), Box<dyn Error>> {
     let mut codec = FrameCodec;
-    let mut src = BytesMut::from(wire.as_slice());
-    let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
-    assert!(
-        matches!(Message::from_frame(frame), Err(DecodeError::InvalidExit)),
-        "both set must not decode"
-    );
-}
-
-#[test_case(0x07 ; "rejects_server_stopping_junk")]
-#[test_case(0x0a ; "rejects_request_version_junk")]
-fn decode_non_empty_payload_on_empty_payload_types_is_rejected(tag: u8) {
-    let wire = framed(tag, b"junk");
-    let mut codec = FrameCodec;
-    let mut src = BytesMut::from(wire.as_slice());
-    let frame = codec.decode(&mut src).unwrap().expect("framing succeeds");
-    match (tag, Message::from_frame(frame)) {
-        (0x07, Err(DecodeError::NonEmptyServerStopping(4))) => {}
-        (0x0a, Err(DecodeError::NonEmptyRequestVersion(4))) => {}
-        other => panic!("expected a non-empty-payload rejection, got {other:?}"),
-    }
-}
-
-#[test_case(0x00 ; "below_range")]
-#[test_case(0x0c ; "just_past_max")]
-#[test_case(0x7f ; "ascii_control_zone")]
-#[test_case(0xff ; "all_bits_set")]
-fn unknown_tag_bytes_reject_decoding(rejected_tag: u8) {
-    let mut codec = FrameCodec;
-    let mut src = BytesMut::from(framed(rejected_tag, b"x").as_slice());
-    match codec.decode(&mut src) {
-        Err(DecodeError::UnknownFrameType(tag_byte)) => assert_eq!(tag_byte, rejected_tag),
-        other => panic!("tag {rejected_tag:#x}: expected UnknownFrameType, got {other:?}"),
-    }
-}
-
-// `ServerStopping` and `RequestVersion` carry no struct payload, so they are
-// not parameters here; their non-empty-payload rejections are pinned above.
-#[test_case(FrameType::Request ; "rejects_request_junk")]
-#[test_case(FrameType::Exit ; "rejects_exit_junk")]
-#[test_case(FrameType::Error ; "rejects_error_junk")]
-#[test_case(FrameType::Version ; "rejects_version_junk")]
-#[test_case(FrameType::ServerVersion ; "rejects_server_version_junk")]
-#[test_case(FrameType::Signal ; "rejects_signal_junk")]
-fn malformed_struct_payloads_fail_decoding_without_panicking(tag: FrameType) {
-    let mut codec = FrameCodec;
-    let mut src = BytesMut::from(framed(tag.to_byte(), b"{not json").as_slice());
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(0x06, b"not json"));
     let frame = codec
-        .decode(&mut src)
-        .unwrap()
-        .expect("framing tolerates a junk payload");
-    assert!(matches!(
-        Message::from_frame(frame),
-        Err(DecodeError::Json { .. })
+        .decode(&mut buf)?
+        .expect("framing accepted the payload bytes");
+    let err = Message::from_frame(frame).unwrap_err();
+    assert!(matches!(err, DecodeError::Json { .. }), "got {err:?}");
+    Ok(())
+}
+
+#[test]
+fn returns_decode_error_for_wrong_shape_json() -> Result<(), Box<dyn Error>> {
+    let mut codec = FrameCodec;
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&wire(
+        0x01,
+        br#"{"command":3,"args":[],"cwd":"/build","env":[]}"#,
     ));
+    let frame = codec
+        .decode(&mut buf)?
+        .expect("framing accepted the payload bytes");
+    let err = Message::from_frame(frame).unwrap_err();
+    assert!(matches!(err, DecodeError::Json { .. }), "got {err:?}");
+    Ok(())
 }
 
-#[test]
-fn encoder_rejects_oversized_payloads() {
-    let mut codec = FrameCodec;
-    let mut dst = BytesMut::new();
-    let frame = Message::Stdin(vec![0; MAX_PAYLOAD + 1])
-        .into_frame()
-        .unwrap();
-    match codec.encode(frame, &mut dst) {
-        Err(EncodeError::PayloadTooLarge(n)) => assert_eq!(n, MAX_PAYLOAD + 1),
-        other => panic!("expected PayloadTooLarge, got {other:?}"),
-    }
-}
-
-#[test]
-fn declared_length_of_exactly_16_mib_is_accepted() {
-    let payload = vec![0xa5; MAX_PAYLOAD];
-    let wire = framed(0x03, &payload);
-    assert_eq!(
-        decoded(&wire),
-        Message::Stdout(payload),
-        "a full 16 MiB payload must decode"
-    );
-}
-
-#[test]
-fn declared_length_above_16_mib_is_rejected_at_header_time() {
-    let mut codec = FrameCodec;
-    let mut src = BytesMut::new();
-    src.put_u8(0x03);
-    src.put_u32(MAX_PAYLOAD as u32 + 1);
-
-    match codec.decode(&mut src) {
-        Err(DecodeError::PayloadTooLarge(n)) => assert_eq!(n, MAX_PAYLOAD + 1),
-        other => panic!("expected PayloadTooLarge, got {other:?}"),
-    }
-}
-
-proptest! {
-    #[test]
-    fn encoded_message_decodes_unchanged(msg in arb_message()) {
-        prop_assert_eq!(decoded(&encoded(&msg)), msg);
-    }
-
-    #[test]
-    fn single_stream_frame_survives_any_chunking(
-        payload in prop::collection::vec(any::<u8>(), 0..300),
-        chunk in 1usize..=200,
-        kind in 0u8..3,
-    ) {
-        let want = match kind {
-            0 => Message::Stdin(payload.clone()),
-            1 => Message::Stdout(payload.clone()),
-            _ => Message::Stderr(payload),
-        };
-        let wire = encoded(&want);
-        prop_assert_eq!(
-            feed_in_chunks(&wire, chunk).unwrap(),
-            vec![want],
-            "chunk size {} broke the stream",
-            chunk
-        );
-    }
-
-    #[test]
-    fn sequence_of_frames_survives_any_chunking(
-        msgs in prop::collection::vec(arb_message(), 1..=6),
-        chunk in 1usize..=200,
-    ) {
-        let wire: Vec<u8> = msgs.iter().flat_map(encoded).collect();
-        prop_assert_eq!(
-            feed_in_chunks(&wire, chunk).unwrap(),
-            msgs,
-            "chunk size {} broke framing boundaries",
-            chunk
-        );
-    }
-
-    #[test]
-    fn lengths_above_cap_fail_before_buffering_regardless_of_tag_or_body(
-        tag in arb_known_tag(),
-        declared in MAX_PAYLOAD as u32 + 1..=u32::MAX,
-        buffered in 0usize..=48,
-    ) {
-        let mut codec = FrameCodec;
-        let mut src = BytesMut::new();
-        src.put_u8(tag);
-        src.put_u32(declared);
-        src.extend(std::iter::repeat_n(0xa5, buffered));
-
-        match codec.decode(&mut src) {
-            Err(DecodeError::PayloadTooLarge(n)) => prop_assert_eq!(n, declared as usize),
-            other => panic!("expected PayloadTooLarge, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn strict_prefix_of_frame_yields_no_frame(
-        msg in arb_message(),
-        cut_pct in 1u32..=99,
-    ) {
-        let wire = encoded(&msg);
-        let stop = ((wire.len() as u32 * cut_pct / 100) as usize)
-            .clamp(1, wire.len() - 1);
-
-        let mut codec = FrameCodec;
-        let mut src = BytesMut::new();
-        for piece in &wire[..stop] {
-            src.extend_from_slice(std::slice::from_ref(piece));
-            prop_assert!(
-                codec.decode(&mut src).unwrap().is_none(),
-                "a {}-byte prefix produced a frame",
-                src.len()
-            );
-        }
-    }
+// spec/protocol.md § Framing: one tag byte, big-endian u32 length, payload.
+fn wire(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(5 + payload.len());
+    bytes.push(tag);
+    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
 }
