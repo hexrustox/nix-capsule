@@ -1,8 +1,7 @@
 # Flake-facing API
 
 nix-capsule runs a Nix devshell inside an OCI container while the user stays
-in their host shell (see `GLOSSARY.md` for vocabulary). It splits a devshell
-in two:
+in their host shell. It splits a devshell in two:
 
 - a **Host shell** (e.g. `devShells.default` in the consumer's flake): the
   Client `ncap`, Ctl `ncap-ctl`, and Wrapper scripts routing tool names
