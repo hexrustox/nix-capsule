@@ -1,6 +1,6 @@
 //! Version probe: after liveness, `status` and `start` Ctl open one
 //! Version probe Connection (spec/protocol.md § Version probe) and warn on
-//! Version skew (CONTEXT.md Version skew). `init` never probes.
+//! Version skew (GLOSSARY.md Version skew). `init` never probes.
 
 use std::{path::Path, time::Duration};
 

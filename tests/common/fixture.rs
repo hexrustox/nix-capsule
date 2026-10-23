@@ -55,7 +55,7 @@ const NCAP_VARS: &[&str] = &[
     "NCAP_CACHE",
 ];
 
-/// Freshness of the cached Env dump (CONTEXT.md Freshness: fresh /
+/// Freshness of the cached Env dump (GLOSSARY.md Freshness: fresh /
 /// stale / missing). The Watched files list lives on `Config`, so one
 /// `Fresh` variant covers both `["flake.nix"]` and `[]` — the Cache is
 /// seeded through the real digest interface over whatever `watch` holds.
@@ -65,7 +65,7 @@ pub(crate) enum Freshness {
     Missing,
 }
 
-/// Liveness of the Container (CONTEXT.md Liveness: Running AND
+/// Liveness of the Container (GLOSSARY.md Liveness: Running AND
 /// Socket-connectable; Running alone is not live). `running` seeds the
 /// fake Runtime adapter's inspect flag; `connectable` decides whether
 /// the Socket listener guard is held.
