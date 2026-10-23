@@ -1,12 +1,3 @@
-# AGENTS.md
-
-## Vocabulary
-
-- Use `GLOSSARY.md` when writing or editing code, specs, or docs: it fixes this
-  repo's shared vocabulary (Host shell vs Container shell, Client, Server, Ctl,
-  Wrapper, Runtime adapter, …) and lists the synonyms to avoid. Done when new
-  text uses the GLOSSARY.md terms.
-
 ## Behavior
 
 - Use `spec/<component>.md` when changing how a component behaves: `client.md`,
