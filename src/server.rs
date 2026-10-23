@@ -759,7 +759,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signal_to_a_reaped_group_maps_esrch() -> Result<(), Box<dyn std::error::Error>> {
+    fn signal_to_a_reaped_group_maps_esrch() -> anyhow::Result<()> {
         let mut child = std::process::Command::new("true")
             .process_group(0)
             .spawn()?;
@@ -784,9 +784,7 @@ mod tests {
     #[test_case::test_case(LogLevel::Info ; "minimum_info_drops_debug")]
     #[test_case::test_case(LogLevel::Warning ; "minimum_warning_drops_debug_and_info")]
     #[test_case::test_case(LogLevel::Error ; "minimum_error_keeps_only_error")]
-    fn log_emit_keeps_lines_at_or_above_the_minimum(
-        min: LogLevel,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn log_emit_keeps_lines_at_or_above_the_minimum(min: LogLevel) -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let log = Log::start(dir.path(), min)?;
         log.debug("debug line");

@@ -147,8 +147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn print_dev_env_returns_the_captured_stdout_on_success()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn print_dev_env_returns_the_captured_stdout_on_success() -> anyhow::Result<()> {
         let nix = FakeNix::new(0, b"env dump");
         let stdout = print_dev_env_with(
             &nix,

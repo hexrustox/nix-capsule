@@ -172,13 +172,13 @@ mod tests {
     #[test_case(&[] => matches Ok(v) if v.is_empty() ; "no_log_files_is_empty")]
     fn scans_log_files_epoch_ascending_ignoring_foreigners(
         seeded: &[&str],
-    ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<Vec<u64>> {
         scanned_epochs(seeded)
     }
 
     /// Seed each filename into a fresh log dir (bodies never matter) and
     /// return the epochs `sorted_server_logs` lists ascending.
-    fn scanned_epochs(seeded: &[&str]) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    fn scanned_epochs(seeded: &[&str]) -> anyhow::Result<Vec<u64>> {
         let dir = tempfile::tempdir()?;
         for name in seeded {
             fs::write(dir.path().join(name), "line")?;
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_of_a_missing_dir_is_empty_not_an_error() -> Result<(), Box<dyn std::error::Error>> {
+    fn scan_of_a_missing_dir_is_empty_not_an_error() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let entries = sorted_server_logs(&dir.path().join("absent"));
         assert!(
@@ -201,8 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn a_non_utf8_filename_is_not_counted_as_a_server_log() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn a_non_utf8_filename_is_not_counted_as_a_server_log() -> anyhow::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let dir = tempfile::tempdir()?;
         let name = OsStr::from_bytes(b"ncap-server-\xff\xfe.log");
@@ -216,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_nested_dir_with_mode_0700() -> Result<(), Box<dyn std::error::Error>> {
+    fn creates_nested_dir_with_mode_0700() -> anyhow::Result<()> {
         let outer = tempfile::tempdir()?;
         let nested = outer.path().join("a").join("b");
         ensure_dir_0700(&nested)?;
@@ -226,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_dir_keeps_its_permissions() -> Result<(), Box<dyn std::error::Error>> {
+    fn existing_dir_keeps_its_permissions() -> anyhow::Result<()> {
         let outer = tempfile::tempdir()?;
         let existing = outer.path().join("existing");
         fs::create_dir(&existing)?;
@@ -244,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn log_paths_point_at_the_seeded_files() -> Result<(), Box<dyn std::error::Error>> {
+    fn log_paths_point_at_the_seeded_files() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         for name in [
             "ncap-server-70.log",
@@ -333,7 +332,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn cache_dir_honors_xdg_cache_home_then_home() -> Result<(), Box<dyn std::error::Error>> {
+    fn cache_dir_honors_xdg_cache_home_then_home() -> anyhow::Result<()> {
         let home = tempfile::tempdir()?;
         let cache = home.path().join("cache");
 
@@ -358,7 +357,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn log_dir_honors_xdg_state_home_then_home() -> Result<(), Box<dyn std::error::Error>> {
+    fn log_dir_honors_xdg_state_home_then_home() -> anyhow::Result<()> {
         let home = tempfile::tempdir()?;
         let state = home.path().join("state");
 

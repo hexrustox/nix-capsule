@@ -1,7 +1,5 @@
 //! Wire framing and frame payloads, pinned to `spec/protocol.md`.
 
-use std::error::Error;
-
 use bytes::BytesMut;
 use test_case::test_case;
 use tokio_util::codec::{Decoder, Encoder};
@@ -12,7 +10,7 @@ use nix_capsule::protocol::{
 };
 
 #[test]
-fn encodes_tag_then_big_endian_length_then_payload() -> Result<(), Box<dyn Error>> {
+fn encodes_tag_then_big_endian_length_then_payload() -> anyhow::Result<()> {
     // 0x00010203: the four length bytes differ, so byte order is pinned.
     let payload = vec![0xA5; 66_051];
     let mut codec = FrameCodec;
@@ -30,7 +28,7 @@ fn encodes_tag_then_big_endian_length_then_payload() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn decodes_hand_built_wire_bytes() -> Result<(), Box<dyn Error>> {
+fn decodes_hand_built_wire_bytes() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&[0x03, 0x00, 0x00, 0x00, 0x02, 0xC3, 0x28]);
@@ -43,7 +41,7 @@ fn decodes_hand_built_wire_bytes() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn yields_no_frame_while_header_incomplete() -> Result<(), Box<dyn Error>> {
+fn yields_no_frame_while_header_incomplete() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&[0x03]);
@@ -70,7 +68,7 @@ fn yields_no_frame_while_header_incomplete() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn decodes_frame_fed_in_arbitrary_chunks() -> Result<(), Box<dyn Error>> {
+fn decodes_frame_fed_in_arbitrary_chunks() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&[0x03, 0x00]);
@@ -83,7 +81,7 @@ fn decodes_frame_fed_in_arbitrary_chunks() -> Result<(), Box<dyn Error>> {
         codec.decode(&mut buf)?.is_none(),
         "no frame from a complete header and 1 of 3 payload bytes"
     );
-    buf.extend_from_slice(&[b'b', b'c']);
+    buf.extend_from_slice(b"bc");
     let frame = codec
         .decode(&mut buf)?
         .expect("the frame completes with the third fragment");
@@ -93,7 +91,7 @@ fn decodes_frame_fed_in_arbitrary_chunks() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn decodes_back_to_back_frames_in_fifo_order() -> Result<(), Box<dyn Error>> {
+fn decodes_back_to_back_frames_in_fifo_order() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(0x03, b"first"));
@@ -134,7 +132,7 @@ fn rejects_payload_above_the_cap_from_the_header_alone() {
 }
 
 #[test]
-fn accepts_header_declaring_exactly_the_cap() -> Result<(), Box<dyn Error>> {
+fn accepts_header_declaring_exactly_the_cap() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     // 0x01000000 = 16_777_216 = the cap itself.
@@ -163,7 +161,7 @@ fn rejects_encoding_payload_above_the_cap() {
 }
 
 #[test]
-fn encodes_payload_at_exactly_the_cap() -> Result<(), Box<dyn Error>> {
+fn encodes_payload_at_exactly_the_cap() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut dst = BytesMut::new();
     codec.encode(
@@ -299,7 +297,7 @@ fn round_trips_message_as_wire_frame(
     message: Message,
     expected_tag: u8,
     expected_payload: &[u8],
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let frame = message.clone().into_frame()?;
     assert_eq!(frame.frame_type.to_byte(), expected_tag);
     assert_eq!(frame.payload.as_slice(), expected_payload);
@@ -318,16 +316,14 @@ fn round_trips_message_as_wire_frame(
 }
 
 #[test]
-fn tolerates_unknown_json_fields_in_struct_payload() -> Result<(), Box<dyn Error>> {
+fn tolerates_unknown_json_fields_in_struct_payload() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(
         0x01,
         br#"{"command":"nix","args":["build"],"cwd":"/build","env":["FOO=bar"],"future_field":true}"#,
     ));
-    let frame = codec
-        .decode(&mut buf)?
-        .expect("the full frame is buffered");
+    let frame = codec.decode(&mut buf)?.expect("the full frame is buffered");
     assert_eq!(
         Message::from_frame(frame)?,
         Message::Request(Request {
@@ -341,7 +337,7 @@ fn tolerates_unknown_json_fields_in_struct_payload() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn rejects_server_stopping_with_non_empty_payload() -> Result<(), Box<dyn Error>> {
+fn rejects_server_stopping_with_non_empty_payload() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(0x07, b"leftover"));
@@ -357,7 +353,7 @@ fn rejects_server_stopping_with_non_empty_payload() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn rejects_request_version_with_non_empty_payload() -> Result<(), Box<dyn Error>> {
+fn rejects_request_version_with_non_empty_payload() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(0x0A, b"junk"));
@@ -373,7 +369,7 @@ fn rejects_request_version_with_non_empty_payload() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn rejects_exit_with_both_code_and_signal_on_decode() -> Result<(), Box<dyn Error>> {
+fn rejects_exit_with_both_code_and_signal_on_decode() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(0x05, br#"{"code":2,"signal":9}"#));
@@ -397,7 +393,7 @@ fn rejects_exit_with_both_code_and_signal_on_encode() {
 }
 
 #[test]
-fn returns_decode_error_for_payload_that_is_not_json() -> Result<(), Box<dyn Error>> {
+fn returns_decode_error_for_payload_that_is_not_json() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(0x06, b"not json"));
@@ -410,7 +406,7 @@ fn returns_decode_error_for_payload_that_is_not_json() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn returns_decode_error_for_wrong_shape_json() -> Result<(), Box<dyn Error>> {
+fn returns_decode_error_for_wrong_shape_json() -> anyhow::Result<()> {
     let mut codec = FrameCodec;
     let mut buf = BytesMut::new();
     buf.extend_from_slice(&wire(

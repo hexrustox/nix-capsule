@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -17,7 +16,7 @@ use nix_capsule::ctl::digest::{Freshness, check, compute, store};
 use nix_capsule::protocol::CURRENT_VERSION;
 
 #[test]
-fn setup_env_prints_five_export_lines_in_fixed_order() -> Result<(), Box<dyn Error>> {
+fn setup_env_prints_five_export_lines_in_fixed_order() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.deriving_command(&["setup-env"]).output()?;
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -37,10 +36,7 @@ fn setup_env_prints_five_export_lines_in_fixed_order() -> Result<(), Box<dyn Err
 #[test_case("_x_", "x" ; "leading_and_trailing_separators_are_stripped")]
 #[test_case("--foo--", "foo" ; "no_leading_separator_is_emitted")]
 #[test_case("9lives", "9lives" ; "digits_start_an_alphanumeric_run")]
-fn setup_env_sanitizes_the_project_name(
-    basename: &str,
-    project: &str,
-) -> Result<(), Box<dyn Error>> {
+fn setup_env_sanitizes_the_project_name(basename: &str, project: &str) -> anyhow::Result<()> {
     let w = rooted_at(basename)?;
     let out = w.deriving_command(&["setup-env"]).output()?;
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -52,7 +48,7 @@ fn setup_env_sanitizes_the_project_name(
 }
 
 #[test]
-fn setup_env_rejects_a_project_name_that_sanitizes_to_empty() -> Result<(), Box<dyn Error>> {
+fn setup_env_rejects_a_project_name_that_sanitizes_to_empty() -> anyhow::Result<()> {
     let w = rooted_at("---")?;
     let out = w.deriving_command(&["setup-env"]).output()?;
     assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
@@ -63,7 +59,7 @@ fn setup_env_rejects_a_project_name_that_sanitizes_to_empty() -> Result<(), Box<
 }
 
 #[test]
-fn setup_env_needs_only_the_project_root() -> Result<(), Box<dyn Error>> {
+fn setup_env_needs_only_the_project_root() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     for var in [
@@ -88,7 +84,7 @@ fn setup_env_needs_only_the_project_root() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn setup_env_never_starts_a_container_or_touches_the_cache() -> Result<(), Box<dyn Error>> {
+fn setup_env_never_starts_a_container_or_touches_the_cache() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["setup-env"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -98,7 +94,7 @@ fn setup_env_never_starts_a_container_or_touches_the_cache() -> Result<(), Box<d
 }
 
 #[test]
-fn setup_env_lets_an_explicit_project_win() -> Result<(), Box<dyn Error>> {
+fn setup_env_lets_an_explicit_project_win() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("NCAP_PROJECT", "chosen");
@@ -112,7 +108,7 @@ fn setup_env_lets_an_explicit_project_win() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn setup_env_escapes_single_quotes_in_export_values() -> Result<(), Box<dyn Error>> {
+fn setup_env_escapes_single_quotes_in_export_values() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("NCAP_PROJECT", "it's");
@@ -126,7 +122,7 @@ fn setup_env_escapes_single_quotes_in_export_values() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn setup_env_lets_explicit_container_socket_cache_and_log_win() -> Result<(), Box<dyn Error>> {
+fn setup_env_lets_explicit_container_socket_cache_and_log_win() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("NCAP_CONTAINER", "box");
@@ -143,7 +139,7 @@ fn setup_env_lets_explicit_container_socket_cache_and_log_win() -> Result<(), Bo
 }
 
 #[test]
-fn setup_env_derives_the_socket_under_xdg_runtime_dir() -> Result<(), Box<dyn Error>> {
+fn setup_env_derives_the_socket_under_xdg_runtime_dir() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("XDG_RUNTIME_DIR", "/xdg/run");
@@ -156,7 +152,7 @@ fn setup_env_derives_the_socket_under_xdg_runtime_dir() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn setup_env_falls_back_to_tmpdir_for_the_socket() -> Result<(), Box<dyn Error>> {
+fn setup_env_falls_back_to_tmpdir_for_the_socket() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("TMPDIR", "/tmpx");
@@ -167,7 +163,7 @@ fn setup_env_falls_back_to_tmpdir_for_the_socket() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn setup_env_ignores_an_empty_tmpdir() -> Result<(), Box<dyn Error>> {
+fn setup_env_ignores_an_empty_tmpdir() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("TMPDIR", "");
@@ -178,7 +174,7 @@ fn setup_env_ignores_an_empty_tmpdir() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn setup_env_derives_cache_and_logs_under_the_xdg_vars() -> Result<(), Box<dyn Error>> {
+fn setup_env_derives_cache_and_logs_under_the_xdg_vars() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("XDG_CACHE_HOME", "/xdg/cache");
@@ -198,7 +194,7 @@ fn setup_env_derives_cache_and_logs_under_the_xdg_vars() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn setup_env_falls_back_to_home_for_cache_and_logs() -> Result<(), Box<dyn Error>> {
+fn setup_env_falls_back_to_home_for_cache_and_logs() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.deriving_command(&["setup-env"]);
     cmd.env("HOME", "/home/x");
@@ -228,7 +224,7 @@ fn setup_env_falls_back_to_home_for_cache_and_logs() -> Result<(), Box<dyn Error
 #[test_case("NCAP_RUN_OPTS" ; "run_opts")]
 #[test_case("NCAP_HARDEN" ; "harden")]
 #[test_case("NCAP_LOG_LEVEL" ; "log_level")]
-fn a_missing_demanded_var_is_an_error_naming_it(var: &str) -> Result<(), Box<dyn Error>> {
+fn a_missing_demanded_var_is_an_error_naming_it(var: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env_remove(var);
@@ -240,7 +236,7 @@ fn a_missing_demanded_var_is_an_error_naming_it(var: &str) -> Result<(), Box<dyn
 
 #[test_case("NCAP_IMAGE" ; "a_var_without_a_derive")]
 #[test_case("NCAP_TIMEOUT" ; "the_timeout")]
-fn an_empty_value_counts_as_unset(var: &str) -> Result<(), Box<dyn Error>> {
+fn an_empty_value_counts_as_unset(var: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env(var, "");
@@ -254,10 +250,7 @@ fn an_empty_value_counts_as_unset(var: &str) -> Result<(), Box<dyn Error>> {
 #[test_case("NCAP_WATCH_FILES", "[1]" ; "watch_files_non_strings")]
 #[test_case("NCAP_RUN_OPTS", "not json" ; "run_opts_not_json")]
 #[test_case("NCAP_RUN_OPTS", "[1]" ; "run_opts_non_strings")]
-fn a_json_array_var_accepts_only_string_arrays(
-    var: &str,
-    value: &str,
-) -> Result<(), Box<dyn Error>> {
+fn a_json_array_var_accepts_only_string_arrays(var: &str, value: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env(var, value);
@@ -269,7 +262,7 @@ fn a_json_array_var_accepts_only_string_arrays(
 
 #[test_case("[]" ; "an_empty_array")]
 #[test_case(r#"["a"]"# ; "a_string_array")]
-fn a_json_array_var_accepts_string_arrays(value: &str) -> Result<(), Box<dyn Error>> {
+fn a_json_array_var_accepts_string_arrays(value: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_RUN_OPTS", value);
@@ -281,7 +274,7 @@ fn a_json_array_var_accepts_string_arrays(value: &str) -> Result<(), Box<dyn Err
 #[test_case("/abs/watch" ; "an_absolute_entry")]
 #[test_case("../up" ; "a_parent_component")]
 #[test_case("a/../../up" ; "a_parent_component_in_the_middle")]
-fn a_watch_file_entry_must_be_project_root_relative(entry: &str) -> Result<(), Box<dyn Error>> {
+fn a_watch_file_entry_must_be_project_root_relative(entry: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_WATCH_FILES", format!(r#"["{entry}"]"#));
@@ -294,7 +287,7 @@ fn a_watch_file_entry_must_be_project_root_relative(entry: &str) -> Result<(), B
 }
 
 #[test]
-fn a_watch_file_entry_that_exists_must_be_a_file() -> Result<(), Box<dyn Error>> {
+fn a_watch_file_entry_that_exists_must_be_a_file() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir(w.root.join("a-dir"))?;
     let mut cmd = w.ctl_command(&["show-options"]);
@@ -308,7 +301,7 @@ fn a_watch_file_entry_that_exists_must_be_a_file() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn a_watch_file_entry_may_be_a_broken_symlink() -> Result<(), Box<dyn Error>> {
+fn a_watch_file_entry_may_be_a_broken_symlink() -> anyhow::Result<()> {
     let w = World::new()?;
     std::os::unix::fs::symlink(w.root.join("nowhere"), w.root.join("broken"))?;
     let mut cmd = w.ctl_command(&["show-options"]);
@@ -320,7 +313,7 @@ fn a_watch_file_entry_may_be_a_broken_symlink() -> Result<(), Box<dyn Error>> {
 
 #[test_case("yes" ; "a_word")]
 #[test_case("1" ; "a_number")]
-fn harden_must_be_true_or_false(value: &str) -> Result<(), Box<dyn Error>> {
+fn harden_must_be_true_or_false(value: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_HARDEN", value);
@@ -337,7 +330,7 @@ fn harden_must_be_true_or_false(value: &str) -> Result<(), Box<dyn Error>> {
 #[test_case("trace" ; "a_level_below_debug")]
 #[test_case("DEBUG" ; "the_wrong_case")]
 #[test_case("info2" ; "an_unknown_level")]
-fn log_level_must_be_one_of_the_four(value: &str) -> Result<(), Box<dyn Error>> {
+fn log_level_must_be_one_of_the_four(value: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_LOG_LEVEL", value);
@@ -354,7 +347,7 @@ fn log_level_must_be_one_of_the_four(value: &str) -> Result<(), Box<dyn Error>> 
 #[test_case("-1" ; "negative")]
 #[test_case("1.5" ; "fractional")]
 #[test_case("abc" ; "not_a_number")]
-fn timeout_must_be_a_non_negative_integer(value: &str) -> Result<(), Box<dyn Error>> {
+fn timeout_must_be_a_non_negative_integer(value: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_TIMEOUT", value);
@@ -369,7 +362,7 @@ fn timeout_must_be_a_non_negative_integer(value: &str) -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn timeout_zero_is_allowed() -> Result<(), Box<dyn Error>> {
+fn timeout_zero_is_allowed() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_TIMEOUT", "0");
@@ -379,7 +372,7 @@ fn timeout_zero_is_allowed() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn env_forward_is_validated_by_the_client_only() -> Result<(), Box<dyn Error>> {
+fn env_forward_is_validated_by_the_client_only() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_ENV_FORWARD", "not json at all");
@@ -389,7 +382,7 @@ fn env_forward_is_validated_by_the_client_only() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn an_unknown_runtime_name_is_an_error_naming_the_var() -> Result<(), Box<dyn Error>> {
+fn an_unknown_runtime_name_is_an_error_naming_the_var() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["status"]);
     cmd.env("NCAP_RUNTIME", "firecracker");
@@ -404,7 +397,7 @@ fn an_unknown_runtime_name_is_an_error_naming_the_var() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn auto_prefers_an_executable_podman() -> Result<(), Box<dyn Error>> {
+fn auto_prefers_an_executable_podman() -> anyhow::Result<()> {
     let w = World::new()?;
     w.install_runtime("docker")?;
     let mut cmd = w.ctl_command(&["status"]);
@@ -416,7 +409,7 @@ fn auto_prefers_an_executable_podman() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn auto_skips_a_podman_without_an_execute_bit() -> Result<(), Box<dyn Error>> {
+fn auto_skips_a_podman_without_an_execute_bit() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::remove_file(w.bin.join("podman"))?;
     write_script(&w.bin.join("podman"), "#!/bin/sh\nexit 0\n")?;
@@ -431,7 +424,7 @@ fn auto_skips_a_podman_without_an_execute_bit() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn auto_skips_a_podman_that_is_a_directory() -> Result<(), Box<dyn Error>> {
+fn auto_skips_a_podman_that_is_a_directory() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::remove_file(w.bin.join("podman"))?;
     fs::create_dir(w.bin.join("podman"))?;
@@ -445,7 +438,7 @@ fn auto_skips_a_podman_that_is_a_directory() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn auto_falls_back_to_docker() -> Result<(), Box<dyn Error>> {
+fn auto_falls_back_to_docker() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::remove_file(w.bin.join("podman"))?;
     w.install_runtime("docker")?;
@@ -458,7 +451,7 @@ fn auto_falls_back_to_docker() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn auto_with_neither_runtime_errors_without_liveness_output() -> Result<(), Box<dyn Error>> {
+fn auto_with_neither_runtime_errors_without_liveness_output() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::remove_file(w.bin.join("podman"))?;
     let mut cmd = w.ctl_command(&["status"]);
@@ -479,7 +472,7 @@ fn auto_with_neither_runtime_errors_without_liveness_output() -> Result<(), Box<
 }
 
 #[test]
-fn an_explicit_runtime_skips_detection() -> Result<(), Box<dyn Error>> {
+fn an_explicit_runtime_skips_detection() -> anyhow::Result<()> {
     let w = World::new()?;
     w.install_runtime("docker")?;
     let mut cmd = w.ctl_command(&["status"]);
@@ -491,7 +484,7 @@ fn an_explicit_runtime_skips_detection() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn a_runtime_probe_spawn_failure_counts_as_not_running() -> Result<(), Box<dyn Error>> {
+fn a_runtime_probe_spawn_failure_counts_as_not_running() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::remove_file(w.bin.join("podman"))?;
     let out = w.ctl(&["status"]);
@@ -505,7 +498,7 @@ fn a_runtime_probe_spawn_failure_counts_as_not_running() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn a_runtime_probe_parse_failure_counts_as_not_running() -> Result<(), Box<dyn Error>> {
+fn a_runtime_probe_parse_failure_counts_as_not_running() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("not-a-bool")?;
     let out = w.ctl(&["status"]);
@@ -519,7 +512,7 @@ fn a_runtime_probe_parse_failure_counts_as_not_running() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn running_without_a_connectable_socket_is_not_live() -> Result<(), Box<dyn Error>> {
+fn running_without_a_connectable_socket_is_not_live() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&[])?;
@@ -534,7 +527,7 @@ fn running_without_a_connectable_socket_is_not_live() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn running_with_a_connectable_socket_is_live() -> Result<(), Box<dyn Error>> {
+fn running_with_a_connectable_socket_is_live() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&[])?;
@@ -546,7 +539,7 @@ fn running_with_a_connectable_socket_is_live() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_prints_three_lines() -> Result<(), Box<dyn Error>> {
+fn status_prints_three_lines() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["status"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -560,7 +553,7 @@ fn status_prints_three_lines() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_names_the_container_when_it_runs() -> Result<(), Box<dyn Error>> {
+fn status_names_the_container_when_it_runs() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let _server = w.serve_current();
@@ -573,7 +566,7 @@ fn status_names_the_container_when_it_runs() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_reports_not_running() -> Result<(), Box<dyn Error>> {
+fn status_reports_not_running() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["status"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -588,7 +581,7 @@ fn status_reports_not_running() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_names_the_socket_path_when_connectable() -> Result<(), Box<dyn Error>> {
+fn status_names_the_socket_path_when_connectable() -> anyhow::Result<()> {
     let w = World::new()?;
     let _server = w.serve_current();
     let out = w.ctl(&["status"]);
@@ -600,7 +593,7 @@ fn status_names_the_socket_path_when_connectable() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn status_names_the_socket_path_when_unreachable() -> Result<(), Box<dyn Error>> {
+fn status_names_the_socket_path_when_unreachable() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["status"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -611,7 +604,7 @@ fn status_names_the_socket_path_when_unreachable() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn status_reports_a_fresh_cache() -> Result<(), Box<dyn Error>> {
+fn status_reports_a_fresh_cache() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let out = w.ctl(&["status"]);
@@ -621,7 +614,7 @@ fn status_reports_a_fresh_cache() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_reports_a_stale_cache() -> Result<(), Box<dyn Error>> {
+fn status_reports_a_stale_cache() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     fs::write(w.cache.join("hash"), "deadbeefdeadbeef\n")?;
@@ -632,7 +625,7 @@ fn status_reports_a_stale_cache() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_reports_a_missing_cache() -> Result<(), Box<dyn Error>> {
+fn status_reports_a_missing_cache() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["status"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -647,7 +640,7 @@ fn status_reports_a_missing_cache() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_warns_on_version_skew_without_failing() -> Result<(), Box<dyn Error>> {
+fn status_warns_on_version_skew_without_failing() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let _server = w.serve(Reply::Version("0.0.0-other".to_string()));
@@ -671,7 +664,7 @@ fn status_warns_on_version_skew_without_failing() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
-fn status_without_skew_warns_not() -> Result<(), Box<dyn Error>> {
+fn status_without_skew_warns_not() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let _server = w.serve_current();
@@ -686,7 +679,7 @@ fn status_without_skew_warns_not() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn status_warns_when_the_server_rejects_the_version_probe() -> Result<(), Box<dyn Error>> {
+fn status_warns_when_the_server_rejects_the_version_probe() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let _server = w.serve(Reply::Reject);
@@ -702,8 +695,7 @@ fn status_warns_when_the_server_rejects_the_version_probe() -> Result<(), Box<dy
 }
 
 #[test]
-fn status_skips_the_version_probe_silently_when_the_socket_is_unreachable()
--> Result<(), Box<dyn Error>> {
+fn status_skips_the_version_probe_silently_when_the_socket_is_unreachable() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["status"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
@@ -716,7 +708,7 @@ fn status_skips_the_version_probe_silently_when_the_socket_is_unreachable()
 }
 
 #[test]
-fn status_skips_a_silent_server_silently() -> Result<(), Box<dyn Error>> {
+fn status_skips_a_silent_server_silently() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let _server = w.serve(Reply::Silent);
@@ -731,8 +723,7 @@ fn status_skips_a_silent_server_silently() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn init_on_a_live_fresh_project_finishes_without_evaluating_or_starting()
--> Result<(), Box<dyn Error>> {
+fn init_on_a_live_fresh_project_finishes_without_evaluating_or_starting() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&[])?;
@@ -749,7 +740,7 @@ fn init_on_a_live_fresh_project_finishes_without_evaluating_or_starting()
 }
 
 #[test]
-fn init_on_a_live_stale_project_reevaluates_stops_and_starts() -> Result<(), Box<dyn Error>> {
+fn init_on_a_live_stale_project_reevaluates_stops_and_starts() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&[])?;
@@ -763,8 +754,7 @@ fn init_on_a_live_stale_project_reevaluates_stops_and_starts() -> Result<(), Box
 }
 
 #[test]
-fn init_on_a_live_project_with_a_missing_cache_reevaluates_and_starts() -> Result<(), Box<dyn Error>>
-{
+fn init_on_a_live_project_with_a_missing_cache_reevaluates_and_starts() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let _server = w.serve_current();
@@ -776,7 +766,7 @@ fn init_on_a_live_project_with_a_missing_cache_reevaluates_and_starts() -> Resul
 }
 
 #[test]
-fn init_on_a_not_live_fresh_project_starts_without_evaluating() -> Result<(), Box<dyn Error>> {
+fn init_on_a_not_live_fresh_project_starts_without_evaluating() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let _server = w.serve_current();
@@ -792,7 +782,7 @@ fn init_on_a_not_live_fresh_project_starts_without_evaluating() -> Result<(), Bo
 }
 
 #[test]
-fn init_on_a_not_live_stale_project_evaluates_then_starts() -> Result<(), Box<dyn Error>> {
+fn init_on_a_not_live_stale_project_evaluates_then_starts() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&["watched"])?;
     fs::write(w.cache.join("hash"), "deadbeefdeadbeef")?;
@@ -805,7 +795,7 @@ fn init_on_a_not_live_stale_project_evaluates_then_starts() -> Result<(), Box<dy
 }
 
 #[test]
-fn init_evaluates_with_the_complete_devshell_uri() -> Result<(), Box<dyn Error>> {
+fn init_evaluates_with_the_complete_devshell_uri() -> anyhow::Result<()> {
     let w = World::new()?;
     let _server = w.serve_current();
     let mut cmd = w.ctl_command(&["init"]);
@@ -821,7 +811,7 @@ fn init_evaluates_with_the_complete_devshell_uri() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn init_writes_the_env_dump_and_the_hash() -> Result<(), Box<dyn Error>> {
+fn init_writes_the_env_dump_and_the_hash() -> anyhow::Result<()> {
     let w = World::new()?;
     let _server = w.serve_current();
     let out = w.ctl(&["init"]);
@@ -835,7 +825,7 @@ fn init_writes_the_env_dump_and_the_hash() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn init_prunes_the_profile_history_after_the_eval() -> Result<(), Box<dyn Error>> {
+fn init_prunes_the_profile_history_after_the_eval() -> anyhow::Result<()> {
     let w = World::new()?;
     let _server = w.serve_current();
     let out = w.ctl(&["init"]);
@@ -847,7 +837,7 @@ fn init_prunes_the_profile_history_after_the_eval() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn init_survives_a_failing_profile_prune() -> Result<(), Box<dyn Error>> {
+fn init_survives_a_failing_profile_prune() -> anyhow::Result<()> {
     let w = World::new()?;
     w.mark_failprune();
     let _server = w.serve_current();
@@ -857,7 +847,7 @@ fn init_survives_a_failing_profile_prune() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn start_without_an_env_dump_errors_advising_init() -> Result<(), Box<dyn Error>> {
+fn start_without_an_env_dump_errors_advising_init() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["start"]);
     assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
@@ -870,7 +860,7 @@ fn start_without_an_env_dump_errors_advising_init() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn start_creates_the_socket_dir_with_mode_0700() -> Result<(), Box<dyn Error>> {
+fn start_creates_the_socket_dir_with_mode_0700() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -884,7 +874,7 @@ fn start_creates_the_socket_dir_with_mode_0700() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn start_leaves_an_existing_socket_dir_untouched() -> Result<(), Box<dyn Error>> {
+fn start_leaves_an_existing_socket_dir_untouched() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     fs::create_dir(w.socket.parent().unwrap())?;
@@ -903,7 +893,7 @@ fn start_leaves_an_existing_socket_dir_untouched() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn start_creates_the_log_dir() -> Result<(), Box<dyn Error>> {
+fn start_creates_the_log_dir() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -913,7 +903,7 @@ fn start_creates_the_log_dir() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn start_removes_a_stopped_container_before_launch() -> Result<(), Box<dyn Error>> {
+fn start_removes_a_stopped_container_before_launch() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     w.write_state("false")?;
@@ -924,7 +914,7 @@ fn start_removes_a_stopped_container_before_launch() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn the_launch_command_carries_the_image_bash_and_server_script() -> Result<(), Box<dyn Error>> {
+fn the_launch_command_carries_the_image_bash_and_server_script() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -949,7 +939,7 @@ fn the_launch_command_carries_the_image_bash_and_server_script() -> Result<(), B
 }
 
 #[test]
-fn the_launch_command_single_quote_escapes_interpolated_paths() -> Result<(), Box<dyn Error>> {
+fn the_launch_command_single_quote_escapes_interpolated_paths() -> anyhow::Result<()> {
     let w = World::new()?;
     let quoted = w.temp.path().join("it's-server");
     w.fresh_cache(&[])?;
@@ -967,7 +957,7 @@ fn the_launch_command_single_quote_escapes_interpolated_paths() -> Result<(), Bo
 }
 
 #[test]
-fn the_mount_build_order_is_exact() -> Result<(), Box<dyn Error>> {
+fn the_mount_build_order_is_exact() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -998,7 +988,7 @@ fn the_mount_build_order_is_exact() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn the_cache_mount_is_read_only() -> Result<(), Box<dyn Error>> {
+fn the_cache_mount_is_read_only() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -1013,7 +1003,7 @@ fn the_cache_mount_is_read_only() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn the_socket_project_and_log_mounts_are_read_write() -> Result<(), Box<dyn Error>> {
+fn the_socket_project_and_log_mounts_are_read_write() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -1034,7 +1024,7 @@ fn the_socket_project_and_log_mounts_are_read_write() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn the_workdir_flag_carries_the_project_root() -> Result<(), Box<dyn Error>> {
+fn the_workdir_flag_carries_the_project_root() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -1049,7 +1039,7 @@ fn the_workdir_flag_carries_the_project_root() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn the_git_directory_is_mounted_when_it_is_a_real_directory() -> Result<(), Box<dyn Error>> {
+fn the_git_directory_is_mounted_when_it_is_a_real_directory() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir(w.root.join(".git"))?;
     w.fresh_cache(&[])?;
@@ -1062,7 +1052,7 @@ fn the_git_directory_is_mounted_when_it_is_a_real_directory() -> Result<(), Box<
 }
 
 #[test]
-fn the_git_directory_is_skipped_for_a_gitfile() -> Result<(), Box<dyn Error>> {
+fn the_git_directory_is_skipped_for_a_gitfile() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::write(w.root.join(".git"), "gitdir: elsewhere\n")?;
     w.fresh_cache(&[])?;
@@ -1075,7 +1065,7 @@ fn the_git_directory_is_skipped_for_a_gitfile() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn the_git_directory_is_skipped_for_a_symlink() -> Result<(), Box<dyn Error>> {
+fn the_git_directory_is_skipped_for_a_symlink() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir(w.temp.path().join("elsewhere"))?;
     std::os::unix::fs::symlink(w.temp.path().join("elsewhere"), w.root.join(".git"))?;
@@ -1089,7 +1079,7 @@ fn the_git_directory_is_skipped_for_a_symlink() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn extra_options_append_after_the_mounts_in_order() -> Result<(), Box<dyn Error>> {
+fn extra_options_append_after_the_mounts_in_order() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -1102,7 +1092,7 @@ fn extra_options_append_after_the_mounts_in_order() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn harden_prepends_the_capability_flags() -> Result<(), Box<dyn Error>> {
+fn harden_prepends_the_capability_flags() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -1115,7 +1105,7 @@ fn harden_prepends_the_capability_flags() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn harden_mounts_present_watched_files_read_only() -> Result<(), Box<dyn Error>> {
+fn harden_mounts_present_watched_files_read_only() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::write(w.root.join("watched"), "contents\n")?;
     w.fresh_cache(&["watched"])?;
@@ -1147,7 +1137,7 @@ fn harden_mounts_present_watched_files_read_only() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn harden_skips_absent_and_broken_watched_files() -> Result<(), Box<dyn Error>> {
+fn harden_skips_absent_and_broken_watched_files() -> anyhow::Result<()> {
     let w = World::new()?;
     std::os::unix::fs::symlink(w.root.join("nowhere"), w.root.join("broken"))?;
     w.fresh_cache(&[])?;
@@ -1165,7 +1155,7 @@ fn harden_skips_absent_and_broken_watched_files() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn a_socket_path_without_a_parent_directory_is_a_launch_error_naming_the_socket()
--> Result<(), Box<dyn Error>> {
+-> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     let mut cmd = w.ctl_command(&["start"]);
@@ -1181,7 +1171,7 @@ fn a_socket_path_without_a_parent_directory_is_a_launch_error_naming_the_socket(
 }
 
 #[test]
-fn start_that_never_reaches_readiness_fails_with_the_inspect_state() -> Result<(), Box<dyn Error>> {
+fn start_that_never_reaches_readiness_fails_with_the_inspect_state() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     w.write_state("pending")?;
@@ -1198,7 +1188,7 @@ fn start_that_never_reaches_readiness_fails_with_the_inspect_state() -> Result<(
 }
 
 #[test]
-fn a_lost_race_with_a_running_container_succeeds() -> Result<(), Box<dyn Error>> {
+fn a_lost_race_with_a_running_container_succeeds() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     w.write_state("false")?;
@@ -1211,7 +1201,7 @@ fn a_lost_race_with_a_running_container_succeeds() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn a_lost_race_with_a_dead_container_starts_once_more() -> Result<(), Box<dyn Error>> {
+fn a_lost_race_with_a_dead_container_starts_once_more() -> anyhow::Result<()> {
     let w = World::new()?;
     w.fresh_cache(&[])?;
     w.write_state("false")?;
@@ -1224,7 +1214,7 @@ fn a_lost_race_with_a_dead_container_starts_once_more() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn stop_names_the_container() -> Result<(), Box<dyn Error>> {
+fn stop_names_the_container() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let out = w.ctl(&["stop"]);
@@ -1239,7 +1229,7 @@ fn stop_names_the_container() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn stop_succeeds_when_the_container_is_not_running() -> Result<(), Box<dyn Error>> {
+fn stop_succeeds_when_the_container_is_not_running() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("false")?;
     let out = w.ctl(&["stop"]);
@@ -1248,7 +1238,7 @@ fn stop_succeeds_when_the_container_is_not_running() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn stop_succeeds_when_the_stop_fails_but_the_container_is_gone() -> Result<(), Box<dyn Error>> {
+fn stop_succeeds_when_the_stop_fails_but_the_container_is_gone() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("false")?;
     w.mark_stopfail();
@@ -1258,7 +1248,7 @@ fn stop_succeeds_when_the_stop_fails_but_the_container_is_gone() -> Result<(), B
 }
 
 #[test]
-fn stop_fails_when_the_stop_fails_and_the_container_still_runs() -> Result<(), Box<dyn Error>> {
+fn stop_fails_when_the_stop_fails_and_the_container_still_runs() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.mark_stopfail();
@@ -1268,7 +1258,7 @@ fn stop_fails_when_the_stop_fails_and_the_container_still_runs() -> Result<(), B
 }
 
 #[test]
-fn restart_treats_a_failed_stop_as_non_fatal() -> Result<(), Box<dyn Error>> {
+fn restart_treats_a_failed_stop_as_non_fatal() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&["watched"])?;
@@ -1282,7 +1272,7 @@ fn restart_treats_a_failed_stop_as_non_fatal() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn restart_reaches_the_stamp_guard_before_any_cache_touch() -> Result<(), Box<dyn Error>> {
+fn restart_reaches_the_stamp_guard_before_any_cache_touch() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("project"), "/elsewhere\n")?;
@@ -1306,7 +1296,7 @@ fn restart_reaches_the_stamp_guard_before_any_cache_touch() -> Result<(), Box<dy
 }
 
 #[test]
-fn enter_sources_the_env_dump_and_execs_the_container_shell() -> Result<(), Box<dyn Error>> {
+fn enter_sources_the_env_dump_and_execs_the_container_shell() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let out = w.ctl(&["enter"]);
@@ -1335,7 +1325,7 @@ fn enter_sources_the_env_dump_and_execs_the_container_shell() -> Result<(), Box<
 }
 
 #[test]
-fn enter_on_a_down_container_errors_advising_init() -> Result<(), Box<dyn Error>> {
+fn enter_on_a_down_container_errors_advising_init() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("false")?;
     let out = w.ctl(&["enter"]);
@@ -1349,7 +1339,7 @@ fn enter_on_a_down_container_errors_advising_init() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn the_stamp_guard_writes_the_project_root_creating_the_cache_dir() -> Result<(), Box<dyn Error>> {
+fn the_stamp_guard_writes_the_project_root_creating_the_cache_dir() -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&["start"]);
     assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
@@ -1361,7 +1351,7 @@ fn the_stamp_guard_writes_the_project_root_creating_the_cache_dir() -> Result<()
 }
 
 #[test]
-fn the_stamp_guard_passes_on_the_same_root() -> Result<(), Box<dyn Error>> {
+fn the_stamp_guard_passes_on_the_same_root() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&[])?;
@@ -1379,7 +1369,7 @@ fn the_stamp_guard_passes_on_the_same_root() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn the_stamp_guard_rejects_a_different_keyed_root() -> Result<(), Box<dyn Error>> {
+fn the_stamp_guard_rejects_a_different_keyed_root() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("project"), "/elsewhere\n")?;
@@ -1402,7 +1392,7 @@ fn the_stamp_guard_rejects_a_different_keyed_root() -> Result<(), Box<dyn Error>
 #[test_case("\n" ; "one_newline")]
 #[test_case("\r" ; "one_carriage_return")]
 #[test_case("\r\n" ; "both")]
-fn the_stamp_guard_trims_trailing_newlines(suffix: &str) -> Result<(), Box<dyn Error>> {
+fn the_stamp_guard_trims_trailing_newlines(suffix: &str) -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.fresh_cache(&[])?;
@@ -1418,7 +1408,7 @@ fn the_stamp_guard_trims_trailing_newlines(suffix: &str) -> Result<(), Box<dyn E
 }
 
 #[test]
-fn clean_removes_the_four_cache_files_and_the_generation_links() -> Result<(), Box<dyn Error>> {
+fn clean_removes_the_four_cache_files_and_the_generation_links() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     for name in ["env", "hash", "profile", "project"] {
@@ -1450,7 +1440,7 @@ fn clean_removes_the_four_cache_files_and_the_generation_links() -> Result<(), B
 }
 
 #[test]
-fn clean_leaves_unrelated_cache_files() -> Result<(), Box<dyn Error>> {
+fn clean_leaves_unrelated_cache_files() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("env"), "x\n")?;
@@ -1465,7 +1455,7 @@ fn clean_leaves_unrelated_cache_files() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn clean_removes_the_log_files() -> Result<(), Box<dyn Error>> {
+fn clean_removes_the_log_files() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.logs)?;
     fs::write(w.logs.join("ncap-server-1.log"), "x\n")?;
@@ -1480,7 +1470,7 @@ fn clean_removes_the_log_files() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn clean_removes_the_socket_file_and_its_empty_parent() -> Result<(), Box<dyn Error>> {
+fn clean_removes_the_socket_file_and_its_empty_parent() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(w.socket.parent().unwrap())?;
     fs::write(&w.socket, "")?;
@@ -1492,7 +1482,7 @@ fn clean_removes_the_socket_file_and_its_empty_parent() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn clean_leaves_a_non_empty_socket_parent() -> Result<(), Box<dyn Error>> {
+fn clean_leaves_a_non_empty_socket_parent() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(w.socket.parent().unwrap())?;
     fs::write(&w.socket, "")?;
@@ -1505,7 +1495,7 @@ fn clean_leaves_a_non_empty_socket_parent() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn clean_stops_and_removes_the_container() -> Result<(), Box<dyn Error>> {
+fn clean_stops_and_removes_the_container() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     let out = w.ctl(&["clean"]);
@@ -1515,7 +1505,7 @@ fn clean_stops_and_removes_the_container() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn clean_survives_a_failed_stop() -> Result<(), Box<dyn Error>> {
+fn clean_survives_a_failed_stop() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_state("true")?;
     w.mark_stopfail();
@@ -1525,7 +1515,7 @@ fn clean_survives_a_failed_stop() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn clean_twice_succeeds() -> Result<(), Box<dyn Error>> {
+fn clean_twice_succeeds() -> anyhow::Result<()> {
     let w = World::new()?;
     let first = w.ctl(&["clean"]);
     assert!(first.status.success(), "stderr: {}", text(&first.stderr));
@@ -1535,14 +1525,14 @@ fn clean_twice_succeeds() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn digest_of_an_empty_watch_list_is_the_spec_literal() -> Result<(), Box<dyn Error>> {
+fn digest_of_an_empty_watch_list_is_the_spec_literal() -> anyhow::Result<()> {
     let w = World::new()?;
     assert_eq!(compute(&w.root, &[])?, "ef46db3751d8e999");
     Ok(())
 }
 
 #[test]
-fn digest_of_one_file_records_its_contents() -> Result<(), Box<dyn Error>> {
+fn digest_of_one_file_records_its_contents() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::write(w.root.join("a.txt"), "hello")?;
     assert_eq!(
@@ -1553,7 +1543,7 @@ fn digest_of_one_file_records_its_contents() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn digest_sorts_the_entries_by_relative_path() -> Result<(), Box<dyn Error>> {
+fn digest_sorts_the_entries_by_relative_path() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::write(w.root.join("a.txt"), "hello")?;
     fs::write(w.root.join("b.txt"), "bbb")?;
@@ -1563,7 +1553,7 @@ fn digest_sorts_the_entries_by_relative_path() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn digest_records_the_absence_of_a_missing_entry() -> Result<(), Box<dyn Error>> {
+fn digest_records_the_absence_of_a_missing_entry() -> anyhow::Result<()> {
     let w = World::new()?;
     assert_eq!(
         compute(&w.root, &["gone.txt".to_string()])?,
@@ -1573,7 +1563,7 @@ fn digest_records_the_absence_of_a_missing_entry() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn digest_records_the_relative_path_of_a_moved_file() -> Result<(), Box<dyn Error>> {
+fn digest_records_the_relative_path_of_a_moved_file() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::write(w.root.join("c.txt"), "same")?;
     fs::write(w.root.join("d.txt"), "same")?;
@@ -1589,7 +1579,7 @@ fn digest_records_the_relative_path_of_a_moved_file() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn digest_ignores_a_mtime_only_touch() -> Result<(), Box<dyn Error>> {
+fn digest_ignores_a_mtime_only_touch() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::write(w.root.join("a.txt"), "hello")?;
     let file = fs::OpenOptions::new()
@@ -1604,7 +1594,7 @@ fn digest_ignores_a_mtime_only_touch() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn store_writes_lowercase_hex_without_a_trailing_newline() -> Result<(), Box<dyn Error>> {
+fn store_writes_lowercase_hex_without_a_trailing_newline() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     store(&w.cache, "deadbeef")?;
@@ -1613,7 +1603,7 @@ fn store_writes_lowercase_hex_without_a_trailing_newline() -> Result<(), Box<dyn
 }
 
 #[test]
-fn check_reports_missing_without_an_env_dump() -> Result<(), Box<dyn Error>> {
+fn check_reports_missing_without_an_env_dump() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("hash"), "deadbeefdeadbeef")?;
@@ -1622,7 +1612,7 @@ fn check_reports_missing_without_an_env_dump() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn check_reports_fresh_when_the_hash_matches_after_trimming() -> Result<(), Box<dyn Error>> {
+fn check_reports_fresh_when_the_hash_matches_after_trimming() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("env"), "dump\n")?;
@@ -1635,7 +1625,7 @@ fn check_reports_fresh_when_the_hash_matches_after_trimming() -> Result<(), Box<
 }
 
 #[test]
-fn check_reports_stale_when_the_hash_differs() -> Result<(), Box<dyn Error>> {
+fn check_reports_stale_when_the_hash_differs() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("env"), "dump\n")?;
@@ -1645,7 +1635,7 @@ fn check_reports_stale_when_the_hash_differs() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn check_reports_stale_when_the_hash_is_unreadable() -> Result<(), Box<dyn Error>> {
+fn check_reports_stale_when_the_hash_is_unreadable() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::write(w.cache.join("env"), "dump\n")?;
@@ -1655,8 +1645,7 @@ fn check_reports_stale_when_the_hash_is_unreadable() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn check_reports_stale_on_a_compute_error_even_against_an_empty_hash() -> Result<(), Box<dyn Error>>
-{
+fn check_reports_stale_on_a_compute_error_even_against_an_empty_hash() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.cache)?;
     fs::create_dir(w.root.join("a-dir"))?;
@@ -1668,7 +1657,7 @@ fn check_reports_stale_on_a_compute_error_even_against_an_empty_hash() -> Result
 }
 
 #[test]
-fn show_options_prints_one_expanded_arg_per_line() -> Result<(), Box<dyn Error>> {
+fn show_options_prints_one_expanded_arg_per_line() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_RUN_OPTS", r#"["one","two"]"#);
@@ -1679,7 +1668,7 @@ fn show_options_prints_one_expanded_arg_per_line() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn show_options_expands_braced_variables() -> Result<(), Box<dyn Error>> {
+fn show_options_expands_braced_variables() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("HOME_PATH", "/home/x");
@@ -1691,7 +1680,7 @@ fn show_options_expands_braced_variables() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn show_options_fails_naming_an_unset_variable() -> Result<(), Box<dyn Error>> {
+fn show_options_fails_naming_an_unset_variable() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env_remove("NOT_SET_ANYWHERE");
@@ -1707,7 +1696,7 @@ fn show_options_fails_naming_an_unset_variable() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn show_options_expands_an_empty_value_to_nothing() -> Result<(), Box<dyn Error>> {
+fn show_options_expands_an_empty_value_to_nothing() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("EMPTY", "");
@@ -1719,7 +1708,7 @@ fn show_options_expands_an_empty_value_to_nothing() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn show_options_does_not_split_expanded_values_on_whitespace() -> Result<(), Box<dyn Error>> {
+fn show_options_does_not_split_expanded_values_on_whitespace() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("SPACED", "a b");
@@ -1741,7 +1730,7 @@ fn show_options_does_not_split_expanded_values_on_whitespace() -> Result<(), Box
 fn show_options_leaves_a_dollar_that_names_nothing_literal(
     entry: &str,
     expected: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("NCAP_RUN_OPTS", format!(r#"["{entry}"]"#));
@@ -1752,7 +1741,7 @@ fn show_options_leaves_a_dollar_that_names_nothing_literal(
 }
 
 #[test]
-fn show_options_expands_the_longest_name_run() -> Result<(), Box<dyn Error>> {
+fn show_options_expands_the_longest_name_run() -> anyhow::Result<()> {
     let w = World::new()?;
     let mut cmd = w.ctl_command(&["show-options"]);
     cmd.env("foo", "F");
@@ -1766,7 +1755,7 @@ fn show_options_expands_the_longest_name_run() -> Result<(), Box<dyn Error>> {
 #[test_case(&[] ; "no_flag")]
 #[test_case(&["--no-pager"] ; "no_pager")]
 #[test_case(&["--follow"] ; "follow")]
-fn log_without_a_log_file_errors_naming_the_log_dir(flags: &[&str]) -> Result<(), Box<dyn Error>> {
+fn log_without_a_log_file_errors_naming_the_log_dir(flags: &[&str]) -> anyhow::Result<()> {
     let w = World::new()?;
     let out = w.ctl(&[["log"].as_slice(), flags].concat());
     assert!(!out.status.success(), "stderr: {}", text(&out.stderr));
@@ -1779,7 +1768,7 @@ fn log_without_a_log_file_errors_naming_the_log_dir(flags: &[&str]) -> Result<()
 }
 
 #[test]
-fn log_no_pager_writes_the_file_byte_for_byte() -> Result<(), Box<dyn Error>> {
+fn log_no_pager_writes_the_file_byte_for_byte() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"line one\nline two\n")?;
     let out = w.ctl(&["log", "--no-pager"]);
@@ -1789,7 +1778,7 @@ fn log_no_pager_writes_the_file_byte_for_byte() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_no_pager_stays_quiet_on_stderr() -> Result<(), Box<dyn Error>> {
+fn log_no_pager_stays_quiet_on_stderr() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"x\n")?;
     let out = w.ctl(&["log", "--no-pager"]);
@@ -1803,7 +1792,7 @@ fn log_no_pager_stays_quiet_on_stderr() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_no_pager_exits_quietly_on_a_broken_pipe() -> Result<(), Box<dyn Error>> {
+fn log_no_pager_exits_quietly_on_a_broken_pipe() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, &[b'x'; 65536])?;
     let mut cmd = w.ctl_command(&["log", "--no-pager"]);
@@ -1828,7 +1817,7 @@ fn log_no_pager_exits_quietly_on_a_broken_pipe() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_no_pager_fails_on_a_stdout_write_error() -> Result<(), Box<dyn Error>> {
+fn log_no_pager_fails_on_a_stdout_write_error() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"x\n")?;
     // A read-only stdout fd fails with `EBADF`, which std's `Stdout`
@@ -1844,7 +1833,7 @@ fn log_no_pager_fails_on_a_stdout_write_error() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_opens_the_file_in_the_pager_with_split_arguments() -> Result<(), Box<dyn Error>> {
+fn log_opens_the_file_in_the_pager_with_split_arguments() -> anyhow::Result<()> {
     let w = World::new()?;
     let log = w.write_log(1, b"x\n")?;
     w.install_pager("my-pager")?;
@@ -1870,7 +1859,7 @@ fn log_opens_the_file_in_the_pager_with_split_arguments() -> Result<(), Box<dyn 
 #[test_case("unset" ; "unset")]
 fn log_falls_back_to_less_with_the_r_flag_when_the_pager_is_blank(
     pager: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let w = World::new()?;
     let log = w.write_log(1, b"x\n")?;
     w.install_pager("less")?;
@@ -1892,7 +1881,7 @@ fn log_falls_back_to_less_with_the_r_flag_when_the_pager_is_blank(
 }
 
 #[test]
-fn log_fails_when_the_pager_cannot_spawn() -> Result<(), Box<dyn Error>> {
+fn log_fails_when_the_pager_cannot_spawn() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"x\n")?;
     let mut cmd = w.ctl_command(&["log"]);
@@ -1903,7 +1892,7 @@ fn log_fails_when_the_pager_cannot_spawn() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_fails_when_the_pager_exits_non_zero() -> Result<(), Box<dyn Error>> {
+fn log_fails_when_the_pager_exits_non_zero() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"x\n")?;
     write_script(&w.bin.join("failing"), "#!/bin/sh\nexit 3\n")?;
@@ -1915,7 +1904,7 @@ fn log_fails_when_the_pager_exits_non_zero() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_follow_announces_the_first_file() -> Result<(), Box<dyn Error>> {
+fn log_follow_announces_the_first_file() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(7, b"seven\n")?;
     let mut cmd = w.ctl_command(&["log", "--follow"]);
@@ -1937,7 +1926,7 @@ fn log_follow_announces_the_first_file() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_follow_streams_from_the_first_byte_and_appends() -> Result<(), Box<dyn Error>> {
+fn log_follow_streams_from_the_first_byte_and_appends() -> anyhow::Result<()> {
     let w = World::new()?;
     let log = w.write_log(1, b"first\n")?;
     let mut cmd = w.ctl_command(&["log", "--follow"]);
@@ -1955,8 +1944,7 @@ fn log_follow_streams_from_the_first_byte_and_appends() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn log_follow_drains_then_switches_to_newer_files_in_ascending_epochs() -> Result<(), Box<dyn Error>>
-{
+fn log_follow_drains_then_switches_to_newer_files_in_ascending_epochs() -> anyhow::Result<()> {
     let w = World::new()?;
     let first = w.write_log(1, b"one-a\n")?;
     let mut cmd = w.ctl_command(&["log", "--follow"]);
@@ -1992,7 +1980,7 @@ fn log_follow_drains_then_switches_to_newer_files_in_ascending_epochs() -> Resul
 }
 
 #[test]
-fn log_follow_lands_both_files_after_two_restarts() -> Result<(), Box<dyn Error>> {
+fn log_follow_lands_both_files_after_two_restarts() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"one\n")?;
     let mut cmd = w.ctl_command(&["log", "--follow"]);
@@ -2012,7 +2000,7 @@ fn log_follow_lands_both_files_after_two_restarts() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn log_follow_keeps_running_when_the_file_vanishes() -> Result<(), Box<dyn Error>> {
+fn log_follow_keeps_running_when_the_file_vanishes() -> anyhow::Result<()> {
     let w = World::new()?;
     let log = w.write_log(1, b"one\n")?;
     let mut cmd = w.ctl_command(&["log", "--follow"]);
@@ -2030,7 +2018,7 @@ fn log_follow_keeps_running_when_the_file_vanishes() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn log_follow_ends_on_sigint_with_success() -> Result<(), Box<dyn Error>> {
+fn log_follow_ends_on_sigint_with_success() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(1, b"one\n")?;
     let mut cmd = w.ctl_command(&["log", "--follow"]);
@@ -2051,7 +2039,7 @@ fn log_follow_ends_on_sigint_with_success() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_picks_the_newest_log_by_numeric_epoch() -> Result<(), Box<dyn Error>> {
+fn log_picks_the_newest_log_by_numeric_epoch() -> anyhow::Result<()> {
     let w = World::new()?;
     w.write_log(2, b"two\n")?;
     w.write_log(10, b"ten\n")?;
@@ -2062,7 +2050,7 @@ fn log_picks_the_newest_log_by_numeric_epoch() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn log_ignores_file_names_that_are_not_server_logs() -> Result<(), Box<dyn Error>> {
+fn log_ignores_file_names_that_are_not_server_logs() -> anyhow::Result<()> {
     let w = World::new()?;
     fs::create_dir_all(&w.logs)?;
     fs::write(w.logs.join("ncap-server-abc.log"), "x\n")?;
@@ -2118,7 +2106,7 @@ struct World {
 }
 
 impl World {
-    fn new() -> Result<World, Box<dyn Error>> {
+    fn new() -> anyhow::Result<World> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("proj");
         fs::create_dir_all(&root)?;
@@ -2202,7 +2190,7 @@ impl World {
         cmd
     }
 
-    fn fresh_cache(&self, entries: &[&str]) -> Result<(), Box<dyn Error>> {
+    fn fresh_cache(&self, entries: &[&str]) -> anyhow::Result<()> {
         fs::create_dir_all(&self.cache)?;
         fs::write(self.cache.join("env"), "export NCAP_STUB_DUMP=1\n")?;
         let entries: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
@@ -2210,19 +2198,19 @@ impl World {
         Ok(())
     }
 
-    fn write_log(&self, epoch: u64, bytes: &[u8]) -> Result<PathBuf, Box<dyn Error>> {
+    fn write_log(&self, epoch: u64, bytes: &[u8]) -> anyhow::Result<PathBuf> {
         fs::create_dir_all(&self.logs)?;
         let path = self.logs.join(format!("ncap-server-{epoch}.log"));
         fs::write(&path, bytes)?;
         Ok(path)
     }
 
-    fn write_state(&self, value: &str) -> Result<(), Box<dyn Error>> {
+    fn write_state(&self, value: &str) -> anyhow::Result<()> {
         fs::write(&self.state, format!("{value}\n"))?;
         Ok(())
     }
 
-    fn mark_runfail(&self, message: &str) -> Result<(), Box<dyn Error>> {
+    fn mark_runfail(&self, message: &str) -> anyhow::Result<()> {
         fs::write(&self.runfail, format!("{message}\n"))?;
         Ok(())
     }
@@ -2243,12 +2231,12 @@ impl World {
         fs::write(&self.failprune, "").expect("the prune marker is writable");
     }
 
-    fn install_runtime(&self, name: &str) -> Result<(), Box<dyn Error>> {
+    fn install_runtime(&self, name: &str) -> anyhow::Result<()> {
         write_script(&self.bin.join(name), &self.runtime_stub(name))?;
         Ok(())
     }
 
-    fn install_pager(&self, name: &str) -> Result<(), Box<dyn Error>> {
+    fn install_pager(&self, name: &str) -> anyhow::Result<()> {
         let log = shell_quote(&self.pager_log);
         write_script(
             &self.bin.join(name),
@@ -2398,7 +2386,7 @@ exit 0
     }
 }
 
-fn rooted_at(name: &str) -> Result<World, Box<dyn Error>> {
+fn rooted_at(name: &str) -> anyhow::Result<World> {
     let mut w = World::new()?;
     w.root = w.temp.path().join(name);
     fs::create_dir_all(&w.root)?;
@@ -2520,7 +2508,7 @@ fn tap(child: &mut Child) -> Tap {
     Tap { bytes }
 }
 
-fn wait_until(tap: &Tap, what: &str, pred: impl Fn(&str) -> bool) -> Result<(), Box<dyn Error>> {
+fn wait_until(tap: &Tap, what: &str, pred: impl Fn(&str) -> bool) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let seen = text(&tap.snapshot());
@@ -2528,7 +2516,7 @@ fn wait_until(tap: &Tap, what: &str, pred: impl Fn(&str) -> bool) -> Result<(), 
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("timed out waiting for {what}; saw: {seen}").into());
+            return Err(anyhow::anyhow!("timed out waiting for {what}; saw: {seen}"));
         }
         thread::sleep(Duration::from_millis(20));
     }

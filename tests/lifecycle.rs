@@ -17,8 +17,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use nix_capsule::protocol::{Exit, FrameCodec, Message, Request, SignalMsg};
 
 #[test]
-fn second_server_refuses_connectable_socket_leaving_owner_serving()
--> Result<(), Box<dyn std::error::Error>> {
+fn second_server_refuses_connectable_socket_leaving_owner_serving() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -44,7 +43,7 @@ fn second_server_refuses_connectable_socket_leaving_owner_serving()
 }
 
 #[test]
-fn replaces_stale_socket_and_binds() -> Result<(), Box<dyn std::error::Error>> {
+fn replaces_stale_socket_and_binds() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -59,8 +58,7 @@ fn replaces_stale_socket_and_binds() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn sigterm_delivers_server_stopping_to_every_live_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn sigterm_delivers_server_stopping_to_every_live_connection() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -88,7 +86,7 @@ fn sigterm_delivers_server_stopping_to_every_live_connection()
 }
 
 #[test]
-fn sigint_delivers_server_stopping_to_idle_connection() -> Result<(), Box<dyn std::error::Error>> {
+fn sigint_delivers_server_stopping_to_idle_connection() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -107,7 +105,7 @@ fn sigint_delivers_server_stopping_to_idle_connection() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn shutdown_terms_every_running_child() -> Result<(), Box<dyn std::error::Error>> {
+fn shutdown_terms_every_running_child() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -145,7 +143,7 @@ fn shutdown_terms_every_running_child() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn shutdown_group_term_reaches_grandchild() -> Result<(), Box<dyn std::error::Error>> {
+fn shutdown_group_term_reaches_grandchild() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -172,8 +170,7 @@ fn shutdown_group_term_reaches_grandchild() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn child_finishing_inside_drain_grace_delivers_exit_after_server_stopping()
--> Result<(), Box<dyn std::error::Error>> {
+fn child_finishing_inside_drain_grace_delivers_exit_after_server_stopping() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -203,8 +200,7 @@ fn child_finishing_inside_drain_grace_delivers_exit_after_server_stopping()
 }
 
 #[test]
-fn server_stopping_precedes_exit_when_pipes_drained_but_child_unreaped()
--> Result<(), Box<dyn std::error::Error>> {
+fn server_stopping_precedes_exit_when_pipes_drained_but_child_unreaped() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -237,8 +233,7 @@ fn server_stopping_precedes_exit_when_pipes_drained_but_child_unreaped()
 }
 
 #[test]
-fn deadline_drops_connection_whose_child_misses_drain_grace()
--> Result<(), Box<dyn std::error::Error>> {
+fn deadline_drops_connection_whose_child_misses_drain_grace() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -261,7 +256,7 @@ fn deadline_drops_connection_whose_child_misses_drain_grace()
 }
 
 #[test]
-fn timeout_zero_skips_awaiting_hung_child() -> Result<(), Box<dyn std::error::Error>> {
+fn timeout_zero_skips_awaiting_hung_child() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -286,8 +281,7 @@ fn timeout_zero_skips_awaiting_hung_child() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn clean_shutdown_removes_socket_file_keeping_parent_dir() -> Result<(), Box<dyn std::error::Error>>
-{
+fn clean_shutdown_removes_socket_file_keeping_parent_dir() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket_dir = dir.path().join("run");
     std::fs::create_dir(&socket_dir)?;
@@ -304,8 +298,7 @@ fn clean_shutdown_removes_socket_file_keeping_parent_dir() -> Result<(), Box<dyn
 }
 
 #[test]
-fn writes_one_log_file_per_run_matching_server_log_pattern()
--> Result<(), Box<dyn std::error::Error>> {
+fn writes_one_log_file_per_run_matching_server_log_pattern() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -325,8 +318,7 @@ fn writes_one_log_file_per_run_matching_server_log_pattern()
 }
 
 #[test]
-fn runs_started_in_same_second_write_distinct_log_files() -> Result<(), Box<dyn std::error::Error>>
-{
+fn runs_started_in_same_second_write_distinct_log_files() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let log_dir = dir.path().join("logs");
     let mut first = spawn_server(&dir.path().join("a.sock"), &log_dir, 5, "error")?;
@@ -349,7 +341,7 @@ fn runs_started_in_same_second_write_distinct_log_files() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn creates_missing_log_dir() -> Result<(), Box<dyn std::error::Error>> {
+fn creates_missing_log_dir() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("missing/nested/logs");
@@ -365,7 +357,7 @@ fn creates_missing_log_dir() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn stamps_every_log_line_with_utc_rfc3339() -> Result<(), Box<dyn std::error::Error>> {
+fn stamps_every_log_line_with_utc_rfc3339() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -384,7 +376,7 @@ fn stamps_every_log_line_with_utc_rfc3339() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn mirrors_log_lines_to_stderr() -> Result<(), Box<dyn std::error::Error>> {
+fn mirrors_log_lines_to_stderr() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -404,7 +396,7 @@ fn mirrors_log_lines_to_stderr() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn version_probe_line_written_at_debug_level() -> Result<(), Box<dyn std::error::Error>> {
+fn version_probe_line_written_at_debug_level() -> anyhow::Result<()> {
     let (with_file, with_stderr) =
         run_first_frame_scenario(Some(Message::RequestVersion), "debug")?;
     let (without_file, without_stderr) = run_first_frame_scenario(None, "debug")?;
@@ -420,7 +412,7 @@ fn version_probe_line_written_at_debug_level() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn version_probe_line_suppressed_at_info_level() -> Result<(), Box<dyn std::error::Error>> {
+fn version_probe_line_suppressed_at_info_level() -> anyhow::Result<()> {
     let (with_file, with_stderr) = run_first_frame_scenario(Some(Message::RequestVersion), "info")?;
     let (without_file, without_stderr) = run_first_frame_scenario(None, "info")?;
     assert_eq!(
@@ -435,7 +427,7 @@ fn version_probe_line_suppressed_at_info_level() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn kill_failure_warning_written_at_warning_level() -> Result<(), Box<dyn std::error::Error>> {
+fn kill_failure_warning_written_at_warning_level() -> anyhow::Result<()> {
     let out_of_range = SignalMsg { signal: 255 };
     let kills_child = SignalMsg { signal: 15 };
     let (with_file, with_stderr) =
@@ -455,7 +447,7 @@ fn kill_failure_warning_written_at_warning_level() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn kill_failure_warning_suppressed_at_error_level() -> Result<(), Box<dyn std::error::Error>> {
+fn kill_failure_warning_suppressed_at_error_level() -> anyhow::Result<()> {
     let out_of_range = SignalMsg { signal: 255 };
     let kills_child = SignalMsg { signal: 15 };
     let (with_file, with_stderr) =
@@ -477,7 +469,7 @@ fn spawn_server(
     log_dir: &Path,
     timeout_secs: u64,
     log_level: &str,
-) -> Result<Server, Box<dyn std::error::Error>> {
+) -> anyhow::Result<Server> {
     let mut child = server_command(socket, log_dir, timeout_secs, log_level).spawn()?;
     let stderr = child.stderr.take();
     Ok(Server {
@@ -518,7 +510,7 @@ impl Server {
 
     /// Wait out `bound`, then drain the captured stderr. The bound is the
     /// test's own deadline: a server still running after it is the failure.
-    fn wait_for_exit(&mut self, bound: Duration) -> Result<ExitStatus, Box<dyn std::error::Error>> {
+    fn wait_for_exit(&mut self, bound: Duration) -> anyhow::Result<ExitStatus> {
         let deadline = Instant::now() + bound;
         loop {
             if let Some(status) = self.child.try_wait()? {
@@ -528,11 +520,10 @@ impl Server {
                 return Ok(status);
             }
             if Instant::now() >= deadline {
-                return Err(format!(
+                return Err(anyhow::anyhow!(
                     "server (pid {}) still running after {bound:?}",
                     self.child.id()
-                )
-                .into());
+                ));
             }
             sleep(Duration::from_millis(20));
         }
@@ -569,7 +560,7 @@ struct Connection {
 }
 
 impl Connection {
-    fn send(&mut self, message: Message) -> Result<(), Box<dyn std::error::Error>> {
+    fn send(&mut self, message: Message) -> anyhow::Result<()> {
         let mut codec = FrameCodec;
         let mut bytes = BytesMut::new();
         codec.encode(message.into_frame()?, &mut bytes)?;
@@ -577,7 +568,7 @@ impl Connection {
         Ok(())
     }
 
-    fn recv(&mut self) -> Result<Option<Message>, Box<dyn std::error::Error>> {
+    fn recv(&mut self) -> anyhow::Result<Option<Message>> {
         let mut codec = FrameCodec;
         let mut chunk = [0u8; 4096];
         loop {
@@ -591,7 +582,9 @@ impl Connection {
                     if err.kind() == std::io::ErrorKind::WouldBlock
                         || err.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    return Err("timed out waiting for a frame from the server".into());
+                    return Err(anyhow::anyhow!(
+                        "timed out waiting for a frame from the server"
+                    ));
                 }
                 Err(err) => return Err(err.into()),
             }
@@ -599,7 +592,7 @@ impl Connection {
     }
 }
 
-fn connect(socket: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
+fn connect(socket: &Path) -> anyhow::Result<Connection> {
     let stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -620,15 +613,13 @@ fn exec_request(script: &str, cwd: &Path) -> Message {
 
 /// Frames before the connection's one terminal frame, plus that frame
 /// (spec/protocol.md § Connection lifecycle).
-fn recv_until_terminal(
-    conn: &mut Connection,
-) -> Result<(Vec<Message>, Message), Box<dyn std::error::Error>> {
+fn recv_until_terminal(conn: &mut Connection) -> anyhow::Result<(Vec<Message>, Message)> {
     let mut before = Vec::new();
     loop {
         let Some(message) = conn.recv()? else {
-            return Err(
-                format!("connection closed without a terminal frame; saw {before:?}").into(),
-            );
+            return Err(anyhow::anyhow!(
+                "connection closed without a terminal frame; saw {before:?}"
+            ));
         };
         if matches!(message, Message::Exit(_) | Message::Error(_)) {
             return Ok((before, message));
@@ -637,7 +628,7 @@ fn recv_until_terminal(
     }
 }
 
-fn recv_until_eof(conn: &mut Connection) -> Result<Vec<Message>, Box<dyn std::error::Error>> {
+fn recv_until_eof(conn: &mut Connection) -> anyhow::Result<Vec<Message>> {
     let mut frames = Vec::new();
     while let Some(message) = conn.recv()? {
         frames.push(message);
@@ -648,10 +639,12 @@ fn recv_until_eof(conn: &mut Connection) -> Result<Vec<Message>, Box<dyn std::er
 /// Read the fixture child's `echo up` ping: its arrival proves the child
 /// process is running — and any trap armed — before the test signals the
 /// server, whose shutdown TERMs the group at once.
-fn wait_for_child_up(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_for_child_up(conn: &mut Connection) -> anyhow::Result<()> {
     match conn.recv()? {
         Some(Message::Stdout(_)) => Ok(()),
-        other => Err(format!("expected the child's startup ping, got {other:?}").into()),
+        other => Err(anyhow::anyhow!(
+            "expected the child's startup ping, got {other:?}"
+        )),
     }
 }
 
@@ -659,11 +652,13 @@ fn wait_for_child_up(conn: &mut Connection) -> Result<(), Box<dyn std::error::Er
 /// drain grace. It echoes `$$` only after arming the trap, so the pid
 /// arriving on stdout proves the child the server may leave behind; the
 /// caller kills that group when done.
-fn hang_child(conn: &mut Connection, cwd: &Path) -> Result<u32, Box<dyn std::error::Error>> {
+fn hang_child(conn: &mut Connection, cwd: &Path) -> anyhow::Result<u32> {
     conn.send(exec_request("trap '' TERM; echo $$; exec sleep 8", cwd))?;
     let frame = conn.recv()?;
     let Some(Message::Stdout(bytes)) = frame else {
-        return Err(format!("expected the child pid on stdout, got {frame:?}").into());
+        return Err(anyhow::anyhow!(
+            "expected the child pid on stdout, got {frame:?}"
+        ));
     };
     Ok(String::from_utf8(bytes)?.trim().parse()?)
 }
@@ -684,7 +679,7 @@ fn wait_for_path(path: &Path, bound: Duration) {
 
 /// Poll a version probe until the Server answers; the same call shows a
 /// running owner still serving after a refused second Server.
-fn wait_until_serving(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_until_serving(socket: &Path) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let err = match version_probe(socket) {
@@ -692,22 +687,21 @@ fn wait_until_serving(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
             Err(err) => err,
         };
         if Instant::now() >= deadline {
-            return Err(format!(
+            return Err(anyhow::anyhow!(
                 "server at {} never served a version probe: {err}",
                 socket.display()
-            )
-            .into());
+            ));
         }
         sleep(Duration::from_millis(10));
     }
 }
 
-fn version_probe(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn version_probe(socket: &Path) -> anyhow::Result<()> {
     let mut conn = connect(socket)?;
     conn.send(Message::RequestVersion)?;
     match conn.recv()? {
         Some(Message::ServerVersion(_)) => Ok(()),
-        other => Err(format!("version probe got {other:?}").into()),
+        other => Err(anyhow::anyhow!("version probe got {other:?}")),
     }
 }
 
@@ -719,7 +713,7 @@ fn version_probe(socket: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn run_first_frame_scenario(
     first_frame: Option<Message>,
     log_level: &str,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+) -> anyhow::Result<(usize, usize)> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -747,10 +741,7 @@ fn run_first_frame_scenario(
 /// terminal frame. The last signal must kill the child: its terminal frame
 /// syncs the run, so any earlier warning line is already written before
 /// the returned (file, stderr) line counts are read.
-fn run_signal_scenario(
-    signals: &[SignalMsg],
-    log_level: &str,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+fn run_signal_scenario(signals: &[SignalMsg], log_level: &str) -> anyhow::Result<(usize, usize)> {
     let dir = tempdir()?;
     let socket = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -770,20 +761,17 @@ fn run_signal_scenario(
     count_lines(&log_dir, &server)
 }
 
-fn count_lines(
-    log_dir: &Path,
-    server: &Server,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+fn count_lines(log_dir: &Path, server: &Server) -> anyhow::Result<(usize, usize)> {
     Ok((
         all_log_lines(log_dir)?.len(),
         server.stderr_text().lines().count(),
     ))
 }
 
-fn dir_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn dir_entries(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .map(|entry| Ok(entry?.path()))
-        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+        .collect::<anyhow::Result<_>>()?;
     entries.sort();
     Ok(entries)
 }
@@ -801,14 +789,14 @@ fn is_server_log_name(path: &Path) -> bool {
     !stamp.is_empty() && stamp.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn read_lines(path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn read_lines(path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(std::fs::read_to_string(path)?
         .lines()
         .map(str::to_string)
         .collect())
 }
 
-fn all_log_lines(log_dir: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn all_log_lines(log_dir: &Path) -> anyhow::Result<Vec<String>> {
     let mut lines = Vec::new();
     for file in dir_entries(log_dir)? {
         lines.extend(read_lines(&file)?);

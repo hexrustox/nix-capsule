@@ -932,11 +932,7 @@ mod tests {
     #[test_case("a-$A-b", &[("A", "")], "a--b" ; "empty_value_is_empty_not_error")]
     #[test_case("a-${A}-b", &[("A", "")], "a--b" ; "braced_empty_value_is_empty_not_error")]
     #[test_case("-v $A:/mnt", &[("A", "/tmp/foo bar")], "-v /tmp/foo bar:/mnt" ; "space_value_stays_one_arg")]
-    fn expands_set_vars(
-        template: &str,
-        env: &[(&str, &str)],
-        want: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn expands_set_vars(template: &str, env: &[(&str, &str)], want: &str) -> anyhow::Result<()> {
         let out = expand_with(template, &lookup_of(env))?;
         assert_eq!(out, want, "template={template}");
         Ok(())
@@ -973,7 +969,7 @@ mod tests {
 
     #[test_case("newest run line\n" ; "whole_file_prints_bytes_for_bytes")]
     #[test_case(""; "empty_file_still_prints_whole")]
-    fn prints_the_log_file_whole(body: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn prints_the_log_file_whole(body: &str) -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let log_file = dir.path().join("ncap-server-999.log");
         fs::write(&log_file, body)?;
@@ -1070,7 +1066,7 @@ mod tests {
         start: usize,
         end: usize,
         new_bytes: Option<&[u8]>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let log_file = dir.path().join("ncap-server-999.log");
         fs::write(&log_file, body)?;
@@ -1102,8 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn an_announce_names_the_file_with_the_pinned_shape() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn an_announce_names_the_file_with_the_pinned_shape() -> anyhow::Result<()> {
         let log_file = std::path::PathBuf::from("ncap-server-1729512345678.log");
         let mut sink: Vec<u8> = Vec::new();
         announce_attach(&log_file, &mut sink)?;
@@ -1116,8 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_generation_link_is_removed_itself_not_its_target()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn a_symlinked_generation_link_is_removed_itself_not_its_target() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let target = dir.path().join("profile-1");
         fs::write(&target, b"env dump")?;
@@ -1135,8 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn a_generation_link_that_is_a_real_directory_is_removed_recursively()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn a_generation_link_that_is_a_real_directory_is_removed_recursively() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let real_dir = dir.path().join("profile-1-link");
         fs::create_dir_all(real_dir.join("gen"))?;
@@ -1150,8 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn names_that_are_not_generation_links_survive_the_cleanup()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn names_that_are_not_generation_links_survive_the_cleanup() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         for name in ["profile-x-link", "profile--link", "profile-1", "unrelated"] {
             fs::write(dir.path().join(name), b"keep")?;

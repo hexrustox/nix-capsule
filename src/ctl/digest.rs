@@ -104,8 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_watch_list_is_the_empty_input_xxhash64_vector()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn empty_watch_list_is_the_empty_input_xxhash64_vector() -> anyhow::Result<()> {
         let root = tempdir()?;
         let digest = compute(root.path(), &[])?;
         assert_eq!(digest, "ef46db3751d8e999");
@@ -113,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_is_independent_of_entry_order() -> Result<(), Box<dyn std::error::Error>> {
+    fn digest_is_independent_of_entry_order() -> anyhow::Result<()> {
         let root = tempdir()?;
         write(&root.path().join("a.txt"), b"alpha")?;
         write(&root.path().join("b.txt"), b"beta")?;
@@ -124,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn content_change_flips_digest() -> Result<(), Box<dyn std::error::Error>> {
+    fn content_change_flips_digest() -> anyhow::Result<()> {
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"before")?;
         let before = compute(root.path(), &entries(&["w.txt"]))?;
@@ -135,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn appearing_or_disappearing_file_flips_digest() -> Result<(), Box<dyn std::error::Error>> {
+    fn appearing_or_disappearing_file_flips_digest() -> anyhow::Result<()> {
         let root = tempdir()?;
         let absent = compute(root.path(), &entries(&["w.txt"]))?;
         write(&root.path().join("w.txt"), b"")?;
@@ -145,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn mtime_only_touch_keeps_digest() -> Result<(), Box<dyn std::error::Error>> {
+    fn mtime_only_touch_keeps_digest() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("w.txt");
         write(&path, b"same")?;
@@ -157,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_entries_hash_under_their_relative_path() -> Result<(), Box<dyn std::error::Error>> {
+    fn nested_entries_hash_under_their_relative_path() -> anyhow::Result<()> {
         let root = tempdir()?;
         write(&root.path().join("dir/w.txt"), b"same")?;
         let flat = compute(root.path(), &entries(&["dir/w.txt"]))?;
@@ -168,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_is_lowercase_hex_without_a_newline() -> Result<(), Box<dyn std::error::Error>> {
+    fn digest_is_lowercase_hex_without_a_newline() -> anyhow::Result<()> {
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"contents")?;
         let digest = compute(root.path(), &entries(&["w.txt"]))?;
@@ -183,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_is_missing_without_an_env_dump() -> Result<(), Box<dyn std::error::Error>> {
+    fn freshness_is_missing_without_an_env_dump() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"x")?;
@@ -197,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn no_hash_file_yet_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+    fn no_hash_file_yet_is_stale() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"x")?;
@@ -211,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_hash_of_unchanged_files_is_fresh() -> Result<(), Box<dyn std::error::Error>> {
+    fn stored_hash_of_unchanged_files_is_fresh() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"x")?;
@@ -226,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_hash_of_changed_files_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+    fn stored_hash_of_changed_files_is_stale() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"x")?;
@@ -242,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_with_an_unreadable_hash_file_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+    fn freshness_with_an_unreadable_hash_file_is_stale() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"x")?;
@@ -257,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_hash_has_no_trailing_newline() -> Result<(), Box<dyn std::error::Error>> {
+    fn stored_hash_has_no_trailing_newline() -> anyhow::Result<()> {
         let cache = tempdir()?;
         store(cache.path(), "0123456789abcdef")?;
         let raw = fs::read(hash_file(cache.path()))?;
@@ -266,8 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_tolerates_a_trailing_newline_in_the_cached_hash()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn freshness_tolerates_a_trailing_newline_in_the_cached_hash() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         write(&root.path().join("w.txt"), b"x")?;
@@ -283,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn computed_error_reads_stale_never_fresh() -> Result<(), Box<dyn std::error::Error>> {
+    fn computed_error_reads_stale_never_fresh() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = tempdir()?;
         // A directory at a watched path makes `of()` fail with a

@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,8 +13,7 @@ use tokio_util::codec::Framed;
 use nix_capsule::protocol::{Exit, FrameCodec, Message, Request};
 
 #[tokio::test]
-async fn drops_a_client_that_leaves_before_its_first_frame_silently() -> Result<(), Box<dyn Error>>
-{
+async fn drops_a_client_that_leaves_before_its_first_frame_silently() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = UnixStream::connect(server.socket()).await?;
     // A write-half close is what a vanished Client leaves on the Server's read
@@ -23,7 +21,9 @@ async fn drops_a_client_that_leaves_before_its_first_frame_silently() -> Result<
     conn.shutdown().await?;
     let mut buf = [0u8; 64];
     let read = timeout(Duration::from_secs(5), conn.read(&mut buf)).await;
-    let n = read.map_err(|_| "the Server held the Connection open instead of dropping it")??;
+    let n = read.map_err(|_| {
+        anyhow::anyhow!("the Server held the Connection open instead of dropping it")
+    })??;
     assert_eq!(
         n, 0,
         "expected the Server to send nothing before dropping the Connection, read {n} bytes"
@@ -32,7 +32,7 @@ async fn drops_a_client_that_leaves_before_its_first_frame_silently() -> Result<
 }
 
 #[tokio::test]
-async fn treats_an_empty_stdin_frame_as_stdin_eof_not_a_disconnect() -> Result<(), Box<dyn Error>> {
+async fn treats_an_empty_stdin_frame_as_stdin_eof_not_a_disconnect() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     conn.send(sh_request(server.dir(), "cat; exit 5").into_frame()?)
@@ -50,8 +50,7 @@ async fn treats_an_empty_stdin_frame_as_stdin_eof_not_a_disconnect() -> Result<(
 }
 
 #[tokio::test]
-async fn treats_a_client_write_half_close_as_stdin_eof_not_a_disconnect()
--> Result<(), Box<dyn Error>> {
+async fn treats_a_client_write_half_close_as_stdin_eof_not_a_disconnect() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     conn.send(sh_request(server.dir(), "cat; exit 5").into_frame()?)
@@ -69,7 +68,7 @@ async fn treats_a_client_write_half_close_as_stdin_eof_not_a_disconnect()
 }
 
 #[tokio::test]
-async fn runs_a_silent_child_of_a_vanished_client_to_completion() -> Result<(), Box<dyn Error>> {
+async fn runs_a_silent_child_of_a_vanished_client_to_completion() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     let dir = server.dir();
@@ -89,8 +88,7 @@ async fn runs_a_silent_child_of_a_vanished_client_to_completion() -> Result<(), 
 }
 
 #[tokio::test]
-async fn terms_the_child_process_group_when_the_client_vanishes_mid_bridge()
--> Result<(), Box<dyn Error>> {
+async fn terms_the_child_process_group_when_the_client_vanishes_mid_bridge() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     let dir = server.dir();
@@ -118,7 +116,7 @@ async fn terms_the_child_process_group_when_the_client_vanishes_mid_bridge()
 }
 
 #[tokio::test]
-async fn reaps_the_child_after_a_disconnect_term() -> Result<(), Box<dyn Error>> {
+async fn reaps_the_child_after_a_disconnect_term() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     let dir = server.dir();
@@ -144,7 +142,7 @@ async fn reaps_the_child_after_a_disconnect_term() -> Result<(), Box<dyn Error>>
 }
 
 #[tokio::test]
-async fn honors_the_child_term_grace_instead_of_killing_it() -> Result<(), Box<dyn Error>> {
+async fn honors_the_child_term_grace_instead_of_killing_it() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     let dir = server.dir();
@@ -174,7 +172,7 @@ async fn honors_the_child_term_grace_instead_of_killing_it() -> Result<(), Box<d
 async fn sends_a_terminal_error_then_terms_the_child_on_a_mid_bridge_frame_the_protocol_rejects(
     tag: u8,
     payload: &'static [u8],
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut conn = server.connect().await?;
     let dir = server.dir();
@@ -198,7 +196,9 @@ async fn sends_a_terminal_error_then_terms_the_child_on_a_mid_bridge_frame_the_p
     assert!(matches!(&msg, Message::Error(_)), "got {msg:?}");
     let after = timeout(Duration::from_secs(5), conn.next())
         .await
-        .map_err(|_| "the Server held the Connection open after the terminal Error")?;
+        .map_err(|_| {
+            anyhow::anyhow!("the Server held the Connection open after the terminal Error")
+        })?;
     assert!(
         after.is_none(),
         "expected the Error to be terminal, got {after:?}"
@@ -209,7 +209,7 @@ async fn sends_a_terminal_error_then_terms_the_child_on_a_mid_bridge_frame_the_p
 }
 
 #[tokio::test]
-async fn keeps_serving_other_connections_during_a_disconnect() -> Result<(), Box<dyn Error>> {
+async fn keeps_serving_other_connections_during_a_disconnect() -> anyhow::Result<()> {
     let server = Server::start().await?;
     let mut vanishing = server.connect().await?;
     let dir = server.dir();
@@ -240,7 +240,7 @@ async fn keeps_serving_other_connections_during_a_disconnect() -> Result<(), Box
 }
 
 #[tokio::test]
-async fn exits_143_when_the_socket_closes_without_a_terminal_frame() -> Result<(), Box<dyn Error>> {
+async fn exits_143_when_the_socket_closes_without_a_terminal_frame() -> anyhow::Result<()> {
     let mut server = Server::start().await?;
     let dir = server.dir();
     let pidfile = dir.join("child.pid");
@@ -280,7 +280,7 @@ struct Server {
 }
 
 impl Server {
-    async fn start() -> Result<Server, Box<dyn Error>> {
+    async fn start() -> anyhow::Result<Server> {
         let dir = tempfile::tempdir()?;
         let socket = dir.path().join("ncap.sock");
         let log_dir = dir.path().join("logs");
@@ -299,7 +299,7 @@ impl Server {
             match UnixStream::connect(&socket).await {
                 Ok(_) => break,
                 Err(err) if Instant::now() >= deadline => {
-                    return Err(format!("the Server socket never came up: {err}").into());
+                    return Err(anyhow::anyhow!("the Server socket never came up: {err}"));
                 }
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
             }
@@ -307,7 +307,7 @@ impl Server {
         Ok(Server { child, socket, dir })
     }
 
-    async fn connect(&self) -> Result<Conn, Box<dyn Error>> {
+    async fn connect(&self) -> anyhow::Result<Conn> {
         Ok(Framed::new(
             UnixStream::connect(&self.socket).await?,
             FrameCodec,
@@ -322,7 +322,7 @@ impl Server {
         &self.socket
     }
 
-    fn kill(&mut self) -> Result<(), Box<dyn Error>> {
+    fn kill(&mut self) -> anyhow::Result<()> {
         Ok(self.child.kill()?)
     }
 }
@@ -354,11 +354,11 @@ fn sh_request(dir: &Path, script: &str) -> Message {
     })
 }
 
-async fn recv(conn: &mut Conn) -> Result<Message, Box<dyn Error>> {
+async fn recv(conn: &mut Conn) -> anyhow::Result<Message> {
     let next = timeout(Duration::from_secs(5), conn.next()).await;
     let frame = next
-        .map_err(|_| "timed out waiting for a frame from the Server")?
-        .ok_or("the Server closed the Connection without a frame")??;
+        .map_err(|_| anyhow::anyhow!("timed out waiting for a frame from the Server"))?
+        .ok_or_else(|| anyhow::anyhow!("the Server closed the Connection without a frame"))??;
     Ok(Message::from_frame(frame)?)
 }
 
@@ -369,18 +369,18 @@ fn raw_frame(tag: u8, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn read_pid(path: &Path) -> Result<i32, Box<dyn Error>> {
+fn read_pid(path: &Path) -> anyhow::Result<i32> {
     Ok(fs::read_to_string(path)?.trim().parse()?)
 }
 
-async fn wait_for(what: &str, mut done: impl FnMut() -> bool) -> Result<(), Box<dyn Error>> {
+async fn wait_for(what: &str, mut done: impl FnMut() -> bool) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if done() {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("timed out waiting for {what}").into());
+            return Err(anyhow::anyhow!("timed out waiting for {what}"));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

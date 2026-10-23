@@ -63,7 +63,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn absent_stamp_is_written() -> Result<(), Box<dyn std::error::Error>> {
+    fn absent_stamp_is_written() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = Path::new("/tmp/my-root");
         guard(cache.path(), "proj", root)?;
@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_same_root_on_second_guard() -> Result<(), Box<dyn std::error::Error>> {
+    fn accepts_same_root_on_second_guard() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let root = Path::new("/tmp/my-root");
         guard(cache.path(), "proj", root)?;
@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn different_root_is_a_hard_error() -> Result<(), Box<dyn std::error::Error>> {
+    fn different_root_is_a_hard_error() -> anyhow::Result<()> {
         let cache = tempdir()?;
         guard(cache.path(), "proj", Path::new("/tmp/root-a"))?;
         let err = guard(cache.path(), "proj", Path::new("/tmp/root-b")).expect_err("must error");
@@ -97,8 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_with_trailing_newlines_matches_the_bare_root()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn a_stamp_with_trailing_newlines_matches_the_bare_root() -> anyhow::Result<()> {
         let cache = tempdir()?;
         fs::write(project_stamp_file(cache.path()), "/tmp/my-root\r\n")?;
         guard(cache.path(), "proj", Path::new("/tmp/my-root"))?;
@@ -106,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_cache_dir_is_created_before_writing() -> Result<(), Box<dyn std::error::Error>> {
+    fn absent_cache_dir_is_created_before_writing() -> anyhow::Result<()> {
         let cache = tempdir()?;
         let nested = cache.path().join("cache");
         guard(&nested, "proj", Path::new("/tmp/my-root"))?;
@@ -116,8 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_failure_other_than_absence_is_an_fs_error() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn a_read_failure_other_than_absence_is_an_fs_error() -> anyhow::Result<()> {
         let cache = tempdir()?;
         fs::create_dir(project_stamp_file(cache.path()))?;
         let err = guard(cache.path(), "proj", Path::new("/tmp/my-root")).expect_err("must error");

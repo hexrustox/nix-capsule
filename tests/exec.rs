@@ -17,7 +17,7 @@ use tempfile::tempdir;
 use test_case::test_case;
 
 #[test]
-fn fails_when_no_socket_is_configured() -> TestResult {
+fn fails_when_no_socket_is_configured() -> anyhow::Result<()> {
     let mut child = ncap().args(["printf", "hi"]).spawn()?;
     let (status, _, _) = finish(&mut child)?;
     assert!(
@@ -28,7 +28,7 @@ fn fails_when_no_socket_is_configured() -> TestResult {
 }
 
 #[test]
-fn reads_the_socket_path_from_the_environment() -> TestResult {
+fn reads_the_socket_path_from_the_environment() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -47,7 +47,7 @@ fn reads_the_socket_path_from_the_environment() -> TestResult {
 }
 
 #[test]
-fn exits_1_hinting_the_socket_and_init_when_connect_fails() -> TestResult {
+fn exits_1_hinting_the_socket_and_init_when_connect_fails() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let mut child = ncap()
@@ -69,7 +69,7 @@ fn exits_1_hinting_the_socket_and_init_when_connect_fails() -> TestResult {
 }
 
 #[test]
-fn rejects_an_empty_command_before_building_a_request() -> TestResult {
+fn rejects_an_empty_command_before_building_a_request() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -81,7 +81,7 @@ fn rejects_an_empty_command_before_building_a_request() -> TestResult {
 }
 
 #[test]
-fn fails_locally_on_an_unresolvable_current_directory() -> TestResult {
+fn fails_locally_on_an_unresolvable_current_directory() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -105,7 +105,7 @@ fn fails_locally_on_an_unresolvable_current_directory() -> TestResult {
 }
 
 #[test]
-fn opens_the_exec_connection_with_a_request_carrying_the_invocation() -> TestResult {
+fn opens_the_exec_connection_with_a_request_carrying_the_invocation() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let workdir = tempdir()?;
@@ -133,7 +133,7 @@ fn opens_the_exec_connection_with_a_request_carrying_the_invocation() -> TestRes
 }
 
 #[test]
-fn passes_the_cwd_flag_through_to_the_request() -> TestResult {
+fn passes_the_cwd_flag_through_to_the_request() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let workdir = tempdir()?;
@@ -158,7 +158,7 @@ fn passes_the_cwd_flag_through_to_the_request() -> TestResult {
 }
 
 #[test]
-fn accepts_the_short_flag_forms_for_socket_env_and_cwd() -> TestResult {
+fn accepts_the_short_flag_forms_for_socket_env_and_cwd() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let workdir = tempdir()?;
@@ -186,7 +186,7 @@ fn accepts_the_short_flag_forms_for_socket_env_and_cwd() -> TestResult {
 }
 
 #[test]
-fn passes_args_after_the_separator_verbatim() -> TestResult {
+fn passes_args_after_the_separator_verbatim() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -207,7 +207,7 @@ fn passes_args_after_the_separator_verbatim() -> TestResult {
 }
 
 #[test]
-fn converts_non_utf8_command_line_values_lossily() -> TestResult {
+fn converts_non_utf8_command_line_values_lossily() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -230,7 +230,7 @@ fn converts_non_utf8_command_line_values_lossily() -> TestResult {
 }
 
 #[test]
-fn resolves_forwarded_names_from_the_client_environment() -> TestResult {
+fn resolves_forwarded_names_from_the_client_environment() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -251,7 +251,7 @@ fn resolves_forwarded_names_from_the_client_environment() -> TestResult {
 }
 
 #[test]
-fn copies_bare_env_flags_from_the_client_environment() -> TestResult {
+fn copies_bare_env_flags_from_the_client_environment() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -275,7 +275,7 @@ fn copies_bare_env_flags_from_the_client_environment() -> TestResult {
 }
 
 #[test]
-fn passes_empty_and_equals_bearing_flag_values_verbatim() -> TestResult {
+fn passes_empty_and_equals_bearing_flag_values_verbatim() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -298,7 +298,7 @@ fn passes_empty_and_equals_bearing_flag_values_verbatim() -> TestResult {
 }
 
 #[test]
-fn lets_later_layers_win_by_key_without_moving_position() -> TestResult {
+fn lets_later_layers_win_by_key_without_moving_position() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -330,7 +330,7 @@ fn lets_later_layers_win_by_key_without_moving_position() -> TestResult {
 }
 
 #[test]
-fn lets_a_later_flag_replace_an_earlier_flag_by_key() -> TestResult {
+fn lets_a_later_flag_replace_an_earlier_flag_by_key() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -356,7 +356,7 @@ fn lets_a_later_flag_replace_an_earlier_flag_by_key() -> TestResult {
 
 #[test_case("not json at all"; "not json")]
 #[test_case(r#"["A", 7]"#; "not an array of names")]
-fn fails_locally_on_a_malformed_env_forward_list(raw: &str) -> TestResult {
+fn fails_locally_on_a_malformed_env_forward_list(raw: &str) -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -374,7 +374,7 @@ fn fails_locally_on_a_malformed_env_forward_list(raw: &str) -> TestResult {
 
 #[test_case("=VALUE"; "key is empty with a value")]
 #[test_case(""; "flag is the empty string")]
-fn fails_locally_on_an_env_flag_with_an_empty_key(flag_value: &str) -> TestResult {
+fn fails_locally_on_an_env_flag_with_an_empty_key(flag_value: &str) -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -392,7 +392,7 @@ fn fails_locally_on_an_env_flag_with_an_empty_key(flag_value: &str) -> TestResul
 }
 
 #[test]
-fn pumps_stdin_frames_until_host_stdin_eof() -> TestResult {
+fn pumps_stdin_frames_until_host_stdin_eof() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -417,7 +417,7 @@ fn pumps_stdin_frames_until_host_stdin_eof() -> TestResult {
 }
 
 #[test]
-fn sends_a_lone_empty_stdin_frame_when_stdin_is_immediately_eof() -> TestResult {
+fn sends_a_lone_empty_stdin_frame_when_stdin_is_immediately_eof() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -440,7 +440,7 @@ fn sends_a_lone_empty_stdin_frame_when_stdin_is_immediately_eof() -> TestResult 
 }
 
 #[test]
-fn chunks_large_stdin_across_multiple_frames() -> TestResult {
+fn chunks_large_stdin_across_multiple_frames() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let payload = "0123456789abcdef".repeat(6 * 1024).into_bytes();
@@ -472,7 +472,7 @@ fn chunks_large_stdin_across_multiple_frames() -> TestResult {
 }
 
 #[test]
-fn treats_a_host_stdin_read_error_as_eof() -> TestResult {
+fn treats_a_host_stdin_read_error_as_eof() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     // a directory fd makes the client's stdin read fail with EISDIR, the read
@@ -498,7 +498,7 @@ fn treats_a_host_stdin_read_error_as_eof() -> TestResult {
 }
 
 #[test]
-fn keeps_the_child_exit_code_when_the_child_finishes_before_stdin_eof() -> TestResult {
+fn keeps_the_child_exit_code_when_the_child_finishes_before_stdin_eof() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -516,7 +516,7 @@ fn keeps_the_child_exit_code_when_the_child_finishes_before_stdin_eof() -> TestR
 }
 
 #[test]
-fn streams_child_stdout_and_stderr_to_the_terminal() -> TestResult {
+fn streams_child_stdout_and_stderr_to_the_terminal() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -537,7 +537,7 @@ fn streams_child_stdout_and_stderr_to_the_terminal() -> TestResult {
 }
 
 #[test]
-fn reassembles_chunked_output_frames_per_stream_in_order() -> TestResult {
+fn reassembles_chunked_output_frames_per_stream_in_order() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -562,7 +562,7 @@ fn reassembles_chunked_output_frames_per_stream_in_order() -> TestResult {
 }
 
 #[test]
-fn exits_with_the_child_code_carried_by_the_exit_frame() -> TestResult {
+fn exits_with_the_child_code_carried_by_the_exit_frame() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -578,7 +578,7 @@ fn exits_with_the_child_code_carried_by_the_exit_frame() -> TestResult {
 }
 
 #[test]
-fn exits_with_128_plus_the_child_signal() -> TestResult {
+fn exits_with_128_plus_the_child_signal() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -595,7 +595,7 @@ fn exits_with_128_plus_the_child_signal() -> TestResult {
 
 #[test_case(127; "code 127")]
 #[test_case(126; "code 126")]
-fn exits_the_spawn_failure_codes_with_a_stderr_notice(code: u8) -> TestResult {
+fn exits_the_spawn_failure_codes_with_a_stderr_notice(code: u8) -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let payload = format!(r#"{{"code":{code}}}"#);
@@ -616,7 +616,7 @@ fn exits_the_spawn_failure_codes_with_a_stderr_notice(code: u8) -> TestResult {
 }
 
 #[test]
-fn exits_1_with_a_notice_when_the_exit_frame_carries_no_fields() -> TestResult {
+fn exits_1_with_a_notice_when_the_exit_frame_carries_no_fields() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -635,7 +635,7 @@ fn exits_1_with_a_notice_when_the_exit_frame_carries_no_fields() -> TestResult {
 }
 
 #[test]
-fn exits_1_naming_the_cause_when_the_terminal_frame_is_error() -> TestResult {
+fn exits_1_naming_the_cause_when_the_terminal_frame_is_error() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -657,7 +657,10 @@ fn exits_1_naming_the_cause_when_the_terminal_frame_is_error() -> TestResult {
 #[test_case(EXIT, br#"{"code":1,"signal":9}"#; "exit frame with both code and signal set")]
 #[test_case(EXIT, b"not-json"; "exit payload that is not json")]
 #[test_case(SERVER_STOPPING, b"unexpected"; "server stopping frame with a non-empty payload")]
-fn exits_1_on_terminal_frames_the_protocol_rejects(tag: u8, payload: &'static [u8]) -> TestResult {
+fn exits_1_on_terminal_frames_the_protocol_rejects(
+    tag: u8,
+    payload: &'static [u8],
+) -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, move |mut wire| {
@@ -673,7 +676,7 @@ fn exits_1_on_terminal_frames_the_protocol_rejects(tag: u8, payload: &'static [u
 }
 
 #[test]
-fn exits_1_on_a_frame_declaring_more_than_the_payload_cap() -> TestResult {
+fn exits_1_on_a_frame_declaring_more_than_the_payload_cap() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -691,7 +694,7 @@ fn exits_1_on_a_frame_declaring_more_than_the_payload_cap() -> TestResult {
 }
 
 #[test]
-fn exits_1_on_an_unknown_tag_byte() -> TestResult {
+fn exits_1_on_an_unknown_tag_byte() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -708,7 +711,7 @@ fn exits_1_on_an_unknown_tag_byte() -> TestResult {
 }
 
 #[test]
-fn ignores_the_reserved_tag_byte_wherever_it_arrives() -> TestResult {
+fn ignores_the_reserved_tag_byte_wherever_it_arrives() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -731,7 +734,7 @@ fn ignores_the_reserved_tag_byte_wherever_it_arrives() -> TestResult {
 }
 
 #[test]
-fn ignores_misdirected_frames_from_the_server() -> TestResult {
+fn ignores_misdirected_frames_from_the_server() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -752,7 +755,7 @@ fn ignores_misdirected_frames_from_the_server() -> TestResult {
 }
 
 #[test]
-fn bails_with_143_and_stops_streaming_on_server_stopping() -> TestResult {
+fn bails_with_143_and_stops_streaming_on_server_stopping() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -775,7 +778,7 @@ fn bails_with_143_and_stops_streaming_on_server_stopping() -> TestResult {
 }
 
 #[test]
-fn exits_143_when_the_socket_closes_without_a_terminal_frame() -> TestResult {
+fn exits_143_when_the_socket_closes_without_a_terminal_frame() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -789,7 +792,7 @@ fn exits_143_when_the_socket_closes_without_a_terminal_frame() -> TestResult {
 }
 
 #[test]
-fn opens_no_version_probe_connection() -> TestResult {
+fn opens_no_version_probe_connection() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -818,7 +821,7 @@ fn opens_no_version_probe_connection() -> TestResult {
 }
 
 #[test]
-fn sends_a_changed_forwarded_value_on_the_next_invocation() -> TestResult {
+fn sends_a_changed_forwarded_value_on_the_next_invocation() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let server = serve(&sock, |mut wire| {
@@ -855,7 +858,7 @@ fn sends_a_changed_forwarded_value_on_the_next_invocation() -> TestResult {
 }
 
 #[test]
-fn converts_a_non_utf8_cwd_lossily() -> TestResult {
+fn converts_a_non_utf8_cwd_lossily() -> anyhow::Result<()> {
     let holder = tempdir()?;
     let sock = holder.path().join("ncap.sock");
     let workdir = tempdir()?;
@@ -888,8 +891,6 @@ const EXIT: u8 = 0x05;
 const ERROR: u8 = 0x06;
 const SERVER_STOPPING: u8 = 0x07;
 const VERSION: u8 = 0x08;
-
-type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn ncap() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ncap"));

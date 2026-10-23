@@ -16,10 +16,7 @@ use nix_capsule::protocol::{Exit, FrameCodec, Message, Request, SignalMsg};
 #[test_case(libc::SIGINT, 2 ; "sigint_sends_one_verbatim_signal_frame")]
 #[test_case(libc::SIGTERM, 15 ; "sigterm_sends_one_verbatim_signal_frame")]
 #[tokio::test]
-async fn host_signal_sends_one_verbatim_signal_frame(
-    sig: i32,
-    signal: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn host_signal_sends_one_verbatim_signal_frame(sig: i32, signal: u8) -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -35,7 +32,7 @@ async fn host_signal_sends_one_verbatim_signal_frame(
 }
 
 #[tokio::test]
-async fn repeated_host_signals_forward_one_frame_each() -> Result<(), Box<dyn std::error::Error>> {
+async fn repeated_host_signals_forward_one_frame_each() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -59,8 +56,7 @@ async fn repeated_host_signals_forward_one_frame_each() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn relay_keeps_streaming_and_exits_with_the_childs_code()
--> Result<(), Box<dyn std::error::Error>> {
+async fn relay_keeps_streaming_and_exits_with_the_childs_code() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -85,8 +81,7 @@ async fn relay_keeps_streaming_and_exits_with_the_childs_code()
 }
 
 #[tokio::test]
-async fn relayed_signal_never_travels_as_a_terminal_frame() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn relayed_signal_never_travels_as_a_terminal_frame() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -118,7 +113,7 @@ async fn relayed_signal_never_travels_as_a_terminal_frame() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn signal_frame_send_failure_exits_1() -> Result<(), Box<dyn std::error::Error>> {
+async fn signal_frame_send_failure_exits_1() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -140,7 +135,7 @@ async fn signal_frame_send_failure_exits_1() -> Result<(), Box<dyn std::error::E
 }
 
 #[tokio::test]
-async fn sighup_kills_the_client_outright() -> Result<(), Box<dyn std::error::Error>> {
+async fn sighup_kills_the_client_outright() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -160,7 +155,7 @@ async fn sighup_kills_the_client_outright() -> Result<(), Box<dyn std::error::Er
 }
 
 #[tokio::test]
-async fn job_control_signals_are_not_relayed() -> Result<(), Box<dyn std::error::Error>> {
+async fn job_control_signals_are_not_relayed() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -187,7 +182,7 @@ async fn job_control_signals_are_not_relayed() -> Result<(), Box<dyn std::error:
 }
 
 #[tokio::test]
-async fn relay_still_flows_after_stdin_eof() -> Result<(), Box<dyn std::error::Error>> {
+async fn relay_still_flows_after_stdin_eof() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
@@ -213,7 +208,7 @@ async fn relay_still_flows_after_stdin_eof() -> Result<(), Box<dyn std::error::E
 }
 
 #[tokio::test]
-async fn host_stdin_keeps_pumping_across_host_signals() -> Result<(), Box<dyn std::error::Error>> {
+async fn host_stdin_keeps_pumping_across_host_signals() -> anyhow::Result<()> {
     struct ChildGuard(Child);
 
     impl std::ops::Deref for ChildGuard {
@@ -284,7 +279,7 @@ async fn host_stdin_keeps_pumping_across_host_signals() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn signal_number_reaches_the_child_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+async fn signal_number_reaches_the_child_verbatim() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -310,8 +305,7 @@ async fn signal_number_reaches_the_child_verbatim() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn signal_reaches_grandchildren_in_the_process_group()
--> Result<(), Box<dyn std::error::Error>> {
+async fn signal_reaches_grandchildren_in_the_process_group() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -365,8 +359,7 @@ async fn signal_reaches_grandchildren_in_the_process_group()
 }
 
 #[tokio::test]
-async fn kill_failure_logs_one_warning_and_the_connection_continues()
--> Result<(), Box<dyn std::error::Error>> {
+async fn kill_failure_logs_one_warning_and_the_connection_continues() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");
@@ -401,8 +394,7 @@ async fn kill_failure_logs_one_warning_and_the_connection_continues()
 }
 
 #[tokio::test]
-async fn signal_after_stdin_eof_still_reaches_the_child() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn signal_after_stdin_eof_still_reaches_the_child() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let log_dir = dir.path().join("logs");

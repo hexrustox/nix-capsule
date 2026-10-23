@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn detect_in_path_reports_only_executable_files() -> Result<(), Box<dyn std::error::Error>> {
+    fn detect_in_path_reports_only_executable_files() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir()?;
