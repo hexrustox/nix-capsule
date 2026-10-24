@@ -34,11 +34,11 @@ pub async fn run(
     log_dir: PathBuf,
     drain: Duration,
     log_level: LogLevel,
-) -> Result<(), ServerError> {
+) -> Result<(), StartupError> {
     let log = Arc::new(Log::start(&log_dir, log_level)?);
     log.info(&format!("server started (pid {})", std::process::id()));
     probe_socket(&socket).await?;
-    let listener = UnixListener::bind(&socket).map_err(|source| ServerError::Bind {
+    let listener = UnixListener::bind(&socket).map_err(|source| StartupError::Bind {
         socket: socket.display().to_string(),
         source,
     })?;
@@ -54,12 +54,12 @@ pub async fn run(
     ));
 
     let mut sigterm =
-        signal(SignalKind::terminate()).map_err(|source| ServerError::SignalHandler {
+        signal(SignalKind::terminate()).map_err(|source| StartupError::SignalHandler {
             signal: "SIGTERM",
             source,
         })?;
     let mut sigint =
-        signal(SignalKind::interrupt()).map_err(|source| ServerError::SignalHandler {
+        signal(SignalKind::interrupt()).map_err(|source| StartupError::SignalHandler {
             signal: "SIGINT",
             source,
         })?;
@@ -100,7 +100,7 @@ pub async fn run(
 /// signal-handler io errors are not filesystem operations and carry their
 /// context here.
 #[derive(Debug, thiserror::Error)]
-pub enum ServerError {
+pub enum StartupError {
     /// Filesystem failures shared with the ctl flows.
     #[error(transparent)]
     Fs(#[from] FsError),
@@ -212,7 +212,7 @@ impl std::str::FromStr for LogLevel {
 
 /// Failure modes that end a Connection with a terminal `Error` frame; the
 /// message rides to the Client as the frame's `message` payload. Separate
-/// from the startup `ServerError`: this enum renders on the wire, not on
+/// from the startup `StartupError`: this enum renders on the wire, not on
 /// the Server's stderr.
 #[derive(Debug, thiserror::Error)]
 enum Rejection {
@@ -242,12 +242,12 @@ enum Rejection {
 /// owned by a live server — refuse rather than disturb it. A connect failure
 /// means the file is stale (the previous server crashed) and is removed so
 /// the bind can succeed.
-async fn probe_socket(socket: &Path) -> Result<(), ServerError> {
+async fn probe_socket(socket: &Path) -> Result<(), StartupError> {
     if !socket.exists() {
         return Ok(());
     }
     match UnixStream::connect(socket).await {
-        Ok(_) => Err(ServerError::SocketInUse {
+        Ok(_) => Err(StartupError::SocketInUse {
             socket: socket.display().to_string(),
         }),
         Err(_) => {

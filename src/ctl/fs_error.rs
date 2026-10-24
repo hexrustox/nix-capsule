@@ -1,7 +1,7 @@
 //! Filesystem op error context shared by ctl flows and the Server: the failed
 //! operation and its object ride as data, the raw cause as `#[source]`.
 //! Socket and signal-handler io errors are not filesystem operations and
-//! carry their own context in `server::ServerError` instead.
+//! carry their own context in `server::StartupError` instead.
 
 use std::io;
 

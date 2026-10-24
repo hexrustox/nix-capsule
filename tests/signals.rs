@@ -56,7 +56,7 @@ async fn repeated_host_signals_forward_one_frame_each() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn relay_keeps_streaming_and_exits_with_the_childs_code() -> anyhow::Result<()> {
+async fn relay_keeps_streaming_and_exits_with_the_children_code() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let sock = dir.path().join("ncap.sock");
     let listener = UnixListener::bind(&sock)?;
